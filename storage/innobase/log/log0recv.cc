@@ -1010,6 +1010,8 @@ dberr_t recv_find_max_checkpoint(log_t &log, ulint *max_field) {
   /* Check the header page checksum. There was no
   checksum in the first redo log format (version 0). */
   log.format = mach_read_from_4(buf + LOG_HEADER_FORMAT);
+  ut_a(log_detected_format == UINT32_MAX || log.format == log_detected_format);
+  log_detected_format = log.format;
 
   if (log.format != 0 && !recv_check_log_header_checksum(buf)) {
     ib::error(ER_IB_MSG_1264) << "Invalid redo log header checksum.";
@@ -1035,6 +1037,7 @@ dberr_t recv_find_max_checkpoint(log_t &log, ulint *max_field) {
 
       ib::info(ER_IB_MSG_704, ulong{log.format});
 
+    case LOG_HEADER_FORMAT_8_0_3:
     case LOG_HEADER_FORMAT_CURRENT:
       /* The checkpoint page format is identical upto v3. */
       break;
@@ -3787,7 +3790,8 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn,
   contiguous_lsn = checkpoint_lsn;
 
   switch (log.format) {
-    case LOG_HEADER_FORMAT_CURRENT:
+    case LOG_HEADER_FORMAT_8_0_3:
+    case LOG_HEADER_FORMAT_8_0_19:
       break;
 
     case LOG_HEADER_FORMAT_5_7_9:
