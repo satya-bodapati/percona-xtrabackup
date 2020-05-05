@@ -1010,8 +1010,6 @@ dberr_t recv_find_max_checkpoint(log_t &log, ulint *max_field) {
   /* Check the header page checksum. There was no
   checksum in the first redo log format (version 0). */
   log.format = mach_read_from_4(buf + LOG_HEADER_FORMAT);
-  ut_a(log_detected_format == UINT32_MAX || log.format == log_detected_format);
-  log_detected_format = log.format;
 
   if (log.format != 0 && !recv_check_log_header_checksum(buf)) {
     ib::error(ER_IB_MSG_1264) << "Invalid redo log header checksum.";

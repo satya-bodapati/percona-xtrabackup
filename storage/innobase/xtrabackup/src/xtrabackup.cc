@@ -4656,6 +4656,9 @@ retry:
     goto error;
   }
 
+  log_format = mach_read_from_4(log_buf + LOG_HEADER_FORMAT);
+  log_detected_format = log_format;
+
   if (ut_memcmp(log_buf + LOG_HEADER_CREATOR, (byte *)"xtrabkup",
                 (sizeof "xtrabkup") - 1) != 0) {
     if (xtrabackup_incremental_dir) {
@@ -4667,8 +4670,6 @@ retry:
         "to '--prepare'.\n");
     goto skip_modify;
   }
-
-  log_format = mach_read_from_4(log_buf + LOG_HEADER_FORMAT);
 
   if (log_format < LOG_HEADER_FORMAT_8_0_1) {
     msg("xtrabackup: error: Unsupported redo log format " UINT32PF
