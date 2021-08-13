@@ -2937,7 +2937,8 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   if (xtrabackup_stream) {
     msg_ts("[%02u] %s %s\n", thread_n, action, node_path);
   } else {
-    msg_ts("[%02u] %s %s to %s\n", thread_n, action, node_path, dstfile->path);
+    //msg_ts("[%02u] %s %s to %s\n", thread_n, action, node_path, dstfile->path);
+    xb::info() << action << " " << node_path << " to " << dstfile->path;
   }
 
   /* The main copy loop */
@@ -2957,7 +2958,8 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   }
 
   /* close */
-  msg_ts("[%02u]        ...done\n", thread_n);
+//  msg_ts("[%02u]        ...done\n", thread_n);
+  xb::info() << "        ...done4";
   xb_fil_cur_close(&cursor);
   if (ds_close(dstfile)) {
     rc = TRUE;
@@ -3043,6 +3045,7 @@ static void data_copy_thread_func(data_thread_ctxt_t *ctxt) {
   */
   my_thread_init();
 
+  THD* thd = create_thd(false, false, true, 0);
   debug_sync_point("data_copy_thread_func");
 
   while ((node = datafiles_iter_next(ctxt->it)) != NULL && !*(ctxt->error)) {
@@ -3057,6 +3060,7 @@ static void data_copy_thread_func(data_thread_ctxt_t *ctxt) {
   (*ctxt->count)--;
   mutex_exit(ctxt->count_mutex);
 
+  destroy_thd(thd);
   my_thread_end();
 }
 
@@ -3834,6 +3838,8 @@ void xtrabackup_backup_func(void) {
   if (opt_dump_innodb_buffer_pool) {
     dump_innodb_buffer_pool(mysql_connection);
   }
+
+  xb::info() << "uses blah";
 
 #ifdef USE_POSIX_FADVISE
   msg("xtrabackup: uses posix_fadvise().\n");
@@ -7397,8 +7403,9 @@ static void handle_options(int argc, char **argv, int *argc_client,
     exit(ho_error);
 
   if (!param_str.str().empty()) {
-    msg("xtrabackup: recognized client arguments: %s\n",
-        param_str.str().c_str());
+    //msg("xtrabackup: recognized client arguments: %s\n",
+    //    param_str.str().c_str());
+    xb::info() << "recognized client arguments: " << param_str.str().c_str();
     param_str.clear();
   }
 
@@ -7457,6 +7464,8 @@ int main(int argc, char **argv) {
 
   orig_argc = argc;
   orig_argv = argv;
+
+  opt_log_timestamps = 1;
 
   setup_signals();
 

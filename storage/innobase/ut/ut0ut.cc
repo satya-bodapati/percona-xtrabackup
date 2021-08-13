@@ -542,23 +542,23 @@ namespace ib {
 
 #if !defined(UNIV_HOTBACKUP) && !defined(UNIV_NO_ERR_MSGS)
 
-void logger::log_event(std::string msg) {
-#if !(defined XTRABACKUP)
+void logger::log_event(std::string msg, const char* const module) {
+//#if !(defined XTRABACKUP)
   LogEvent()
       .type(LOG_TYPE_ERROR)
       .prio(m_level)
       .errcode(m_err)
-      .subsys("InnoDB")
+      .subsys(module)
       .verbatim(msg.c_str());
-#else
-  fprintf(stderr, "%s\n", msg.c_str());
-#endif
+//#else
+//  fprintf(stderr, "%s\n", msg.c_str());
+//#endif
 }
-logger::~logger() { log_event(m_oss.str()); }
+logger::~logger() { log_event(m_oss.str(), m_module); }
 
 fatal::~fatal() {
 #if !(defined XTRABACKUP)
-  log_event("[FATAL] " + m_oss.str());
+  log_event("[FATAL] " + m_oss.str(), m_module);
 #else
   fprintf(stderr, "%s\n", m_oss.str().c_str());
 #endif
@@ -567,7 +567,7 @@ fatal::~fatal() {
 
 fatal_or_error::~fatal_or_error() {
   if (m_fatal) {
-    log_event("[FATAL] " + m_oss.str());
+    log_event("[FATAL] " + m_oss.str(), m_module);
     ut_error;
   }
 }

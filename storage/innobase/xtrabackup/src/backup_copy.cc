@@ -73,6 +73,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "xtrabackup.h"
 #include "xtrabackup_config.h"
 #include "xtrabackup_version.h"
+#include "sql_thd_internal_api.h"
 #ifdef HAVE_VERSION_CHECK
 #include <version_check_pl.h>
 #endif
@@ -511,7 +512,8 @@ static bool backup_ds_print(ds_file_t *dstfile, const char *message, int len) {
     goto error;
   }
 
-  msg_ts("[%02u]        ...done\n", 0);
+  msg_ts("[%02u]        ...done1\n", 0);
+  xb::info() << "        ...done1";
   return true;
 
 error:
@@ -727,8 +729,9 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
     msg_ts("[%02u] %s %s to %s up to position %zd\n", thread_n, action,
            src_file_path, dstfile->path, pos);
   } else {
-    msg_ts("[%02u] %s %s to %s\n", thread_n, action, src_file_path,
-           dstfile->path);
+    //msg_ts("[%02u] %s %s to %s\n", thread_n, action, src_file_path,
+    //       dstfile->path);
+    xb::info() << action << " " << src_file_path << " to " << dstfile->path;
   }
 
   /* The main copy loop */
@@ -749,7 +752,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   }
 
   /* close */
-  msg_ts("[%02u]        ...done\n", thread_n);
+  msg_ts("[%02u]        ...done2\n", thread_n);
+  xb::info() << "        ...done2";
   datafile_close(&cursor);
   if (ds_close(dstfile)) {
     goto error_close;
@@ -815,7 +819,8 @@ static bool move_file(ds_ctxt_t *datasink, const char *src_file_path,
     return (false);
   }
 
-  msg_ts("[%02u]        ...done\n", thread_n);
+  msg_ts("[%02u]        ...done3\n", thread_n);
+  xb::info() << "        ...done3";
 
   return (true);
 }
@@ -978,11 +983,13 @@ static void backup_thread_func(datadir_thread_ctxt_t *ctx, bool prep_mode,
                                FILE *rsync_tmpfile) {
   bool ret = true;
   datadir_entry_t entry;
-
+  THD *thd = nullptr;
   if (my_thread_init()) {
     ret = false;
     goto cleanup;
   }
+
+  thd = create_thd(false, false, true, 0);
 
   while (ctx->queue->pop(entry)) {
     char name[FN_REFLEN];
@@ -1024,6 +1031,7 @@ static void backup_thread_func(datadir_thread_ctxt_t *ctx, bool prep_mode,
   }
 
 cleanup:
+  destroy_thd(thd);
   my_thread_end();
 
   mutex_enter(ctx->count_mutex);
@@ -1988,7 +1996,8 @@ static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
         goto cleanup;
       }
 
-      msg_ts("[%02u] ...done.\n", ctx->n_thread);
+      //msg_ts("[%02u] ...done.\n", ctx->n_thread);
+      xb::info() << "        ...done0";
       continue;
     }
 
