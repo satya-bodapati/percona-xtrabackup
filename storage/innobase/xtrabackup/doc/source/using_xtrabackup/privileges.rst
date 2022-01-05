@@ -72,6 +72,8 @@ alteration, see ``mysql --help`` for details.
    (port, socket, host) must be specified in order for |xtrabackup| to talk to
    the correct server.
 
+.. _pxb.privilege:
+
 Permissions and Privileges Needed
 ================================================================================
 
@@ -106,6 +108,10 @@ The database user needs the following privileges on the tables or databases to b
   for :ref:`xb_incremental` and for :ref:`handling FLUSH TABLES WITH READ LOCK <pxb.xtrabackup.flush-tables-with-read-lock>`,
 
 * ``CREATE`` privilege in order to create the
+  :ref:`PERCONA_SCHEMA.xtrabackup_history <xtrabackup_history>` database and
+  table,
+
+* ``ALTER`` privilege in order to upgrade the
   :ref:`PERCONA_SCHEMA.xtrabackup_history <xtrabackup_history>` database and
   table,
 

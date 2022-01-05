@@ -844,7 +844,7 @@ int ha_myisam::check(THD *thd, HA_CHECK_OPT *check_opt) {
   int error;
   MI_CHECK param;
   MYISAM_SHARE *share = file->s;
-  const char *old_proc_info = thd->proc_info;
+  const char *old_proc_info = thd->proc_info();
 
   thd_proc_info(thd, "Checking table");
   myisamchk_init(&param);
@@ -1014,7 +1014,7 @@ int ha_myisam::repair(THD *thd, MI_CHECK &param, bool do_optimize) {
   uint local_testflag = param.testflag;
   bool optimize_done = !do_optimize, statistics_done = false;
   bool has_old_locks = thd->locked_tables_mode || file->lock_type != F_UNLCK;
-  const char *old_proc_info = thd->proc_info;
+  const char *old_proc_info = thd->proc_info();
   char fixed_name[FN_REFLEN];
   MYISAM_SHARE *share = file->s;
   ha_rows rows = file->state->records;
@@ -1343,7 +1343,7 @@ int ha_myisam::enable_indexes(uint mode) {
   } else if (mode == HA_KEY_SWITCH_NONUNIQ_SAVE) {
     THD *thd = current_thd;
     MI_CHECK param;
-    const char *save_proc_info = thd->proc_info;
+    const char *save_proc_info = thd->proc_info();
     thd_proc_info(thd, "Creating index");
     myisamchk_init(&param);
     param.op_name = "recreating_index";
@@ -1600,9 +1600,8 @@ int ha_myisam::index_last(uchar *buf) {
   return error;
 }
 
-int ha_myisam::index_next_same(uchar *buf,
-                               const uchar *key MY_ATTRIBUTE((unused)),
-                               uint length MY_ATTRIBUTE((unused))) {
+int ha_myisam::index_next_same(uchar *buf, const uchar *key [[maybe_unused]],
+                               uint length [[maybe_unused]]) {
   int error;
   assert(inited == INDEX);
   ha_statistic_increment(&System_status_var::ha_read_next_count);

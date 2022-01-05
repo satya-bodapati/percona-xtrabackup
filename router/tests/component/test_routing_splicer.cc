@@ -53,7 +53,6 @@ using namespace std::chrono_literals;
 
 class SplicerTest : public RouterComponentTest {
  protected:
-  TcpPortPool port_pool_;
   TempDirectory conf_dir_;
   const std::string mock_server_host_{"127.0.0.1"s};
   const std::string router_host_{"127.0.0.1"s};
@@ -135,7 +134,7 @@ TEST_F(SplicerTest, invalid_metadata) {
     mock_server_args.push_back(arg);
   }
 
-  launch_mysql_server_mock(mock_server_args);
+  launch_mysql_server_mock(mock_server_args, server_port);
 
   SCOPED_TRACE("// start router with TLS enabled");
   auto config = mysql_harness::join(
@@ -678,7 +677,7 @@ TEST_P(SplicerConnectParamTest, check) {
       mock_server_cmdline_args.emplace_back(arg.second);
     }
   }
-  launch_mysql_server_mock(mock_server_cmdline_args);
+  launch_mysql_server_mock(mock_server_cmdline_args, server_port);
 
   const std::string destination("localhost:" + std::to_string(server_port));
 
@@ -1914,7 +1913,7 @@ TEST_P(SplicerParamTest, classic_protocol) {
     }
   }
 
-  launch_mysql_server_mock(mock_server_cmdline_args);
+  launch_mysql_server_mock(mock_server_cmdline_args, server_port);
 
   const std::string destination(mock_server_host_ + ":" +
                                 std::to_string(server_port));
@@ -1969,6 +1968,7 @@ TEST_P(SplicerParamTest, classic_protocol) {
 
     try {
       const auto row = sess.query_one("show status like 'ssl_cipher'");
+      ASSERT_TRUE(row) << "<show status like 'ssl_cipher'> returned no row";
       ASSERT_EQ(row->size(), 2);
 
       if (GetParam().expect_server_encrypted) {
@@ -2050,7 +2050,7 @@ TEST_P(SplicerParamTest, xproto) {
     }
   }
 
-  launch_mysql_server_mock(mock_server_cmdline_args);
+  launch_mysql_server_mock(mock_server_cmdline_args, server_port);
 
   const std::string destination(mock_server_host_ + ":" +
                                 std::to_string(server_port_x));
@@ -2151,7 +2151,8 @@ TEST_P(SplicerParamTest, xproto) {
       if (!result->has_resultset()) {
         FAIL() << xerr.what();
       } else {
-        const auto row = result->get_next_row();
+        const auto row = result->get_next_row(&xerr);
+        ASSERT_TRUE(row) << xerr;
         std::string field;
         ASSERT_TRUE(row->get_string(1, &field));
 

@@ -170,6 +170,13 @@ IF(MY_COMPILER_IS_GNU_OR_CLANG)
     COMPILE_FLAGS "-Wno-unused-parameter -Wno-cast-qual")
 ENDIF()
 
+# This compiler says -Werror=stringop-overflow= for:
+# memcmp(&space_id, buf.begin() + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, 4)
+IF(MY_COMPILER_IS_GNU_8)
+  ADD_COMPILE_FLAGS(innochecksum.cc COMPILE_FLAGS "-Wno-stringop-overflow")
+  MY_TARGET_LINK_OPTIONS(innochecksum "-Wno-stringop-overflow")
+ENDIF()
+
 MYSQL_ADD_EXECUTABLE(ibd2sdi
   ibd2sdi.cc
   COMPONENT Server
@@ -177,7 +184,7 @@ MYSQL_ADD_EXECUTABLE(ibd2sdi
   LINK_LIBRARIES mysys innodb_zipdecompress ${LZ4_LIBRARY}
   SKIP_INSTALL
   )
-TARGET_COMPILE_DEFINITIONS(ibd2sdi PRIVATE UNIV_NO_ERR_MSGS UNIV_LIBRARY)
+TARGET_COMPILE_DEFINITIONS(ibd2sdi PRIVATE UNIV_NO_ERR_MSGS UNIV_LIBRARY DISABLE_PSI_MEMORY)
 IF(MY_COMPILER_IS_GNU_OR_CLANG)
   ADD_COMPILE_FLAGS(ibd2sdi.cc
     COMPILE_FLAGS "-Wno-unused-parameter -Wno-cast-qual")

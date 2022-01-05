@@ -56,8 +56,8 @@
 #include "sql/rpl_constants.h"  // BINLOG_DUMP_NON_BLOCK
 #include "sql/rpl_gtid.h"
 #include "sql/rpl_handler.h"    // RUN_HOOK
-#include "sql/rpl_master.h"     // opt_sporadic_binlog_dump_fail
 #include "sql/rpl_reporting.h"  // MAX_SLAVE_ERRMSG
+#include "sql/rpl_source.h"     // opt_sporadic_binlog_dump_fail
 #include "sql/sql_class.h"      // THD
 #include "sql/system_variables.h"
 #include "sql_string.h"
@@ -223,7 +223,7 @@ class Binlog_sender::Event_allocator {
                                          event_offset);
   }
 
-  void deallocate(unsigned char *ptr MY_ATTRIBUTE((unused))) {}
+  void deallocate(unsigned char *ptr [[maybe_unused]]) {}
 
  private:
   Binlog_sender *m_sender = nullptr;
@@ -384,7 +384,7 @@ void Binlog_sender::run() {
   unsigned int max_event_size =
       std::max(m_thd->variables.max_allowed_packet,
                binlog_row_event_max_size + MAX_LOG_EVENT_HEADER);
-  File_reader reader(opt_master_verify_checksum, max_event_size);
+  File_reader reader(opt_source_verify_checksum, max_event_size);
   my_off_t start_pos = m_start_pos;
   const char *log_file = m_linfo.log_file_name;
   bool is_index_file_reopened_on_binlog_disable = false;
@@ -408,7 +408,7 @@ void Binlog_sender::run() {
       break;
     }
 
-    THD_STAGE_INFO(m_thd, stage_sending_binlog_event_to_slave);
+    THD_STAGE_INFO(m_thd, stage_sending_binlog_event_to_replica);
     if (send_binlog(&reader, start_pos)) break;
 
     /* Will go to next file, need to copy log file name */
@@ -772,7 +772,7 @@ int Binlog_sender::wait_new_events(my_off_t log_pos) {
 
   m_thd->ENTER_COND(mysql_bin_log.get_log_cond(),
                     mysql_bin_log.get_binlog_end_pos_lock(),
-                    &stage_master_has_sent_all_binlog_to_slave, &old_stage);
+                    &stage_source_has_sent_all_binlog_to_replica, &old_stage);
 
   if (m_heartbeat_period.count() > 0)
     ret = wait_with_heartbeat(log_pos);
@@ -816,15 +816,16 @@ inline int Binlog_sender::wait_without_heartbeat() {
 }
 
 void Binlog_sender::init_heartbeat_period() {
-  bool null_value;
-  LEX_CSTRING name = {STRING_WITH_LEN("master_heartbeat_period")};
-
   /* Protects m_thd->user_vars. */
   mysql_mutex_lock(&m_thd->LOCK_thd_data);
 
-  const auto it = m_thd->user_vars.find(to_string(name));
-  m_heartbeat_period = std::chrono::nanoseconds(
-      it == m_thd->user_vars.end() ? 0 : it->second->val_int(&null_value));
+  // Get user_var.
+  const auto &uv = get_user_var_from_alternatives(
+      m_thd, "source_heartbeat_period", "master_heartbeat_period");
+  // Get value of user_var.
+  bool null_value;
+  m_heartbeat_period =
+      std::chrono::nanoseconds(uv ? uv->val_int(&null_value) : 0);
 
   mysql_mutex_unlock(&m_thd->LOCK_thd_data);
 }
@@ -832,7 +833,7 @@ void Binlog_sender::init_heartbeat_period() {
 int Binlog_sender::check_start_file() {
   char index_entry_name[FN_REFLEN];
   char *name_ptr = nullptr;
-  const char *errmsg;
+  std::string errmsg;
 
   if (m_start_file[0] != '\0') {
     mysql_bin_log.make_log_name(index_entry_name, m_start_file);
@@ -870,9 +871,8 @@ int Binlog_sender::check_start_file() {
     if (!m_exclude_gtid->is_subset_for_sid(&gtid_executed_and_owned,
                                            gtid_state->get_server_sidno(),
                                            subset_sidno)) {
-      errmsg = ER_THD(m_thd, ER_SLAVE_HAS_MORE_GTIDS_THAN_MASTER);
       global_sid_lock->unlock();
-      set_fatal_error(errmsg);
+      set_fatal_error(ER_THD(m_thd, ER_SLAVE_HAS_MORE_GTIDS_THAN_MASTER));
       return 1;
     }
     /*
@@ -902,16 +902,16 @@ int Binlog_sender::check_start_file() {
       is thrown from there.
     */
     if (!gtid_state->get_lost_gtids()->is_subset(m_exclude_gtid)) {
-      mysql_bin_log.report_missing_purged_gtids(m_exclude_gtid, &errmsg);
+      mysql_bin_log.report_missing_purged_gtids(m_exclude_gtid, errmsg);
       global_sid_lock->unlock();
-      set_fatal_error(errmsg);
+      set_fatal_error(errmsg.c_str());
       return 1;
     }
     global_sid_lock->unlock();
     Gtid first_gtid = {0, 0};
     if (mysql_bin_log.find_first_log_not_in_gtid_set(
-            index_entry_name, m_exclude_gtid, &first_gtid, &errmsg)) {
-      set_fatal_error(errmsg);
+            index_entry_name, m_exclude_gtid, &first_gtid, errmsg)) {
+      set_fatal_error(errmsg.c_str());
       return 1;
     }
     name_ptr = index_entry_name;
@@ -977,10 +977,13 @@ void Binlog_sender::init_checksum_alg() {
   /* Protects m_thd->user_vars. */
   mysql_mutex_lock(&m_thd->LOCK_thd_data);
 
-  const auto it = m_thd->user_vars.find("master_binlog_checksum");
-  if (it != m_thd->user_vars.end()) {
+  // Get user_var.
+  const auto &uv = get_user_var_from_alternatives(
+      m_thd, "source_binlog_checksum", "master_binlog_checksum");
+  // Get value of user_var.
+  if (uv) {
     m_slave_checksum_alg = static_cast<enum_binlog_checksum_alg>(
-        find_type(it->second->ptr(), &binlog_checksum_typelib, 1) - 1);
+        find_type(uv->ptr(), &binlog_checksum_typelib, 1) - 1);
     assert(m_slave_checksum_alg < binary_log::BINLOG_CHECKSUM_ALG_ENUM_END);
   }
 

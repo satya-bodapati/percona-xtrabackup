@@ -109,8 +109,6 @@ class Item_str_func : public Item_func {
   Item_str_func(const POS &pos, PT_item_list *opt_list)
       : Item_func(pos, opt_list) {}
 
-  String *eval_string_arg(Item *arg, String *buffer);
-
   longlong val_int() override { return val_int_from_string(); }
   double val_real() override { return val_real_from_string(); }
   my_decimal *val_decimal(my_decimal *) override;
@@ -121,7 +119,7 @@ class Item_str_func : public Item_func {
     return get_time_from_string(ltime);
   }
   enum Item_result result_type() const override { return STRING_RESULT; }
-  void left_right_max_length();
+  void left_right_max_length(THD *thd);
   bool fix_fields(THD *thd, Item **ref) override;
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, -1)) return true;
@@ -1112,7 +1110,7 @@ class Item_func_weight_string final : public Item_str_func {
   uint flags;
   const uint num_codepoints;
   const uint result_length;
-  Field *field;
+  Item_field *m_field_ref{nullptr};
   const bool as_binary;
 
  public:
@@ -1123,7 +1121,6 @@ class Item_func_weight_string final : public Item_str_func {
         flags(flags_arg),
         num_codepoints(num_codepoints_arg),
         result_length(result_length_arg),
-        field(nullptr),
         as_binary(as_binary_arg) {}
 
   bool itemize(Parse_context *pc, Item **res) override;
@@ -1172,11 +1169,7 @@ class Item_func_compress final : public Item_str_func {
 
  public:
   Item_func_compress(const POS &pos, Item *a) : Item_str_func(pos, a) {}
-  bool resolve_type(THD *thd) override {
-    if (Item_str_func::resolve_type(thd)) return true;
-    set_data_type_string((args[0]->max_length * 120U) / 100U + 12U);
-    return false;
-  }
+  bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "compress"; }
   String *val_str(String *str) override;
 };

@@ -309,7 +309,7 @@ public:
       return RowRef::map_is_null(ptr);
     }
 
-    STATIC_CONST( MAP_SIZE_PER_REF_16 = 3 );
+    static constexpr Uint32 MAP_SIZE_PER_REF_16 = 3;
   };
 
   /**
@@ -453,7 +453,7 @@ public:
     Uint32 nextList;
     Uint32 prevList;
     Uint32 m_data[GLOBAL_PAGE_SIZE_WORDS - 7];
-    STATIC_CONST( SIZE = GLOBAL_PAGE_SIZE_WORDS - 7 );
+    static constexpr Uint32 SIZE = GLOBAL_PAGE_SIZE_WORDS - 7;
   };
   typedef ArrayPool<RowPage> RowPage_pool;
   // Use 'counted' list to keep track of GlobalSharedMemory size used.
@@ -639,6 +639,7 @@ public:
       m_fragId = fid;
       m_state = SFH_NOT_STARTED;
       m_rangePtrI = RNIL;
+      m_paramPtrI = RNIL;
       m_readBackup = readBackup;
     }
 
@@ -649,7 +650,8 @@ public:
     Uint8 m_readBackup;
     Uint32 m_ref;
     Uint32 m_next_ref;
-    Uint32 m_rangePtrI;
+    Uint32 m_rangePtrI;  // Set of lower/upper bound keys.
+    Uint32 m_paramPtrI;  // Set of interpreter parameters
     union {
       Uint32 nextList;
       Uint32 nextPool;
@@ -774,7 +776,7 @@ public:
    */
   struct TreeNode
   {
-    STATIC_CONST ( MAGIC = ~RT_SPJ_TREENODE );
+    static constexpr Uint32 MAGIC = ~RT_SPJ_TREENODE;
 
     TreeNode()
     : m_magic(MAGIC), m_state(TN_END),

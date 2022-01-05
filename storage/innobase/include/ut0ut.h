@@ -102,11 +102,7 @@ typedef int64_t ib_time_monotonic_us_t;
 instruction has important side-effects and must not be removed.
 Also asm volatile may trigger a memory barrier (spilling all registers
 to memory). */
-#ifdef __SUNPRO_CC
-#define UT_RELAX_CPU() asm("pause")
-#else
 #define UT_RELAX_CPU() __asm__ __volatile__("pause")
-#endif /* __SUNPRO_CC */
 
 #elif defined(HAVE_FAKE_PAUSE_INSTRUCTION)
 #define UT_RELAX_CPU() __asm__ __volatile__("rep; nop")
@@ -159,13 +155,23 @@ namespace ut {
 struct Location {
   const char *filename;
   size_t line;
+  std::ostream &print(std::ostream &out) const {
+    out << "[Location: file=" << filename << ", line=" << line << "]";
+    return out;
+  }
 };
 }  // namespace ut
+
+inline std::ostream &operator<<(std::ostream &out, const ut::Location &obj) {
+  return obj.print(out);
+}
 
 #define UT_LOCATION_HERE (ut::Location{__FILE__, __LINE__})
 
 #define ut_max std::max
 #define ut_min std::min
+
+#ifndef UNIV_HOTBACKUP
 
 /** Calculate the minimum of two pairs.
 @param[out]	min_hi	MSB of the minimum pair
@@ -174,16 +180,15 @@ struct Location {
 @param[in]	a_lo	LSB of the first pair
 @param[in]	b_hi	MSB of the second pair
 @param[in]	b_lo	LSB of the second pair */
-UNIV_INLINE
-void ut_pair_min(ulint *min_hi, ulint *min_lo, ulint a_hi, ulint a_lo,
-                 ulint b_hi, ulint b_lo);
+static inline void ut_pair_min(ulint *min_hi, ulint *min_lo, ulint a_hi,
+                               ulint a_lo, ulint b_hi, ulint b_lo);
+#endif /* !UNIV_HOTBACKUP */
 
 /** Compares two ulints.
 @param[in]	a	ulint
 @param[in]	b	ulint
 @return 1 if a > b, 0 if a == b, -1 if a < b */
-UNIV_INLINE
-int ut_ulint_cmp(ulint a, ulint b);
+static inline int ut_ulint_cmp(ulint a, ulint b);
 
 /** Compare two pairs of integers.
 @param[in]	a_h	more significant part of first pair
@@ -194,9 +199,8 @@ int ut_ulint_cmp(ulint a, ulint b);
 @retval -1 if (a_h,a_l) is less than (b_h,b_l)
 @retval 0 if (a_h,a_l) is equal to (b_h,b_l)
 @retval 1 if (a_h,a_l) is greater than (b_h,b_l) */
-UNIV_INLINE
-int ut_pair_cmp(ulint a_h, ulint a_l, ulint b_h, ulint b_l)
-    MY_ATTRIBUTE((warn_unused_result));
+[[nodiscard]] static inline int ut_pair_cmp(ulint a_h, ulint a_l, ulint b_h,
+                                            ulint b_l);
 
 /** Calculates fast the remainder of n/m when m is a power of two.
  @param n in: numerator
@@ -223,14 +227,12 @@ int ut_pair_cmp(ulint a_h, ulint a_l, ulint b_h, ulint b_l)
 /** Calculates fast the 2-logarithm of a number, rounded upward to an
  integer.
  @return logarithm in the base 2, rounded upward */
-UNIV_INLINE
-ulint ut_2_log(ulint n); /*!< in: number */
+static inline ulint ut_2_log(ulint n); /*!< in: number */
 
 /** Calculates 2 to power n.
 @param[in]	n	power of 2
 @return 2 to power n */
-UNIV_INLINE
-uint32_t ut_2_exp(uint32_t n);
+static inline uint32_t ut_2_exp(uint32_t n);
 
 /** Calculates fast the number rounded up to the nearest power of 2.
 @param[in]  n   number != 0
@@ -241,7 +243,7 @@ ulint ut_2_power_up(ulint n);
 store the given number of bits.
 @param b in: bits
 @return number of bytes (octets) needed to represent b */
-#define UT_BITS_IN_BYTES(b) (((b) + 7) / 8)
+#define UT_BITS_IN_BYTES(b) (((b) + 7UL) / 8UL)
 
 /** Returns system time. We do not specify the format of the time returned:
  the only way to manipulate it is to use the function ut_difftime.
@@ -724,22 +726,32 @@ immediately.  Refer to the documentation of class info for usage details. */
 class fatal : public logger {
  public:
 #ifndef UNIV_NO_ERR_MSGS
-  /** Default constructor uses ER_IB_MSG_0 */
-  fatal() : logger(ERROR_LEVEL, INNO) {}
+  /** Default constructor uses ER_IB_MSG_0
+  @param[in]	location		Location that creates the fatal message.
+*/
+  fatal(ut::Location location) : logger(ERROR_LEVEL, INNO), m_location(location) {}
 
   /** Constructor.
+  @param[in]	location		Location that creates the fatal message.
   @param[in]	err		Error code from errmsg-*.txt.
   @param[in]	args		Variable length argument list */
   template <class... Args>
-  explicit fatal(int err, Args &&... args)
-      : logger(ERROR_LEVEL, err, INNO, std::forward<Args>(args)...) {}
+  explicit fatal(ut::Location location, int err, Args &&... args)
+      : logger(ERROR_LEVEL, err, INNO, std::forward<Args>(args)...),
+        m_location(location) {}
+#else
+  /** Constructor
+  @param[in]	location		Location that creates the fatal message.
+  */
+  fatal(ut::Location location) : m_location(location) {}
+#endif /* !UNIV_NO_ERR_MSGS */
 
   /** Destructor. */
   ~fatal() override;
-#else
-  /** Destructor. */
-  ~fatal() override;
-#endif /* !UNIV_NO_ERR_MSGS */
+
+ private:
+  /** Location of the original caller to report to assertion failure */
+  ut::Location m_location;
 };
 
 /** Emit an error message if the given predicate is true, otherwise emit a
@@ -767,29 +779,36 @@ class error_or_warn : public logger {
 /** Emit a fatal message if the given predicate is true, otherwise emit a
 error message. */
 class fatal_or_error : public logger {
- public:
 #ifndef UNIV_NO_ERR_MSGS
-  /** Default constructor uses ER_IB_MSG_0
-  @param[in]	fatal		true if it's a fatal message */
-  fatal_or_error(bool fatal) : logger(ERROR_LEVEL, INNO), m_fatal(fatal) {}
-
   /** Constructor.
   @param[in]	fatal		true if it's a fatal message
+  @param[in] location Location that creates the fatal
   @param[in]	err		Error code from errmsg-*.txt.
   @param[in]	args		Variable length argument list */
   template <class... Args>
-  explicit fatal_or_error(bool fatal, int err, Args &&... args)
-      : logger(ERROR_LEVEL, err, INNO, std::forward<Args>(args)...), m_fatal(fatal) {}
+  explicit fatal_or_error(bool fatal, ut::Location location, int err,
+                          Args &&... args)
+      : logger(ERROR_LEVEL, err, INNO, std::forward<Args>(args)...),
+        m_fatal(fatal),
+        m_location(location) {}
 
   /** Destructor */
   ~fatal_or_error() override;
 #else
-  /** Constructor */
-  fatal_or_error(bool fatal) : m_fatal(fatal) {}
+  /** Constructor
+  @param[in] location Location that creates the fatal */
+  fatal_or_error(bool fatal, ut::Location location)
+      : m_fatal(fatal), m_location(location) {}
+
+  /** Destructor */
+  ~fatal_or_error() override;
+
 #endif /* !UNIV_NO_ERR_MSGS */
  private:
   /** If true then assert after printing an error message. */
   const bool m_fatal;
+  /** Location of the original caller to report to assertion failure */
+  ut::Location m_location;
 };
 
 #ifdef UNIV_HOTBACKUP
@@ -1064,6 +1083,47 @@ struct Wait_stats {
 
   bool any_waits() const { return (wait_loops != 0); }
 };
+
+namespace ib {
+
+/** Allows to monitor an event processing times, allowing to throttle the
+processing to one per THROTTLE_DELAY_SEC. */
+class Throttler {
+ public:
+  Throttler() : m_last_applied_time(0) {}
+
+  /** Checks if the item should be processed or ignored to not process them more
+  frequently than one per THROTTLE_DELAY_SEC. */
+  bool apply() {
+    const auto current_time = std::chrono::steady_clock::now();
+    const auto current_time_in_sec =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            current_time.time_since_epoch())
+            .count();
+    auto last_apply_time = m_last_applied_time.load();
+    if (last_apply_time + THROTTLE_DELAY_SEC <
+        static_cast<uint64_t>(current_time_in_sec)) {
+      if (m_last_applied_time.compare_exchange_strong(last_apply_time,
+                                                      current_time_in_sec)) {
+        return true;
+      }
+      /* Any race condition with other threads would mean someone just changed
+      the `m_last_apply_time` and will print the message. We don't want
+      to retry the operation again. */
+    }
+    return false;
+  }
+
+ private:
+  /* Time when the last item was not throttled. Stored as number of seconds
+  since epoch. */
+  std::atomic<uint64_t> m_last_applied_time;
+
+  /** Throttle all items within that amount seconds from the last non throttled
+  one. */
+  static constexpr uint64_t THROTTLE_DELAY_SEC = 10;
+};
+}  // namespace ib
 
 #include "ut0ut.ic"
 

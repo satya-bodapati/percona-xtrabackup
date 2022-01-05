@@ -98,7 +98,7 @@ class Mock_protocol : public Protocol {
   ulong get_client_capabilities() override { return 0; }
   bool has_client_capability(unsigned long) override { return false; }
   void end_partial_result_set() override {}
-  int shutdown(bool server_shutdown MY_ATTRIBUTE((unused)) = false) override {
+  int shutdown(bool server_shutdown [[maybe_unused]] = false) override {
     return 0;
   }
   SSL_handle get_ssl() { return nullptr; }
@@ -414,7 +414,7 @@ TEST_F(FieldTest, CopyFieldSet) {
   f_from->set_field_ptr(&from_fieldval);
 
   Copy_field *cf = new (thd()->mem_root) Copy_field;
-  cf->set(f_to, f_from, false);
+  cf->set(f_to, f_from);
   cf->invoke_do_copy();
 
   // Copy_field DTOR is not invoked in all contexts, so we may leak memory.

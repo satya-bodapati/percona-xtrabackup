@@ -229,7 +229,7 @@ TEST_F(ItemTest, ItemInt) {
 
   item_int->neg();
   EXPECT_EQ(-val, item_int->val_int());
-  EXPECT_EQ(precision - 1, item_int->decimal_precision());
+  EXPECT_EQ(precision, item_int->decimal_precision());
 
   // Functions inherited from parent class(es).
   const table_map tmap = 0;
@@ -486,7 +486,7 @@ TEST_F(ItemTest, ItemFuncIntDivOverflow) {
   const char divisor_str[] = "0.5";
   Item_float *dividend = new Item_float(dividend_str, sizeof(dividend_str));
   Item_float *divisor = new Item_float(divisor_str, sizeof(divisor_str));
-  Item_func_int_div *quotient = new Item_func_int_div(dividend, divisor);
+  Item_func_div_int *quotient = new Item_func_div_int(dividend, divisor);
 
   Mock_error_handler error_handler(thd(), ER_TRUNCATED_WRONG_VALUE);
   EXPECT_FALSE(quotient->fix_fields(thd(), nullptr));
@@ -500,7 +500,7 @@ TEST_F(ItemTest, ItemFuncIntDivUnderflow) {
   const char divisor_str[] = "1.7976931348623157E+308";
   Item_float *dividend = new Item_float(dividend_str, sizeof(dividend_str));
   Item_float *divisor = new Item_float(divisor_str, sizeof(divisor_str));
-  Item_func_int_div *quotient = new Item_func_int_div(dividend, divisor);
+  Item_func_div_int *quotient = new Item_func_div_int(dividend, divisor);
 
   Mock_error_handler error_handler(thd(), ER_TRUNCATED_WRONG_VALUE);
   EXPECT_FALSE(quotient->fix_fields(thd(), nullptr));

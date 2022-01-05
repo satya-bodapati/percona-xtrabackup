@@ -102,8 +102,6 @@ Handler::Handler(handlerton *hton, TABLE_SHARE *table_share_arg)
 #endif /* HAVE_WINNUMA */
 }
 
-Handler::~Handler() {}
-
 int Handler::create(const char *table_name, TABLE *mysql_table,
                     HA_CREATE_INFO *, dd::Table *) {
   DBUG_TRACE;
@@ -842,8 +840,8 @@ uint Handler::max_supported_key_length() const {
   return length;
 }
 
-uint Handler::max_supported_key_part_length(
-    HA_CREATE_INFO *create_info MY_ATTRIBUTE((unused))) const {
+uint Handler::max_supported_key_part_length(HA_CREATE_INFO *create_info
+                                            [[maybe_unused]]) const {
   DBUG_TRACE;
 
   const uint length = std::numeric_limits<uint>::max();

@@ -5181,3 +5181,9 @@ COMMIT;
 START TRANSACTION;
 DELETE FROM mysql.plugin WHERE name='mysqlx';
 COMMIT;
+
+START TRANSACTION;
+INSERT INTO mysql.replication_group_member_actions (name, event, enabled, type, priority, error_handling) VALUES ("mysql_disable_super_read_only_if_primary", "AFTER_PRIMARY_ELECTION", 1, "INTERNAL", 1, "IGNORE");
+INSERT INTO mysql.replication_group_member_actions (name, event, enabled, type, priority, error_handling) VALUES ("mysql_start_failover_channels_if_primary", "AFTER_PRIMARY_ELECTION", 1, "INTERNAL", 10, "CRITICAL");
+INSERT INTO mysql.replication_group_configuration_version (name, version) VALUES ("replication_group_member_actions", 1);
+COMMIT;

@@ -66,9 +66,9 @@ static size_t BytesNeededForMatchFlags(size_t rows) {
   return (rows + 7) / 8;
 }
 
-BKAIterator::BKAIterator(THD *thd, JOIN *join,
+BKAIterator::BKAIterator(THD *thd,
                          unique_ptr_destroy_only<RowIterator> outer_input,
-                         qep_tab_map outer_input_tables,
+                         const Prealloced_array<TABLE *, 4> &outer_input_tables,
                          unique_ptr_destroy_only<RowIterator> inner_input,
                          size_t max_memory_available,
                          size_t mrr_bytes_needed_for_single_inner_row,
@@ -81,7 +81,7 @@ BKAIterator::BKAIterator(THD *thd, JOIN *join,
       m_inner_input(move(inner_input)),
       m_mem_root(key_memory_hash_join, 16384 /* 16 kB */),
       m_rows(&m_mem_root),
-      m_outer_input_tables(join, outer_input_tables, store_rowids,
+      m_outer_input_tables(outer_input_tables, store_rowids,
                            tables_to_get_rowid_for),
       m_max_memory_available(max_memory_available),
       m_mrr_bytes_needed_for_single_inner_row(
@@ -132,9 +132,8 @@ int BKAIterator::ReadOuterRows() {
       m_has_row_from_previous_batch = false;
       LoadBufferRowIntoTableBuffers(
           m_outer_input_tables,
-          hash_join_buffer::Key(
-              pointer_cast<const uchar *>(m_outer_row_buffer.ptr()),
-              m_outer_row_buffer.length()));
+          hash_join_buffer::Key(m_outer_row_buffer.ptr(),
+                                m_outer_row_buffer.length()));
     } else {
       int result = m_outer_input->Read();
       if (result == 1) {
@@ -177,7 +176,7 @@ int BKAIterator::ReadOuterRows() {
       break;
     }
 
-    uchar *row = m_mem_root.ArrayAlloc<uchar>(row_size);
+    char *row = m_mem_root.ArrayAlloc<char>(row_size);
     if (row == nullptr) {
       return 1;
     }
@@ -254,7 +253,8 @@ int BKAIterator::MakeNullComplementedRow() {
     } else {
       // Return a NULL-complemented row. (Our table already has the NULL flag
       // set.)
-      LoadIntoTableBuffers(m_outer_input_tables, m_current_pos->data());
+      LoadIntoTableBuffers(m_outer_input_tables,
+                           pointer_cast<const uchar *>(m_current_pos->data()));
       ++m_current_pos;
       return 0;
     }
@@ -303,7 +303,7 @@ int BKAIterator::Read() {
           break;
         }
       }
-      // Fall through.
+        [[fallthrough]];
       case State::RETURNING_NULL_COMPLEMENTED_ROWS: {
         int err = MakeNullComplementedRow();
         if (err != -1) {
@@ -318,15 +318,14 @@ int BKAIterator::Read() {
 }
 
 MultiRangeRowIterator::MultiRangeRowIterator(
-    THD *thd, Item *cache_idx_cond, TABLE *table, TABLE_REF *ref, int mrr_flags,
-    JoinType join_type, JOIN *join, table_map outer_input_tables,
-    bool store_rowids, table_map tables_to_get_rowid_for)
+    THD *thd, TABLE *table, TABLE_REF *ref, int mrr_flags, JoinType join_type,
+    const Prealloced_array<TABLE *, 4> &outer_input_tables, bool store_rowids,
+    table_map tables_to_get_rowid_for)
     : TableRowIterator(thd, table),
-      m_cache_idx_cond(cache_idx_cond),
       m_file(table->file),
       m_ref(ref),
       m_mrr_flags(mrr_flags),
-      m_outer_input_tables(join, outer_input_tables, store_rowids,
+      m_outer_input_tables(outer_input_tables, store_rowids,
                            tables_to_get_rowid_for),
       m_join_type(join_type) {}
 
@@ -344,11 +343,7 @@ bool MultiRangeRowIterator::Init() {
   }
   RANGE_SEQ_IF seq_funcs = {MultiRangeRowIterator::MrrInitCallbackThunk,
                             MultiRangeRowIterator::MrrNextCallbackThunk,
-                            nullptr, nullptr};
-  if (m_cache_idx_cond != nullptr) {
-    seq_funcs.skip_index_tuple =
-        MultiRangeRowIterator::MrrSkipIndexTupleCallbackThunk;
-  }
+                            nullptr};
   if (m_join_type == JoinType::SEMI || m_join_type == JoinType::ANTI) {
     seq_funcs.skip_record = MultiRangeRowIterator::MrrSkipRecordCallbackThunk;
   }
@@ -369,10 +364,6 @@ bool MultiRangeRowIterator::Init() {
 
      1. MrrInitCallback at the start, to initialize iteration.
      2. MrrNextCallback is called to yield ranges to scan, until it returns 1.
-     3. If we have dependent index conditions (see the comment on
-        m_cache_idx_cond), MrrSkipIndexTuple will be called back for each
-        range that returned an inner row, and can choose to discard the row
-        there and then if it doesn't match the dependent index condition.
    */
   return m_file->multi_range_read_init(&seq_funcs, this,
                                        std::distance(m_begin, m_end),
@@ -429,20 +420,6 @@ uint MultiRangeRowIterator::MrrNextCallback(KEY_MULTI_RANGE *range) {
   return 0;
 }
 
-bool MultiRangeRowIterator::MrrSkipIndexTuple(char *range_info) {
-  BufferRow *rec_ptr = pointer_cast<BufferRow *>(range_info);
-
-  // The index condition depends on fields from the outer tables (or we would
-  // not be called), so we need to load the relevant rows before checking it.
-  // range_info tells us which outer row we are talking about; it corresponds to
-  // range->ptr in MrrNextCallback(), and points to the serialized outer row in
-  // BKAIterator's m_row array.
-  LoadIntoTableBuffers(m_outer_input_tables, rec_ptr->data());
-
-  // Skip this tuple if the index condition is false.
-  return !m_cache_idx_cond->val_int();
-}
-
 bool MultiRangeRowIterator::MrrSkipRecord(char *range_info) {
   BufferRow *rec_ptr = pointer_cast<BufferRow *>(range_info);
   return RowHasBeenRead(rec_ptr);
@@ -464,7 +441,8 @@ int MultiRangeRowIterator::Read() {
     // See bug #30594210.
   } while (m_join_type == JoinType::SEMI && RowHasBeenRead(rec_ptr));
 
-  LoadIntoTableBuffers(m_outer_input_tables, rec_ptr->data());
+  LoadIntoTableBuffers(m_outer_input_tables,
+                       pointer_cast<const uchar *>(rec_ptr->data()));
 
   m_last_row_returned = rec_ptr;
 

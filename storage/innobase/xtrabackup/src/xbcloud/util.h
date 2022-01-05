@@ -1,5 +1,5 @@
 /******************************************************
-Copyright (c) 2019 Percona LLC and/or its affiliates.
+Copyright (c) 2019, 2021 Percona LLC and/or its affiliates.
 
 Aux functions used by xbcloud.
 
@@ -18,8 +18,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 *******************************************************/
 
-#ifndef __XBCLOUD_UTIL_H__
-#define __XBCLOUD_UTIL_H__
+#ifndef XBCLOUD_UTIL_H
+#define XBCLOUD_UTIL_H
 
 #include <algorithm>
 #include <iomanip>
@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <string>
 
 #include <base64.h>
+#include <math.h>
 
 namespace xbcloud {
 
@@ -96,12 +97,45 @@ static inline std::pair<std::string, std::string> parse_http_header(
   return std::make_pair(r, std::string());
 }
 
+inline ulong get_exponential_backoff(int count, uint64_t max_backoff) {
+  uint64_t delay = pow(2, count) * 1000;
+  int random = (rand() % 1000) + 1;
+  return std::min(delay + random, max_backoff);
+}
+
+inline std::string canonicalize_http_header_value(const std::string &s) {
+  std::string r = s;
+
+  /* replace multiple spaces with single space */
+  auto new_end = std::unique(r.begin(), r.end(), [](char lhs, char rhs) {
+    return rhs == ' ' && lhs == ' ';
+  });
+  r.erase(new_end, r.end());
+
+  /* trim trailing and leading spaces */
+  trim(r);
+
+  return r;
+}
+
 template <typename T>
 std::string base64_encode(const T &s) {
   uint64 encoded_size = ::base64_needed_encoded_length(s.size());
   std::unique_ptr<char[]> buf(new char[encoded_size]);
 
   if (::base64_encode(&s[0], s.size(), buf.get()) != 0) {
+    return std::string();
+  }
+
+  return std::string(buf.get());
+}
+
+template <typename T>
+std::string base64_decode(const T &s) {
+  uint64 decoded_size = ::base64_needed_decoded_length(s.size());
+  std::unique_ptr<char[]> buf(new char[decoded_size]);
+
+  if (::base64_decode(&s[0], s.size(), buf.get(), NULL, 0) == 0) {
     return std::string();
   }
 
@@ -120,4 +154,4 @@ std::string hex_encode(const T &s) {
 
 }  // namespace xbcloud
 
-#endif  // __XBCLOUD_UTIL_H__
+#endif  // XBCLOUD_UTIL_H

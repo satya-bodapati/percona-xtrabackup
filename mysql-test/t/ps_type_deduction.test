@@ -1786,13 +1786,13 @@ eval $show_trace;
 prepare s from 'select MAKETIME(?,?,?)';
 eval $show_trace;
 
-# MASTER_POS_WAIT
+# SOURCE_POS_WAIT
 
-prepare s from 'select MASTER_POS_WAIT(?,?)';
+prepare s from 'select SOURCE_POS_WAIT(?,?)';
 eval $show_trace;
-prepare s from 'select MASTER_POS_WAIT(?,?,?)';
+prepare s from 'select SOURCE_POS_WAIT(?,?,?)';
 eval $show_trace;
-prepare s from 'select MASTER_POS_WAIT(?,?,?,?)';
+prepare s from 'select SOURCE_POS_WAIT(?,?,?,?)';
 eval $show_trace;
 
 # MAX
@@ -1924,6 +1924,21 @@ eval $show_trace;
 # NULLIF
 
 prepare s from 'select NULLIF(?,?)';
+eval $show_trace;
+
+prepare s from 'select NULLIF(100,?)';
+eval $show_trace;
+
+prepare s from 'select NULLIF(?,100)';
+eval $show_trace;
+
+prepare s from 'select 200 + NULLIF(?,?)';
+eval $show_trace;
+
+prepare s from 'select 200 + NULLIF("100",?)';
+eval $show_trace;
+
+prepare s from 'select 200 + NULLIF(?,"100")';
 eval $show_trace;
 
 # OCT

@@ -175,8 +175,8 @@ static void init_servers_cache_psi_keys(void) {
 
   SYNOPSIS
     servers_init()
-      dont_read_server_table  true if we want to skip loading data from
-                            server table and disable privilege checking.
+      thd thread for reading the servers table and initializing necessary
+          structures.
 
   NOTES
     This function is mostly responsible for preparatory steps, main work
@@ -187,8 +187,7 @@ static void init_servers_cache_psi_keys(void) {
     1	Could not initialize servers
 */
 
-bool servers_init(bool dont_read_servers_table) {
-  THD *thd;
+bool servers_init(THD *thd) {
   bool return_val = false;
   DBUG_TRACE;
 
@@ -207,24 +206,22 @@ bool servers_init(bool dont_read_servers_table) {
   /* Initialize the mem root for data */
   init_sql_alloc(key_memory_servers, &mem, ACL_ALLOC_BLOCK_SIZE, 0);
 
-  if (dont_read_servers_table) goto end;
-
-  /*
-    To be able to run this from boot, we allocate a temporary THD
-  */
-  if (!(thd = new THD)) return true;
-  thd->thread_stack = (char *)&thd;
-  thd->store_globals();
-  /*
-    It is safe to call servers_reload() since servers_* arrays and hashes which
-    will be freed there are global static objects and thus are initialized
-    by zeros at startup.
-  */
-  return_val = servers_reload(thd);
-  delete thd;
-
-end:
-  return return_val;
+  if (thd == nullptr) {
+    /* To be able to run this from boot, we allocate a temporary THD. */
+    thd = new (std::nothrow) THD;
+    if (thd == nullptr) return true;
+    thd->thread_stack = (char *)&thd;
+    thd->store_globals();
+    /*
+      It is safe to call servers_reload() since servers_* arrays and hashes
+      which will be freed there are global static objects and thus are
+      initialized by zeros at startup.
+    */
+    return_val = servers_reload(thd);
+    delete thd;
+    return return_val;
+  } else
+    return (servers_reload(thd));
 }
 
 /*
@@ -249,12 +246,12 @@ static bool servers_load(THD *thd, TABLE *table) {
   if (servers_cache != nullptr) {
     servers_cache->clear();
   }
-  free_root(&mem, MYF(0));
+  mem.Clear();
   init_sql_alloc(key_memory_servers, &mem, ACL_ALLOC_BLOCK_SIZE, 0);
 
-  unique_ptr_destroy_only<RowIterator> iterator = init_table_iterator(
-      thd, table, nullptr,
-      /*ignore_not_found_rows=*/false, /*count_examined_rows=*/false);
+  unique_ptr_destroy_only<RowIterator> iterator =
+      init_table_iterator(thd, table, /*ignore_not_found_rows=*/false,
+                          /*count_examined_rows=*/false);
   if (iterator == nullptr) return true;
 
   while (!(iterator->Read())) {
@@ -884,12 +881,12 @@ void servers_free(bool end) {
   DBUG_TRACE;
   if (servers_cache == nullptr) return;
   if (!end) {
-    free_root(&mem, MYF(MY_MARK_BLOCKS_FREE));
+    mem.ClearForReuse();
     servers_cache->clear();
     return;
   }
   mysql_rwlock_destroy(&THR_LOCK_servers);
-  free_root(&mem, MYF(0));
+  mem.Clear();
   delete servers_cache;
   servers_cache = nullptr;
 }

@@ -615,21 +615,21 @@ static bool analyse_nodegroup_map(const char *ng_map_str,
   {
     if (!local_str)
     {
-      DBUG_RETURN(TRUE);
+      DBUG_RETURN(true);
     }
     local_str= analyse_one_map(local_str, &source_ng, &dest_ng);
     if (!local_str)
     {
-      DBUG_RETURN(TRUE);
+      DBUG_RETURN(true);
     }
     if (insert_ng_map(ng_map, source_ng, dest_ng))
     {
-      DBUG_RETURN(TRUE);
+      DBUG_RETURN(true);
     }
     if (!(*local_str))
       break;
-  } while (TRUE);
-  DBUG_RETURN(FALSE);
+  } while (true);
+  DBUG_RETURN(false);
 }
 
 static bool parse_remap_option(const BaseString option,
@@ -2454,6 +2454,17 @@ int do_restore(RestoreThreadData *thrdata)
       info.setLevel(255);
       restoreLogger.log_info(" Object create progress: %u objects out of %u",
                              i+1, metaData.getNoOfObjects());
+    }
+  }
+
+  restoreLogger.log_debug("Handling index stat tables");
+  for (i = 0; i < g_consumers.size(); i++)
+  {
+    if (!g_consumers[i]->handle_index_stat_tables())
+    {
+      restoreLogger.log_error(
+          "Restore: Failed to handle index stat tables ... Exiting ");
+      return NdbToolsProgramExitCode::FAILED;
     }
   }
 

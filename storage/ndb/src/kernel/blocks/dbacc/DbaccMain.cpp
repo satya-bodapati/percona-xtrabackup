@@ -22,6 +22,7 @@
 */
 
 #include <cstdint>
+#include <cstring>
 
 #define DBACC_C
 #include "Dbacc.hpp"
@@ -1319,7 +1320,7 @@ void Dbacc::execACCKEYREQ(Signal* signal,
     case ZWRITE:
       opbits &= ~(Uint32)Operationrec::OP_MASK;
       opbits |= (op = ZINSERT);
-      // Fall through
+      [[fallthrough]];
     case ZINSERT:
       jam();
       opbits |= Operationrec::OP_INSERT_IS_DONE;
@@ -1391,7 +1392,7 @@ Dbacc::execACCKEY_ORD(Signal* signal,
   {
   }
 
-  ndbout_c("bits: %.8x state: %.8x", opbits, opstate);
+  g_eventLogger->info("bits: %.8x state: %.8x", opbits, opstate);
   ndbabort();
 }
 
@@ -2765,7 +2766,7 @@ void Dbacc::execACC_ABORTREQ(Signal* signal,
     {
       return;
     }
-    // Fall through
+    [[fallthrough]];
   case 1:
     sendSignal(operationRecPtr.p->userblockref, GSN_ACC_ABORTCONF, 
 	       signal, 1, JBB);
@@ -3846,7 +3847,7 @@ Dbacc::readTablePk(Uint32 localkey1,
   int ret = -ZTUPLE_DELETED_ERROR;
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
   const int xfrm_multiply = (xfrm) ? MAX_XFRM_MULTIPLY : 1;
-  memset(keys, 0x1f, (fragrecptr.p->keyLength * xfrm_multiply) << 2);
+  std::memset(keys, 0x1f, (fragrecptr.p->keyLength * xfrm_multiply) << 2);
 #endif
   bool invalid_local_key = true;
   if (likely(! Local_key::isInvalid(localkey1, localkey2)))
@@ -9082,8 +9083,9 @@ void Dbacc::initOverpage(Page8Ptr iopPageptr)
   // Setting word32[ALLOC_CONTAINERS] and word32[CHECK_SUM] to zero is essential
   Uint32 nextPage = iopPageptr.p->word32[Page8::NEXT_PAGE];
   Uint32 prevPage = iopPageptr.p->word32[Page8::PREV_PAGE];
-  bzero(iopPageptr.p->word32 + Page8::P32_WORD_COUNT,
-        sizeof(iopPageptr.p->word32) - Page8::P32_WORD_COUNT * sizeof(Uint32));
+  std::memset(iopPageptr.p->word32 + Page8::P32_WORD_COUNT,
+              0,
+              sizeof(iopPageptr.p->word32) - Page8::P32_WORD_COUNT * sizeof(Uint32));
   iopPageptr.p->word32[Page8::NEXT_PAGE] = nextPage;
   iopPageptr.p->word32[Page8::PREV_PAGE] = prevPage;
 
@@ -9657,7 +9659,6 @@ void Dbacc::execDBINFO_SCANREQ(Signal *signal)
       if (found &&
           opRecPtr.p->m_op_bits != Operationrec::OP_INITIAL)
       {
-        ndbout_c("ACC_OP(3): %u", opRecPtr.i);
         jam();
 
         FragmentrecPtr fp;

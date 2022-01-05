@@ -28,7 +28,8 @@
 #include "sql/filesort.h"
 #include "sql/hash_join_iterator.h"
 #include "sql/item_sum.h"
-#include "sql/opt_range.h"
+#include "sql/join_optimizer/relational_expression.h"
+#include "sql/range_optimizer/range_optimizer.h"
 #include "sql/ref_row_iterators.h"
 #include "sql/sorting_iterator.h"
 #include "sql/sql_optimizer.h"
@@ -96,6 +97,7 @@ static string JoinTypeToString(JoinType join_type) {
 static string HashJoinTypeToString(RelationalExpression::Type join_type) {
   switch (join_type) {
     case RelationalExpression::INNER_JOIN:
+    case RelationalExpression::STRAIGHT_INNER_JOIN:
       return "Inner hash join";
     case RelationalExpression::LEFT_JOIN:
       return "Left hash join";
@@ -103,8 +105,6 @@ static string HashJoinTypeToString(RelationalExpression::Type join_type) {
       return "Hash antijoin";
     case RelationalExpression::SEMIJOIN:
       return "Hash semijoin";
-    case RelationalExpression::CARTESIAN_PRODUCT:
-      return "Hash cartesian product";
     default:
       assert(false);
       return "<error>";
@@ -133,6 +133,9 @@ static void GetAccessPathsFromItem(Item *item_arg, const char *source_text,
       snprintf(description, sizeof(description),
                "Select #%d (subquery in %s; run only once)",
                query_block->select_number, source_text);
+    }
+    if (query_block->join->needs_finalize) {
+      subselect->unit->finalize(current_thd);
     }
     AccessPath *path;
     if (subselect->unit->root_access_path() != nullptr) {
@@ -171,12 +174,9 @@ vector<ExplainData::Child> GetAccessPathsFromSelectList(JOIN *join) {
 
 ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join);
 
-// The table iterator could be a whole string of iterators
-// (sort, filter, etc.) due to add_sorting_to_table(), so show them all.
-//
-// TODO(sgunders): Make the optimizer put these on top of the
-// MaterializeIterator instead (or perhaps better yet, on the subquery
-// iterator), so that table_iterator is always just a single basic iterator.
+// The table iterator could be a slightly more complicated iterator than
+// the basic iterators (in particular, ALTERNATIVE), so show the entire
+// thing.
 static void AddTableIteratorDescription(const AccessPath *path, JOIN *join,
                                         vector<string> *description) {
   const AccessPath *subpath = path;
@@ -184,7 +184,7 @@ static void AddTableIteratorDescription(const AccessPath *path, JOIN *join,
     ExplainData explain = ExplainAccessPath(subpath, join);
     for (string str : explain.description) {
       if (explain.children.size() > 1) {
-        // This can happen if e.g. a filter has subqueries in it.
+        // This can happen if we have AlternativeIterator.
         // TODO(sgunders): Consider having a RowIterator::parent(),
         // so that we can show the entire tree.
         str += " [other sub-iterators not shown]";
@@ -336,8 +336,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       assert(table->file->pushed_idx_cond == nullptr);
 
       const KEY *key = &table->key_info[path->index_scan().idx];
-      string str =
-          string("Index scan on ") + table->alias + " using " + key->name;
+      string str = string(table->key_read ? "Covering index scan on "
+                                          : "Index scan on ") +
+                   table->alias + " using " + key->name;
       if (path->index_scan().reverse) {
         str += " (reverse)";
       }
@@ -350,8 +351,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
     case AccessPath::REF: {
       TABLE *table = path->ref().table;
       const KEY *key = &table->key_info[path->ref().ref->key];
-      string str = string("Index lookup on ") + table->alias + " using " +
-                   key->name + " (" +
+      string str = string(table->key_read ? "Covering index lookup on "
+                                          : "Index lookup on ") +
+                   table->alias + " using " + key->name + " (" +
                    RefToString(*path->ref().ref, key, /*include_nulls=*/false);
       if (path->ref().reverse) {
         str += "; iterate backwards";
@@ -370,8 +372,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       TABLE *table = path->ref_or_null().table;
       const KEY *key = &table->key_info[path->ref_or_null().ref->key];
       string str =
-          string("Index lookup on ") + table->alias + " using " + key->name +
-          " (" +
+          string(table->key_read ? "Covering index lookup on "
+                                 : "Index lookup on ") +
+          table->alias + " using " + key->name + " (" +
           RefToString(*path->ref_or_null().ref, key, /*include_nulls=*/true) +
           ")";
       if (table->file->pushed_idx_cond != nullptr) {
@@ -387,8 +390,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       TABLE *table = path->eq_ref().table;
       const KEY *key = &table->key_info[path->eq_ref().ref->key];
       string str =
-          string("Single-row index lookup on ") + table->alias + " using " +
-          key->name + " (" +
+          string(table->key_read ? "Single-row covering index lookup on "
+                                 : "Single-row index lookup on ") +
+          table->alias + " using " + key->name + " (" +
           RefToString(*path->eq_ref().ref, key, /*include_nulls=*/false) + ")";
       if (table->file->pushed_idx_cond != nullptr) {
         str += ", with index condition: " +
@@ -405,9 +409,10 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       const KEY *key = &table->key_info[path->pushed_join_ref().ref->key];
       string str;
       if (path->pushed_join_ref().is_unique) {
-        str = string("Single-row index");
+        str =
+            table->key_read ? "Single-row covering index" : "Single-row index";
       } else {
-        str = string("Index");
+        str = table->key_read ? "Covering index" : "Index";
       }
       str += " lookup on " + string(table->alias) + " using " + key->name +
              " (" +
@@ -421,7 +426,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       TABLE *table = path->full_text_search().table;
       assert(table->file->pushed_idx_cond == nullptr);
       const KEY *key = &table->key_info[path->full_text_search().ref->key];
-      description.push_back(string("Indexed full text search on ") +
+      description.push_back(string(table->key_read
+                                       ? "Full-text covering index search on "
+                                       : "Full-text index search on ") +
                             table->alias + " using " + key->name + " (" +
                             RefToString(*path->full_text_search().ref, key,
                                         /*include_nulls=*/false) +
@@ -438,17 +445,14 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
     case AccessPath::MRR: {
       TABLE *table = path->mrr().table;
       const KEY *key = &table->key_info[path->mrr().ref->key];
-      string str = string("Multi-range index lookup on ") + table->alias +
-                   " using " + key->name + " (" +
-                   RefToString(*path->mrr().ref, key, /*include_nulls=*/false) +
-                   ")";
+      string str =
+          string(table->key_read ? "Multi-range covering index lookup on "
+                                 : "Multi-range index lookup on ") +
+          table->alias + " using " + key->name + " (" +
+          RefToString(*path->mrr().ref, key, /*include_nulls=*/false) + ")";
       if (table->file->pushed_idx_cond != nullptr) {
         str += ", with index condition: " +
                ItemToString(table->file->pushed_idx_cond);
-      }
-      if (path->mrr().cache_idx_cond != nullptr) {
-        str += ", with dependent index condition: " +
-               ItemToString(path->mrr().cache_idx_cond);
       }
       str += table->file->explain_extra();
       description.push_back(move(str));
@@ -466,8 +470,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       // get better outputs here (similar to dbug_dump()).
       String str;
       path->index_range_scan().quick->add_info_string(&str);
-      string ret = string("Index range scan on ") + table->alias + " using " +
-                   to_string(str);
+      string ret = string(table->key_read ? "Covering index range scan on "
+                                          : "Index range scan on ") +
+                   table->alias + " using " + to_string(str);
       if (table->file->pushed_idx_cond != nullptr) {
         ret += ", with index condition: " +
                ItemToString(table->file->pushed_idx_cond);
@@ -482,8 +487,9 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       // TODO(sgunders): Convert QUICK_SELECT_I to RowIterator so that we can
       // get better outputs here (similar to dbug_dump()), although it might get
       // tricky when there are many alternatives.
-      string str = string("Index range scan on ") + table->alias +
-                   " (re-planned for each iteration)";
+      string str = string(table->key_read ? "Covering index range scan on "
+                                          : "Index range scan on ") +
+                   table->alias + " (re-planned for each iteration)";
       if (table->file->pushed_idx_cond != nullptr) {
         str += ", with index condition: " +
                ItemToString(table->file->pushed_idx_cond);
@@ -538,7 +544,10 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       break;
     case AccessPath::HASH_JOIN: {
       const JoinPredicate *predicate = path->hash_join().join_predicate;
-      string ret = HashJoinTypeToString(predicate->expr->type);
+      RelationalExpression::Type type = path->hash_join().rewrite_semi_to_inner
+                                            ? RelationalExpression::INNER_JOIN
+                                            : predicate->expr->type;
+      string ret = HashJoinTypeToString(type);
 
       if (predicate->expr->equijoin_conditions.empty()) {
         ret.append(" (no condition)");
@@ -701,10 +710,10 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
         children.push_back({child.path, "", child.join});
       }
       break;
-    case AccessPath::WINDOWING: {
+    case AccessPath::WINDOW: {
       string buf;
-      if (path->windowing().needs_buffering) {
-        Window *window = path->windowing().temp_table_param->m_window;
+      if (path->window().needs_buffering) {
+        Window *window = path->window().temp_table_param->m_window;
         if (window->optimizable_row_aggregates() ||
             window->optimizable_range_aggregates() ||
             window->static_aggregates()) {
@@ -718,7 +727,7 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
 
       bool first = true;
       for (const Func_ptr &func :
-           *(path->windowing().temp_table_param->items_to_copy)) {
+           *(path->window().temp_table_param->items_to_copy)) {
         if (func.func()->m_is_window_function) {
           if (!first) {
             buf += ", ";
@@ -728,7 +737,7 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
         }
       }
       description.push_back(move(buf));
-      children.push_back({path->windowing().child});
+      children.push_back({path->window().child});
       break;
     }
     case AccessPath::WEEDOUT: {
@@ -752,10 +761,22 @@ ExplainData ExplainAccessPath(const AccessPath *path, JOIN *join) {
       children.push_back({path->weedout().child});
       break;
     }
-    case AccessPath::REMOVE_DUPLICATES:
-      description.push_back(string("Remove duplicates from input sorted on ") +
-                            path->remove_duplicates().key->name);
+    case AccessPath::REMOVE_DUPLICATES: {
+      string ret = "Remove duplicates from input grouped on ";
+      for (int i = 0; i < path->remove_duplicates().group_items_size; ++i) {
+        if (i != 0) {
+          ret += ", ";
+        }
+        ret += ItemToString(path->remove_duplicates().group_items[i]);
+      }
+      description.push_back(std::move(ret));
       children.push_back({path->remove_duplicates().child});
+      break;
+    }
+    case AccessPath::REMOVE_DUPLICATES_ON_INDEX:
+      description.push_back(string("Remove duplicates from input sorted on ") +
+                            path->remove_duplicates_on_index().key->name);
+      children.push_back({path->remove_duplicates_on_index().child});
       break;
     case AccessPath::ALTERNATIVE: {
       const TABLE *table =
@@ -861,9 +882,21 @@ string PrintQueryPlan(int level, AccessPath *path, JOIN *join,
     ++level;
   }
 
+  // If we are crossing into a different query block, but there's a streaming
+  // or materialization node in the way, don't count it as the root; we want
+  // any SELECT printouts to be on the actual root node.
+  // TODO(sgunders): This gives the wrong result if a query block ends in a
+  // materialization.
+  bool delayed_root_of_join = false;
+  if (path->type == AccessPath::STREAM ||
+      path->type == AccessPath::MATERIALIZE) {
+    delayed_root_of_join = is_root_of_join;
+    is_root_of_join = false;
+  }
+
   for (const ExplainData::Child &child : explain.children) {
     JOIN *subjoin = child.join != nullptr ? child.join : join;
-    bool child_is_root_of_join = subjoin != join;
+    bool child_is_root_of_join = subjoin != join || delayed_root_of_join;
     if (!child.description.empty()) {
       ret.append(level * 4, ' ');
       ret.append("-> ");

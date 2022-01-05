@@ -59,6 +59,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <set>
 #include <sstream>
 #include <string>
+#include "changed_page_tracking.h"
 #include "common.h"
 #include "fil_cur.h"
 #include "os0event.h"
@@ -181,7 +182,7 @@ static void datafile_close(datafile_cur_t *cursor) {
   if (cursor->fd != -1) {
     my_close(cursor->fd, MYF(0));
   }
-  ut_free(cursor->buf);
+  ut::free(cursor->buf);
 }
 
 static bool datafile_open(const char *file, datafile_cur_t *cursor,
@@ -220,7 +221,8 @@ static bool datafile_open(const char *file, datafile_cur_t *cursor,
 
   ut_a(opt_read_buffer_size >= UNIV_PAGE_SIZE);
   cursor->buf_size = opt_read_buffer_size;
-  cursor->buf = static_cast<byte *>(ut_malloc_nokey(cursor->buf_size));
+  cursor->buf = static_cast<byte *>(
+      ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, cursor->buf_size));
 
   return (true);
 }
@@ -582,8 +584,8 @@ static bool run_data_threads(const char *dir, F func, uint n,
   bool ret;
 
   ut_a(thread_description);
-  data_threads = (datadir_thread_ctxt_t *)(ut_malloc_nokey(
-      sizeof(datadir_thread_ctxt_t) * n));
+  data_threads = (datadir_thread_ctxt_t *)(ut::malloc_withkey(
+      UT_NEW_THIS_FILE_PSI_KEY, sizeof(datadir_thread_ctxt_t) * n));
 
   mutex_create(LATCH_ID_XTRA_COUNT_MUTEX, &count_mutex);
   count = n;
@@ -595,7 +597,7 @@ static bool run_data_threads(const char *dir, F func, uint n,
     data_threads[i].count = &count;
     data_threads[i].count_mutex = &count_mutex;
     data_threads[i].queue = &queue;
-    os_thread_create(PFS_NOT_INSTRUMENTED, func, &data_threads[i]).start();
+    os_thread_create(PFS_NOT_INSTRUMENTED, 0, func, &data_threads[i]).start();
   }
 
   xb_process_datadir(
@@ -629,7 +631,7 @@ static bool run_data_threads(const char *dir, F func, uint n,
     }
   }
 
-  ut_free(data_threads);
+  ut::free(data_threads);
 
   return (ret);
 }
@@ -637,7 +639,8 @@ static bool run_data_threads(const char *dir, F func, uint n,
 /************************************************************************
 Write buffer into .ibd file and preserve it's sparsiness. */
 bool write_ibd_buffer(ds_file_t *file, unsigned char *buf, size_t buf_len,
-                      size_t page_size, size_t block_size) {
+                      size_t page_size, size_t block_size,
+                      bool punch_hole_supported) {
   ut_a(buf_len % page_size == 0);
 
   if (ds_is_sparse_write_supported(file) && page_size > block_size) {
@@ -672,8 +675,8 @@ bool write_ibd_buffer(ds_file_t *file, unsigned char *buf, size_t buf_len,
         src_pos += sparse_map[i].len;
         dst_pos += sparse_map[i].len;
       }
-      if (ds_write_sparse(file, buf, dst_pos, sparse_map.size(),
-                          &sparse_map[0])) {
+      if (ds_write_sparse(file, buf, dst_pos, sparse_map.size(), &sparse_map[0],
+                          punch_hole_supported)) {
         return (false);
       }
       return (true);
@@ -733,7 +736,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
       if (cursor.buf_offset == cursor.buf_read)
         page_size.copy_from(fsp_header_get_page_size(cursor.buf));
       if (!write_ibd_buffer(dstfile, cursor.buf, cursor.buf_read,
-                            page_size.physical(), cursor.statinfo.st_blksize))
+                            page_size.physical(), cursor.statinfo.st_blksize,
+                            datasink->fs_support_punch_hole))
         goto error;
     } else {
       if (ds_write(dstfile, cursor.buf, cursor.buf_read)) goto error;
@@ -856,6 +860,125 @@ static void page_checksum_fix(byte *page, const page_size_t &page_size) {
   ut_a(!reporter.is_corrupted());
 }
 
+bool copy_redo_encryption_info() {
+  pfs_os_file_t src_file = XB_FILE_UNDEFINED;
+  pfs_os_file_t dst_file = XB_FILE_UNDEFINED;
+  char src_path[FN_REFLEN];
+  char dst_path[FN_REFLEN];
+  auto log_buf = ut_make_unique_ptr_nokey(UNIV_PAGE_SIZE_MAX * 128);
+  IORequest read_request(IORequest::READ);
+  IORequest write_request(IORequest::WRITE);
+  bool success = FALSE;
+  if (log_buf == NULL) {
+    return false;
+  }
+
+  if (!xtrabackup_incremental_dir) {
+    sprintf(dst_path, "%s/ib_logfile0", xtrabackup_target_dir);
+    sprintf(src_path, "%s/%s", xtrabackup_target_dir, XB_LOG_FILENAME);
+  } else {
+    sprintf(dst_path, "%s/ib_logfile0", xtrabackup_incremental_dir);
+    sprintf(src_path, "%s/%s", xtrabackup_incremental_dir, XB_LOG_FILENAME);
+  }
+
+  Fil_path::normalize(src_path);
+  Fil_path::normalize(dst_path);
+
+  src_file = os_file_create_simple_no_error_handling(
+      0, src_path, OS_FILE_OPEN, OS_FILE_READ_ONLY, srv_read_only_mode,
+      &success);
+  if (!success) {
+    os_file_get_last_error(TRUE);
+    xb::error() << "cannot find " << src_path;
+
+    return false;
+  }
+
+  dst_file = os_file_create_simple_no_error_handling(
+      0, dst_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, srv_read_only_mode,
+      &success);
+  if (!success) {
+    os_file_get_last_error(TRUE);
+    xb::error() << "cannot find " << dst_path;
+
+    return false;
+  }
+  success = os_file_read(read_request, src_path, src_file, log_buf.get(), 0,
+                         LOG_FILE_HDR_SIZE);
+
+  ulint encryption_offset = LOG_HEADER_CREATOR_END + LOG_ENCRYPTION;
+  success = os_file_write(write_request, dst_path, dst_file,
+                          log_buf.get() + encryption_offset, encryption_offset,
+                          Encryption::INFO_SIZE);
+  if (!success) {
+    xb::error() << "cannot write encryption to redo log " << dst_path;
+    return false;
+  }
+  os_file_close(src_file);
+  os_file_close(dst_file);
+  return true;
+}
+
+/**
+  Reencrypt redo header with new master key for copy-back.
+
+  @param [in]  dir       directory where redolog is located
+  @param [in]  filename  filename of redo log
+  @param [in]  thread_n  id of thread performing the operation
+
+  @return false in case of error, true otherwise
+*/
+
+static bool reencrypt_redo_header(const char *dir, const char *filename,
+                                  uint thread_n) {
+  char fullpath[FN_REFLEN];
+  auto log_buf = ut_make_unique_ptr_nokey(UNIV_PAGE_SIZE_MAX * 128);
+  byte encrypt_info[Encryption::INFO_SIZE];
+  fil_space_t space;
+
+  fn_format(fullpath, filename, dir, "", MYF(MY_RELATIVE_PATH));
+
+  File fd = my_open(fullpath, O_RDWR, MYF(MY_FAE));
+
+  my_seek(fd, 0L, SEEK_SET, MYF(MY_WME));
+
+  size_t len = my_read(fd, log_buf.get(), UNIV_PAGE_SIZE_MAX, MYF(MY_WME));
+
+  if (len < UNIV_PAGE_SIZE_MIN) {
+    my_close(fd, MYF(MY_FAE));
+    return (false);
+  }
+
+  ulint offset = LOG_HEADER_CREATOR_END + LOG_ENCRYPTION;
+  if (memcmp(log_buf.get() + offset, Encryption::KEY_MAGIC_V3,
+             Encryption::MAGIC_SIZE) != 0) {
+    my_close(fd, MYF(MY_FAE));
+    return (true);
+  }
+  xb::info() << "Encrypting " << fullpath << " header with new master key";
+
+  memset(encrypt_info, 0, Encryption::INFO_SIZE);
+  space.id = dict_sys_t::s_log_space_first_id;
+  bool found = xb_fetch_tablespace_key(space.id, space.encryption_key,
+                                       space.encryption_iv);
+  ut_a(found);
+  space.encryption_type = Encryption::AES;
+  space.encryption_klen = Encryption::KEY_LEN;
+
+  if (!Encryption::fill_encryption_info(space.encryption_key,
+                                        space.encryption_iv, encrypt_info,
+                                        false, true)) {
+    my_close(fd, MYF(MY_FAE));
+    return (false);
+  }
+  memcpy(log_buf.get() + offset, encrypt_info, Encryption::INFO_SIZE);
+  my_seek(fd, offset, SEEK_SET, MYF(MY_WME));
+  my_write(fd, log_buf.get() + offset, Encryption::INFO_SIZE,
+           MYF(MY_FAE | MY_NABP));
+  my_close(fd, MYF(MY_FAE));
+  return true;
+}
+
 /************************************************************************
 Reencrypt datafile header with new master key for copy-back.
 @return true in case of success. */
@@ -957,9 +1080,13 @@ static bool copy_or_move_file(const char *src_file_path,
                             : move_file(datasink, src_file_path, dst_file_path,
                                         dst_dir, thread_n, file_purpose));
 
-  if (opt_generate_new_master_key && (file_purpose == FILE_PURPOSE_DATAFILE ||
-                                      file_purpose == FILE_PURPOSE_UNDO_LOG)) {
-    reencrypt_datafile_header(dst_dir, dst_file_path, thread_n);
+  if (opt_generate_new_master_key) {
+    if (file_purpose == FILE_PURPOSE_DATAFILE ||
+        file_purpose == FILE_PURPOSE_UNDO_LOG) {
+      reencrypt_datafile_header(dst_dir, dst_file_path, thread_n);
+    } else if (file_purpose == FILE_PURPOSE_REDO_LOG) {
+      reencrypt_redo_header(dst_dir, dst_file_path, thread_n);
+    }
   }
 
   if (datasink != ds_data) {
@@ -979,7 +1106,7 @@ static void backup_thread_func(datadir_thread_ctxt_t *ctx, bool prep_mode,
     goto cleanup;
   }
 
-  thd = create_thd(false, false, true, 0);
+  thd = create_thd(false, false, true, 0, 0);
 
   while (ctx->queue->pop(entry)) {
     char name[FN_REFLEN];
@@ -1255,6 +1382,9 @@ Myrocks_checkpoint::file_list Myrocks_checkpoint::wal_files(
   file_list wal_files;
 
   for (const auto &f : log_status.rocksdb_wal_files) {
+    if (strncmp(f.path_name.c_str(), "/archive", 8) == 0 ||
+        strncmp(f.path_name.c_str(), "archive", 7) == 0)
+      continue;
     char path[FN_REFLEN];
     fn_format(path, f.path_name.c_str() + 1,
               rocksdb_wal_dir.empty() ? rocksdb_datadir.c_str()
@@ -1400,6 +1530,7 @@ bool backup_start(Backup_context &context) {
     }
   }
 
+
   if (!backup_files(MySQL_datadir_path.path().c_str(), false)) {
     return (false);
   }
@@ -1447,7 +1578,39 @@ bool backup_start(Backup_context &context) {
   xb_mysql_query(mysql_connection, "FLUSH NO_WRITE_TO_BINLOG BINARY LOGS",
                  false);
 
-  context.log_status = log_status_get(mysql_connection);
+  auto log_status = log_status_get(mysql_connection);
+
+  /* Wait until we have checkpoint LSN greater than the page tracking start LSN.
+  Page tracking start LSN is system LSN (lets say 105) and Backup End LSN is
+  checkpoint LSN (say 100). Next incremental backup will request changes pages
+  from last backup end LSN which is also the checkpoint LSN (i.e 100). Since
+  page-tracking LSN is 105, if we request pages from 100, page-tracking will
+  return error. Hence, we have to ensure that checkpoint LSN is greater page
+  tracking LSN */
+
+  if (opt_page_tracking) {
+    auto page_tracking_start_lsn =
+        pagetracking::get_pagetracking_start_lsn(mysql_connection);
+    debug_sync_point("xtrabackup_after_wait_page_tracking");
+    while (true) {
+      if (log_status.lsn_checkpoint >= page_tracking_start_lsn) {
+        xb::info() << "pagetracking: Checkpoint lsn is "
+                   << log_status.lsn_checkpoint
+                   << " and page tracking start lsn is "
+                   << page_tracking_start_lsn;
+        break;
+      } else {
+        xb::info() << "pagetracking: Sleeping for 1 second, waiting for "
+                   << "checkpoint lsn " << log_status.lsn_checkpoint
+                   << " to reach to page tracking start lsn "
+                   << page_tracking_start_lsn;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        log_status = log_status_get(mysql_connection);
+      }
+    }
+  }
+
+  context.log_status = log_status;
 
   debug_sync_point("xtrabackup_after_query_log_status");
 
@@ -1971,7 +2134,7 @@ static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
     goto cleanup;
   }
 
-  thd = create_thd(false, false, true, 0);
+  thd = create_thd(false, false, true, 0, 0);
 
   while (ctx->queue->pop(entry)) {
     /* create empty directories */

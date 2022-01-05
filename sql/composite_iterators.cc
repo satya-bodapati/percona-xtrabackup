@@ -22,61 +22,50 @@
 
 #include "sql/composite_iterators.h"
 
+#include <limits.h>
 #include <string.h>
-
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include "field_types.h"
+#include "mem_root_deque.h"
 #include "my_inttypes.h"
+#include "my_sys.h"
+#include "mysqld_error.h"
+#include "prealloced_array.h"
 #include "scope_guard.h"
 #include "sql/basic_row_iterators.h"
 #include "sql/debug_sync.h"
-#include "sql/derror.h"
 #include "sql/error_handler.h"
 #include "sql/field.h"
-#include "sql/filesort.h"
 #include "sql/handler.h"
 #include "sql/item.h"
+#include "sql/item_func.h"
 #include "sql/item_sum.h"
-#include "sql/join_optimizer/access_path.h"
-#include "sql/join_optimizer/join_optimizer.h"
 #include "sql/key.h"
-#include "sql/opt_explain.h"
 #include "sql/opt_trace.h"
+#include "sql/opt_trace_context.h"
 #include "sql/pfs_batch_mode.h"
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
 #include "sql/sql_executor.h"
-#include "sql/sql_join_buffer.h"
 #include "sql/sql_lex.h"
+#include "sql/sql_list.h"
 #include "sql/sql_optimizer.h"
 #include "sql/sql_show.h"
 #include "sql/sql_tmp_table.h"
-#include "sql/system_variables.h"
 #include "sql/table.h"
 #include "sql/table_function.h"  // Table_function
 #include "sql/temp_table_param.h"
-#include "sql/timing_iterator.h"
-
-class Opt_trace_context;
-template <class T>
-class List;
+#include "sql/window.h"
+#include "template_utils.h"
 
 using pack_rows::TableCollection;
 using std::string;
 using std::swap;
 using std::vector;
-
-namespace {
-
-void SwitchSlice(JOIN *join, int slice_num) {
-  if (!join->ref_items[slice_num].is_null()) {
-    join->set_ref_item_slice(slice_num);
-  }
-}
-
-}  // namespace
 
 int FilterIterator::Read() {
   for (;;) {
@@ -203,6 +192,20 @@ bool AggregateIterator::Init() {
     return true;
   }
 
+  // If we have a HAVING after us, it needs to be evaluated within the context
+  // of the slice we're in (unless we're in the hypergraph optimizer, which
+  // doesn't use slices). However, we might have a sort before us, and
+  // SortingIterator doesn't set the slice except on Init(); it just keeps
+  // whatever was already set. When there is a temporary table after the HAVING,
+  // the slice coming from there might be wrongly set on Read(), and thus,
+  // we need to properly restore it before returning any rows.
+  //
+  // This is a hack. It would be good to get rid of the slice system altogether
+  // (the hypergraph join optimizer does not use it).
+  if (!m_join->implicit_grouping && !thd()->lex->using_hypergraph_optimizer) {
+    m_output_slice = m_join->get_ref_item_slice();
+  }
+
   m_seen_eof = false;
   m_save_nullinfo = 0;
 
@@ -231,8 +234,13 @@ int AggregateIterator::Read() {
           // no input rows.
 
           // Calculate aggregate functions for no rows
-          for (Item *item : VisibleFields(*m_join->get_current_fields())) {
-            item->no_rows_in_result();
+          for (Item *item : *m_join->get_current_fields()) {
+            if (!item->hidden ||
+                (item->type() == Item::SUM_FUNC_ITEM &&
+                 down_cast<Item_sum *>(item)->aggr_query_block ==
+                     m_join->query_block)) {
+              item->no_rows_in_result();
+            }
           }
 
           /*
@@ -253,6 +261,9 @@ int AggregateIterator::Read() {
           for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
             (*item)->clear();
           }
+          if (m_output_slice != -1) {
+            m_join->set_ref_item_slice(m_output_slice);
+          }
           return 0;
         }
       }
@@ -265,7 +276,7 @@ int AggregateIterator::Read() {
 
       m_last_unchanged_group_item_idx = 0;
     }
-      // Fall through.
+      [[fallthrough]];
 
     case LAST_ROW_STARTED_NEW_GROUP:
       SetRollupLevel(m_join->send_group_parts);
@@ -314,6 +325,9 @@ int AggregateIterator::Read() {
             SetRollupLevel(m_join->send_group_parts);
             m_state = DONE_OUTPUTTING_ROWS;
           }
+          if (m_output_slice != -1) {
+            m_join->set_ref_item_slice(m_output_slice);
+          }
           return 0;
         }
 
@@ -323,6 +337,15 @@ int AggregateIterator::Read() {
           // The group changed. Store the new row (we can't really use it yet;
           // next Read() will deal with it), then load back the group values
           // so that we can output a row for the current group.
+          // NOTE: This does not save and restore FTS information,
+          // so evaluating MATCH() on these rows may give the wrong result.
+          // (Storing the row ID and repositioning it with ha_rnd_pos()
+          // would, but we can't do the latter without disturbing
+          // ongoing scans. See bug #32565923.) For the old join optimizer,
+          // we generally solve this by inserting temporary tables or sorts
+          // (both of which restore the information correctly); for the
+          // hypergraph join optimizer, we add a special streaming step
+          // for MATCH columns.
           StoreFromTableBuffers(m_tables, &m_first_row_next_group);
           LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(
                                              m_first_row_this_group.ptr()));
@@ -345,6 +368,9 @@ int AggregateIterator::Read() {
           } else {
             m_last_unchanged_group_item_idx = 0;
             m_state = LAST_ROW_STARTED_NEW_GROUP;
+          }
+          if (m_output_slice != -1) {
+            m_join->set_ref_item_slice(m_output_slice);
           }
           return 0;
         }
@@ -379,6 +405,9 @@ int AggregateIterator::Read() {
         }
       }
 
+      if (m_output_slice != -1) {
+        m_join->set_ref_item_slice(m_output_slice);
+      }
       return 0;
 
     case DONE_OUTPUTTING_ROWS:
@@ -543,7 +572,7 @@ bool MaterializeIterator::Init() {
   // tables.
   if (!table()->materialized && m_cte != nullptr) {
     for (TABLE_LIST *table_ref : m_cte->tmp_tables) {
-      if (table_ref->table->materialized) {
+      if (table_ref->table != nullptr && table_ref->table->materialized) {
         table()->materialized = true;
         break;
       }
@@ -634,10 +663,12 @@ bool MaterializeIterator::Init() {
         break;
       }
     }
+    m_num_materialized_rows += stored_rows;
   }
 
   end_unique_index.rollback();
   table()->materialized = true;
+  ++m_num_materializations;
 
   if (!m_rematerialize) {
     DEBUG_SYNC(thd(), "after_materialize_derived");
@@ -780,6 +811,8 @@ bool MaterializeIterator::MaterializeRecursive() {
     }
   } while (stored_rows > last_stored_rows);
 
+  m_num_materialized_rows += stored_rows;
+
   if (disabled_trace) {
     trace.restore_I_S();
   }
@@ -824,9 +857,8 @@ bool MaterializeIterator::MaterializeQueryBlock(const QueryBlock &query_block,
     }
 
     // Materialize items for this row.
-    if (query_block.copy_fields_and_items) {
-      if (copy_fields_and_funcs(query_block.temp_table_param, thd()))
-        return true;
+    if (query_block.copy_items) {
+      if (copy_funcs(query_block.temp_table_param, thd())) return true;
     }
 
     if (query_block.disable_deduplication_by_hash_field) {
@@ -843,7 +875,9 @@ bool MaterializeIterator::MaterializeQueryBlock(const QueryBlock &query_block,
     // create_ondisk_from_heap will generate error if needed.
     if (!table()->file->is_ignorable_error(error)) {
       bool is_duplicate;
-      if (create_ondisk_from_heap(thd(), table(), error, true, &is_duplicate))
+      if (create_ondisk_from_heap(thd(), table(), error,
+                                  /*insert_last_record=*/true,
+                                  /*ignore_last_dup=*/true, &is_duplicate))
         return true; /* purecov: inspected */
       // Table's engine changed; index is not initialized anymore.
       if (table()->hash_field) table()->file->ha_index_init(0, false);
@@ -946,6 +980,8 @@ StreamingIterator::StreamingIterator(
 }
 
 bool StreamingIterator::Init() {
+  if (m_join->query_expression()->clear_correlated_query_blocks()) return true;
+
   if (m_provide_rowid) {
     memset(table()->file->ref, 0, table()->file->ref_length);
   }
@@ -974,7 +1010,7 @@ int StreamingIterator::Read() {
   if (error != 0) return error;
 
   // Materialize items for this row.
-  if (copy_fields_and_funcs(m_temp_table_param, thd())) return 1;
+  if (copy_funcs(m_temp_table_param, thd())) return 1;
 
   if (m_provide_rowid) {
     memcpy(table()->file->ref, &m_row_number, sizeof(m_row_number));
@@ -982,6 +1018,31 @@ int StreamingIterator::Read() {
   }
 
   return 0;
+}
+
+/**
+  Move the in-memory temporary table to disk.
+
+  @param[in] error_code The error code because of which the table
+                        is being moved to disk.
+  @param[in] was_insert True, if the table is moved to disk during
+                        an insert operation.
+
+  @returns true if error.
+*/
+bool TemptableAggregateIterator::move_table_to_disk(int error_code,
+                                                    bool was_insert) {
+  if (create_ondisk_from_heap(thd(), table(), error_code, was_insert,
+                              /*ignore_last_dup=*/false,
+                              /*is_duplicate=*/nullptr)) {
+    return true;
+  }
+  int error = table()->file->ha_index_init(0, false);
+  if (error != 0) {
+    PrintError(error);
+    return true;
+  }
+  return false;
 }
 
 TemptableAggregateIterator::TemptableAggregateIterator(
@@ -1046,7 +1107,7 @@ bool TemptableAggregateIterator::Init() {
     }
 
     // Materialize items for this row.
-    if (copy_fields(m_temp_table_param, thd()))
+    if (copy_funcs(m_temp_table_param, thd(), CFT_FIELDS))
       return true; /* purecov: inspected */
 
     // See if we have seen this row already; if so, we want to update it,
@@ -1083,11 +1144,47 @@ bool TemptableAggregateIterator::Init() {
       if (thd()->is_error()) {
         return true;
       }
+      DBUG_EXECUTE_IF("simulate_temp_storage_engine_full",
+                      DBUG_SET("+d,temptable_allocator_record_file_full"););
       int error =
           table()->file->ha_update_row(table()->record[1], table()->record[0]);
+
+      DBUG_EXECUTE_IF("simulate_temp_storage_engine_full",
+                      DBUG_SET("-d,temptable_allocator_record_file_full"););
+      /*
+        The agrregation can result in a row update with the same values,
+        ignore the error. In case the temporary table has exhausted the memory
+        (error HA_ERR_RECORD_FILE_FULL checked in create_ondisk_from_heap()),
+        move the table to disk and retry the update operation.
+      */
       if (error != 0 && error != HA_ERR_RECORD_IS_THE_SAME) {
-        PrintError(error);
-        return true;
+        if (move_table_to_disk(error, /*insert_operation=*/false)) {
+          end_unique_index.commit();
+          return true;
+        }
+        /*
+          The key of the temporary table can be a hash of the group-by columns
+          or the group-by columns themselves. Find the row to be updated in the
+          newly created table.
+        */
+        const uchar *key;
+        if (using_hash_key()) {
+          key = table()->hash_field->field_ptr();
+        } else {
+          key = m_temp_table_param->group_buff;
+        }
+        // Read the record to be updated.
+        if (table()->file->ha_index_read_map(table()->record[1], key,
+                                             HA_WHOLE_KEY, HA_READ_KEY_EXACT)) {
+          return true;
+        }
+        // Retry the update on the newly created on-disk table.
+        error = table()->file->ha_update_row(table()->record[1],
+                                             table()->record[0]);
+        if (error != 0 && error != HA_ERR_RECORD_IS_THE_SAME) {
+          PrintError(error);
+          return true;
+        }
       }
       continue;
     }
@@ -1151,15 +1248,9 @@ bool TemptableAggregateIterator::Init() {
           }
         }
       }
-      if (create_ondisk_from_heap(thd(), table(), error, false, nullptr)) {
+
+      if (move_table_to_disk(error, /*insert_operation=*/true)) {
         end_unique_index.commit();
-        return true;  // Not a table_is_full error.
-      }
-      // Table's engine changed, index is not initialized anymore
-      error = table()->file->ha_index_init(0, false);
-      if (error != 0) {
-        end_unique_index.commit();
-        PrintError(error);
         return true;
       }
     }
@@ -1269,6 +1360,50 @@ int WeedoutIterator::Read() {
 }
 
 RemoveDuplicatesIterator::RemoveDuplicatesIterator(
+    THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
+    Item **group_items, int group_items_size)
+    : RowIterator(thd), m_source(move(source)) {
+  m_caches = Bounds_checked_array<Cached_item *>::Alloc(thd->mem_root,
+                                                        group_items_size);
+  for (int i = 0; i < group_items_size; ++i) {
+    m_caches[i] = new_Cached_item(thd, group_items[i]);
+    join->semijoin_deduplication_fields.push_back(m_caches[i]);
+  }
+}
+
+bool RemoveDuplicatesIterator::Init() {
+  m_first_row = true;
+  return m_source->Init();
+}
+
+int RemoveDuplicatesIterator::Read() {
+  for (;;) {
+    int err = m_source->Read();
+    if (err != 0) {
+      return err;
+    }
+
+    if (thd()->killed) {  // Aborted by user.
+      thd()->send_kill_message();
+      return 1;
+    }
+
+    bool any_changed = false;
+    for (Cached_item *cache : m_caches) {
+      any_changed |= cache->cmp();
+    }
+
+    if (m_first_row || any_changed) {
+      m_first_row = false;
+      return 0;
+    }
+
+    // Same as previous row, so keep scanning.
+    continue;
+  }
+}
+
+RemoveDuplicatesOnIndexIterator::RemoveDuplicatesOnIndexIterator(
     THD *thd, unique_ptr_destroy_only<RowIterator> source, const TABLE *table,
     KEY *key, size_t key_len)
     : RowIterator(thd),
@@ -1278,12 +1413,12 @@ RemoveDuplicatesIterator::RemoveDuplicatesIterator(
       m_key_buf(new (thd->mem_root) uchar[key_len]),
       m_key_len(key_len) {}
 
-bool RemoveDuplicatesIterator::Init() {
+bool RemoveDuplicatesOnIndexIterator::Init() {
   m_first_row = true;
   return m_source->Init();
 }
 
-int RemoveDuplicatesIterator::Read() {
+int RemoveDuplicatesOnIndexIterator::Read() {
   for (;;) {
     int err = m_source->Read();
     if (err != 0) {
@@ -1385,213 +1520,6 @@ int NestedLoopSemiJoinWithDuplicateRemovalIterator::Read() {
   }
 }
 
-WindowingIterator::WindowingIterator(
-    THD *thd, unique_ptr_destroy_only<RowIterator> source,
-    Temp_table_param *temp_table_param, JOIN *join, int output_slice)
-    : RowIterator(thd),
-      m_source(move(source)),
-      m_temp_table_param(temp_table_param),
-      m_window(temp_table_param->m_window),
-      m_join(join),
-      m_output_slice(output_slice) {
-  assert(!m_window->needs_buffering());
-}
-
-bool WindowingIterator::Init() {
-  if (m_source->Init()) {
-    return true;
-  }
-  m_window->reset_round();
-
-  // Store which slice we will be reading from.
-  m_input_slice = m_join->get_ref_item_slice();
-
-  return false;
-}
-
-int WindowingIterator::Read() {
-  SwitchSlice(m_join, m_input_slice);
-
-  int err = m_source->Read();
-  if (err != 0) {
-    return err;
-  }
-
-  SwitchSlice(m_join, m_output_slice);
-
-  if (copy_fields_and_funcs(m_temp_table_param, thd(), CFT_HAS_NO_WF)) return 1;
-
-  m_window->check_partition_boundary();
-
-  if (copy_funcs(m_temp_table_param, thd(), CFT_WF)) return 1;
-
-  if (m_window->is_last() && copy_funcs(m_temp_table_param, thd(), CFT_HAS_WF))
-    return 1;
-
-  return 0;
-}
-
-BufferingWindowingIterator::BufferingWindowingIterator(
-    THD *thd, unique_ptr_destroy_only<RowIterator> source,
-    Temp_table_param *temp_table_param, JOIN *join, int output_slice)
-    : RowIterator(thd),
-      m_source(move(source)),
-      m_temp_table_param(temp_table_param),
-      m_window(temp_table_param->m_window),
-      m_join(join),
-      m_output_slice(output_slice) {
-  assert(m_window->needs_buffering());
-}
-
-bool BufferingWindowingIterator::Init() {
-  if (m_source->Init()) {
-    return true;
-  }
-  m_window->reset_round();
-  m_possibly_buffered_rows = false;
-  m_last_input_row_started_new_partition = false;
-  m_eof = false;
-
-  // Store which slice we will be reading from.
-  m_input_slice = m_join->get_ref_item_slice();
-  assert(m_input_slice >= 0);
-
-  return false;
-}
-
-int BufferingWindowingIterator::Read() {
-  SwitchSlice(m_join, m_output_slice);
-
-  if (m_eof) {
-    return ReadBufferedRow(/*new_partition_or_eof=*/true);
-  }
-
-  // The previous call to Read() may have caused multiple rows to be ready
-  // for output, but could only return one of them. See if there are more
-  // to be output.
-  if (m_possibly_buffered_rows) {
-    int err = ReadBufferedRow(m_last_input_row_started_new_partition);
-    if (err != -1) {
-      return err;
-    }
-  }
-
-  for (;;) {
-    if (m_last_input_row_started_new_partition) {
-      /*
-        We didn't really buffer this row yet since, we found a partition
-        change so we had to finalize the previous partition first.
-        Bring back saved row for next partition.
-      */
-      if (bring_back_frame_row(
-              thd(), m_window, m_temp_table_param,
-              Window::FBC_FIRST_IN_NEXT_PARTITION,
-              Window_retrieve_cached_row_reason::WONT_UPDATE_HINT)) {
-        return 1;
-      }
-
-      /*
-        copy_funcs(CFT_HAS_NO_WF) is not necessary: a non-WF function was
-        calculated and saved in OUT, then this OUT column was copied to
-        special record, then restored to OUT column.
-      */
-
-      m_window->reset_partition_state();
-      if (buffer_windowing_record(thd(), m_temp_table_param,
-                                  nullptr /* first in new partition */)) {
-        return 1;
-      }
-
-      m_last_input_row_started_new_partition = false;
-    } else {
-      // Read a new input row, if it exists. This needs to be done under
-      // the input slice, so that any expressions in sub-iterators are
-      // evaluated correctly.
-      int err;
-      {
-        Switch_ref_item_slice slice_switch(m_join, m_input_slice);
-        err = m_source->Read();
-      }
-      if (err == 1) {
-        return 1;  // Error.
-      }
-      if (err == -1) {
-        // EOF. Read any pending buffered rows, and then that's it.
-        m_eof = true;
-        return ReadBufferedRow(/*new_partition_or_eof=*/true);
-      }
-
-      /*
-        This saves the values of non-WF functions for the row. For
-        example, 1+t.a. But also 1+LEAD. Even though at this point we lack
-        data to compute LEAD; the saved value is thus incorrect; later,
-        when the row is fully computable, we will re-evaluate the
-        CFT_NON_WF to get a correct value for 1+LEAD.
-      */
-      if (copy_fields_and_funcs(m_temp_table_param, thd(), CFT_HAS_NO_WF)) {
-        return 1;
-      }
-
-      bool new_partition = false;
-      if (buffer_windowing_record(thd(), m_temp_table_param, &new_partition)) {
-        return 1;
-      }
-      m_last_input_row_started_new_partition = new_partition;
-    }
-
-    int err = ReadBufferedRow(m_last_input_row_started_new_partition);
-    if (err == 1) {
-      return 1;
-    }
-
-    if (m_window->needs_restore_input_row()) {
-      /*
-        Reestablish last row read from input table in case it is needed
-        again before reading a new row. May be necessary if this is the
-        first window following after a join, cf. the caching presumption
-        in EQRefIterator. This logic can be removed if we move to copying
-        between out tmp record and frame buffer record, instead of
-        involving the in record. FIXME.
-      */
-      if (bring_back_frame_row(
-              thd(), m_window, nullptr /* no copy to OUT */,
-              Window::FBC_LAST_BUFFERED_ROW,
-              Window_retrieve_cached_row_reason::WONT_UPDATE_HINT)) {
-        return 1;
-      }
-    }
-
-    if (err == 0) {
-      return 0;
-    }
-
-    // This input row didn't generate an output row right now, so we'll just
-    // continue the loop.
-  }
-}
-
-int BufferingWindowingIterator::ReadBufferedRow(bool new_partition_or_eof) {
-  bool output_row_ready;
-  if (process_buffered_windowing_record(
-          thd(), m_temp_table_param, new_partition_or_eof, &output_row_ready)) {
-    return 1;
-  }
-  if (thd()->killed) {
-    thd()->send_kill_message();
-    return 1;
-  }
-  if (output_row_ready) {
-    // Return the buffered row, and there are possibly more.
-    // These will be checked on the next call to Read().
-    m_possibly_buffered_rows = true;
-    return 0;
-  } else {
-    // No more buffered rows.
-    m_possibly_buffered_rows = false;
-    return -1;
-  }
-}
-
 MaterializeInformationSchemaTableIterator::
     MaterializeInformationSchemaTableIterator(
         THD *thd, unique_ptr_destroy_only<RowIterator> table_iterator,
@@ -1602,16 +1530,18 @@ MaterializeInformationSchemaTableIterator::
       m_condition(condition) {}
 
 bool MaterializeInformationSchemaTableIterator::Init() {
-  m_table_list->table->file->ha_extra(HA_EXTRA_RESET_STATE);
-  m_table_list->table->file->ha_delete_all_rows();
-  free_io_cache(m_table_list->table);
-  m_table_list->table->set_not_started();
+  if (!m_table_list->schema_table_filled) {
+    m_table_list->table->file->ha_extra(HA_EXTRA_RESET_STATE);
+    m_table_list->table->file->ha_delete_all_rows();
+    free_io_cache(m_table_list->table);
+    m_table_list->table->set_not_started();
 
-  if (do_fill_information_schema_table(thd(), m_table_list, m_condition)) {
-    return true;
+    if (do_fill_information_schema_table(thd(), m_table_list, m_condition)) {
+      return true;
+    }
+
+    m_table_list->schema_table_filled = true;
   }
-
-  m_table_list->schema_table_state = PROCESSED_BY_JOIN_EXEC;
 
   return m_table_iterator->Init();
 }

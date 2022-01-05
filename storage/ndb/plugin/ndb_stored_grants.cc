@@ -57,7 +57,7 @@ static std::mutex local_granted_users_mutex;
 /* Utility functions */
 
 bool op_grants_or_revokes_ndb_storage(ChangeNotice *notice) {
-  for (const std::string &priv : notice->get_dynamic_privilege_list())
+  for (const ChangeNotice::Priv priv : notice->get_dynamic_privilege_list())
     if (!native_strncasecmp(priv.c_str(), "NDB_STORED_USER", priv.length()))
       return true;
   return false;
@@ -286,11 +286,8 @@ void ThreadContext::deserialize_users(std::string &str) {
 /* returns false on success */
 bool ThreadContext::exec_sql(const std::string &statement) {
   assert(m_closed);
-  uint ignore_mysql_errors[1] = {0};  // Don't ignore any errors
-  MYSQL_LEX_STRING sql_text = {const_cast<char *>(statement.c_str()),
-                               statement.length()};
   /* execute_query_iso() returns false on success */
-  m_closed = execute_query_iso(sql_text, ignore_mysql_errors, nullptr);
+  m_closed = execute_query_iso(statement, nullptr);
   return m_closed;
 }
 
@@ -756,7 +753,7 @@ int ThreadContext::get_user_lists_for_statement(ChangeNotice *notice) {
   assert(m_statement_users.size() == 0);
   assert(m_intersection.size() == 0);
 
-  for (const ChangeNotice::User &notice_user : notice->get_user_list()) {
+  for (const ChangeNotice::User notice_user : notice->get_user_list()) {
     std::string user;
     format_user(user, notice_user);
     m_statement_users.push_back(user);
@@ -930,6 +927,13 @@ bool Ndb_stored_grants::setup(THD *thd, Thd_ndb *thd_ndb) {
 
   metadata_table.setup(thd_ndb->ndb->getDictionary(),
                        sql_metadata_table.get_table());
+  const NdbError &err = metadata_table.initializeSnapshotLock(thd_ndb->ndb);
+  if (err.status != NdbError::Success) {
+    ndb_log_error("ndb_stored_grants initalizeSnapshotLock failure: %d %s",
+                  err.code, err.message);
+    return false;
+  }
+
   return true;
 }
 
@@ -1020,4 +1024,18 @@ bool Ndb_stored_grants::update_users_from_snapshot(THD *thd,
   context.apply_current_snapshot();
   context.handle_dropped_users();
   return true;  // success
+}
+
+NdbTransaction *Ndb_stored_grants::acquire_snapshot_lock(THD *thd) {
+  NdbTransaction *transaction;
+  Ndb *ndb = get_thd_ndb(thd)->ndb;
+  const NdbError &err = metadata_table.acquireSnapshotLock(ndb, transaction);
+  if (err.status != NdbError::Success)
+    ndb_log_error("acquire_snapshot_lock: Error %d '%s'", err.code,
+                  err.message);
+  return transaction;
+}
+
+void Ndb_stored_grants::release_snapshot_lock(NdbTransaction *transaction) {
+  metadata_table.releaseSnapshotLock(transaction);
 }

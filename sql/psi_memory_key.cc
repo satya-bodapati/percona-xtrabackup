@@ -67,17 +67,16 @@ PSI_memory_key key_memory_Owned_gtids_sidno_to_hash;
 PSI_memory_key key_memory_Owned_gtids_to_string;
 PSI_memory_key key_memory_PROFILE;
 PSI_memory_key key_memory_QUICK_RANGE_SELECT_mrr_buf_desc;
-PSI_memory_key key_memory_Quick_ranges;
 PSI_memory_key key_memory_READ_INFO;
 PSI_memory_key key_memory_READ_RECORD_cache;
 PSI_memory_key key_memory_xa_recovered_transactions;
 PSI_memory_key key_memory_Row_data_memory_memory;
 PSI_memory_key key_memory_Rpl_info_file_buffer;
 PSI_memory_key key_memory_Rpl_info_table;
-PSI_memory_key key_memory_SLAVE_INFO;
+PSI_memory_key key_memory_REPLICA_INFO;
 PSI_memory_key key_memory_ST_SCHEMA_TABLE;
 PSI_memory_key key_memory_Slave_applier_json_diff_vector;
-PSI_memory_key key_memory_Slave_job_group_group_relay_log_name;
+PSI_memory_key key_memory_Replica_job_group_group_relay_log_name;
 PSI_memory_key key_memory_Sys_var_charptr_value;
 PSI_memory_key key_memory_TABLE;
 PSI_memory_key key_memory_TABLE_RULE_ENT;
@@ -123,16 +122,13 @@ PSI_memory_key key_memory_prepared_statement_infrastructure;
 PSI_memory_key key_memory_prepared_statement_main_mem_root;
 PSI_memory_key key_memory_partitions_prune_exec;
 PSI_memory_key key_memory_queue_item;
-PSI_memory_key key_memory_quick_group_min_max_select_root;
-PSI_memory_key key_memory_quick_index_merge_root;
-PSI_memory_key key_memory_quick_range_select_root;
-PSI_memory_key key_memory_quick_ror_intersect_select_root;
-PSI_memory_key key_memory_quick_ror_union_select_root;
+PSI_memory_key key_memory_rm_db_mdl_reqs_root;
+PSI_memory_key key_memory_rm_table_foreach_root;
 PSI_memory_key key_memory_rpl_filter;
-PSI_memory_key key_memory_rpl_slave_check_temp_dir;
+PSI_memory_key key_memory_rpl_replica_check_temp_dir;
 PSI_memory_key key_memory_servers;
 PSI_memory_key key_memory_shared_memory_name;
-PSI_memory_key key_memory_show_slave_status_io_gtid_set;
+PSI_memory_key key_memory_show_replica_status_io_gtid_set;
 PSI_memory_key key_memory_sp_head_call_root;
 PSI_memory_key key_memory_sp_head_execute_root;
 PSI_memory_key key_memory_sp_head_main_root;
@@ -190,16 +186,6 @@ static PSI_memory_info all_server_memory[] = {
      0, "Mem root for objects with same life time as stored program call."},
     {&key_memory_table_mapping_root, "table_mapping::m_mem_root", 0, 0,
      PSI_DOCUMENT_ME},
-    {&key_memory_quick_range_select_root, "QUICK_RANGE_SELECT::alloc",
-     PSI_FLAG_THREAD, 0, PSI_DOCUMENT_ME},
-    {&key_memory_quick_index_merge_root, "QUICK_INDEX_MERGE_SELECT::alloc",
-     PSI_FLAG_THREAD, 0, PSI_DOCUMENT_ME},
-    {&key_memory_quick_ror_intersect_select_root,
-     "QUICK_ROR_INTERSECT_SELECT::alloc", PSI_FLAG_THREAD, 0, PSI_DOCUMENT_ME},
-    {&key_memory_quick_ror_union_select_root, "QUICK_ROR_UNION_SELECT::alloc",
-     PSI_FLAG_THREAD, 0, PSI_DOCUMENT_ME},
-    {&key_memory_quick_group_min_max_select_root,
-     "QUICK_GROUP_MIN_MAX_SELECT::alloc", PSI_FLAG_THREAD, 0, PSI_DOCUMENT_ME},
     {&key_memory_test_quick_select_exec, "test_quick_select", PSI_FLAG_THREAD,
      0, PSI_DOCUMENT_ME},
     {&key_memory_partitions_prune_exec, "Partition::prune_exec", 0, 0,
@@ -217,8 +203,8 @@ static PSI_memory_info all_server_memory[] = {
     {&key_memory_queue_item, "Queue::queue_item", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_THD_db, "THD::db", 0, 0, "Name of currently used schema."},
     {&key_memory_user_var_entry, "user_var_entry", 0, 0, PSI_DOCUMENT_ME},
-    {&key_memory_Slave_job_group_group_relay_log_name,
-     "Slave_job_group::group_relay_log_name", 0, 0, PSI_DOCUMENT_ME},
+    {&key_memory_Replica_job_group_group_relay_log_name,
+     "Replica_job_group::group_relay_log_name", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_binlog_cache_mngr, "binlog_cache_mngr", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_Row_data_memory_memory, "Row_data_memory::memory", 0, 0,
      PSI_DOCUMENT_ME},
@@ -299,9 +285,9 @@ static PSI_memory_info all_server_memory[] = {
      PSI_DOCUMENT_ME},
     {&key_memory_db_worker_hash_entry, "db_worker_hash_entry", 0, 0,
      PSI_DOCUMENT_ME},
-    {&key_memory_rpl_slave_check_temp_dir, "rpl_slave::check_temp_dir", 0, 0,
-     PSI_DOCUMENT_ME},
-    {&key_memory_SLAVE_INFO, "SLAVE_INFO", 0, 0, PSI_DOCUMENT_ME},
+    {&key_memory_rpl_replica_check_temp_dir, "rpl_replica::check_temp_dir", 0,
+     0, PSI_DOCUMENT_ME},
+    {&key_memory_REPLICA_INFO, "REPLICA_INFO", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_binlog_pos, "binlog_pos", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_HASH_ROW_ENTRY, "HASH_ROW_ENTRY", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_binlog_statement_buffer, "binlog_statement_buffer", 0, 0,
@@ -357,7 +343,6 @@ static PSI_memory_info all_server_memory[] = {
     {&key_memory_READ_RECORD_cache, "READ_RECORD_cache", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_xa_recovered_transactions, "XA::recovered_transactions", 0, 0,
      "List infrastructure for recovered XA transactions."},
-    {&key_memory_Quick_ranges, "Quick_ranges", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_File_query_log_name, "File_query_log::name",
      PSI_FLAG_ONLY_GLOBAL_STAT, 0, PSI_DOCUMENT_ME},
     {&key_memory_thd_timer, "thd_timer", 0, 0, "Thread timer object."},
@@ -365,8 +350,8 @@ static PSI_memory_info all_server_memory[] = {
      PSI_DOCUMENT_ME},
     {&key_memory_THD_Session_sysvar_resource_manager,
      "THD::Session_sysvar_resource_manager", 0, 0, PSI_DOCUMENT_ME},
-    {&key_memory_show_slave_status_io_gtid_set, "show_slave_status_io_gtid_set",
-     0, 0, PSI_DOCUMENT_ME},
+    {&key_memory_show_replica_status_io_gtid_set,
+     "show_replica_status_io_gtid_set", 0, 0, PSI_DOCUMENT_ME},
     {&key_memory_write_set_extraction, "write_set_extraction", 0, 0,
      PSI_DOCUMENT_ME},
     {&key_memory_JSON, "JSON", 0, 0, PSI_DOCUMENT_ME},
@@ -377,7 +362,13 @@ static PSI_memory_info all_server_memory[] = {
     {&key_memory_log_sink_pfs, "log_sink_pfs", PSI_FLAG_ONLY_GLOBAL_STAT, 0,
      PSI_DOCUMENT_ME},
     {&key_memory_histograms, "histograms", 0, 0, PSI_DOCUMENT_ME},
-    {&key_memory_hash_join, "hash_join", 0, 0, PSI_DOCUMENT_ME}};
+    {&key_memory_hash_join, "hash_join", 0, 0, PSI_DOCUMENT_ME},
+    {&key_memory_rm_table_foreach_root, "rm_table::foreach_root",
+     PSI_FLAG_THREAD, 0,
+     "Mem root for temporary objects allocated while dropping tables or the "
+     "whole database."},
+    {&key_memory_rm_db_mdl_reqs_root, "rm_db::mdl_reqs_root", PSI_FLAG_THREAD,
+     0, "Mem root for allocating MDL requests while dropping datbase."}};
 
 void register_server_memory_keys() {
   const char *category = "sql";

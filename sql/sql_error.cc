@@ -351,7 +351,7 @@ Diagnostics_area::Diagnostics_area(bool allow_unlimited_conditions)
   m_message_text[0] = '\0';
 }
 
-Diagnostics_area::~Diagnostics_area() { free_root(&m_condition_root, MYF(0)); }
+Diagnostics_area::~Diagnostics_area() { m_condition_root.Clear(); }
 
 void Diagnostics_area::reset_diagnostics_area() {
   DBUG_TRACE;
@@ -498,7 +498,7 @@ void Diagnostics_area::reset_condition_info(THD *thd) {
 
   m_conditions_list.clear();
   m_preexisting_sql_conditions.clear();
-  free_root(&m_condition_root, MYF(0));
+  m_condition_root.Clear();
   memset(m_current_statement_cond_count_by_qb, 0,
          sizeof(m_current_statement_cond_count_by_qb));
   m_current_statement_cond_count = 0;
@@ -673,7 +673,8 @@ void push_warning(THD *thd, uint code) {
   @param thd      Thread handle
   @param severity Severity of warning (note, warning)
   @param code     Error number
-  @param format   Error message printf format
+  @param format   Error message printf format, or nullptr to go by the error
+  code.
 */
 
 void push_warning_printf(THD *thd, Sql_condition::enum_severity_level severity,
@@ -684,7 +685,7 @@ void push_warning_printf(THD *thd, Sql_condition::enum_severity_level severity,
   DBUG_PRINT("enter", ("warning: %u", code));
 
   assert(code != 0);
-  assert(format != nullptr);
+  if (format == nullptr) format = ER_THD(thd, code);
 
   va_start(args, format);
   vsnprintf(warning, sizeof(warning), format, args);

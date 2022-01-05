@@ -5,6 +5,11 @@ function xtrabackup()
     run_cmd $XB_BIN $XB_ARGS "$@"
 }
 
+function rr_xtrabackup()
+{
+  run_cmd rr $XB_BIN $XB_ARGS "$@"
+}
+
 function mysql()
 {
     run_cmd $MYSQL $MYSQL_ARGS "$@"
@@ -61,7 +66,7 @@ function call_mysql_install_db()
 function mysql_ping()
 {
     local pid=$1
-    local attempts=200
+    local attempts=${MYSQLD_START_TIMEOUT:-200}
     local i
 
     for ((i=1; i<=attempts; i++))
@@ -259,6 +264,7 @@ function switch_server()
 
     MYSQL_ARGS="--defaults-file=$MYSQLD_VARDIR/my.cnf "
     MYSQLD_ARGS="--defaults-file=$MYSQLD_VARDIR/my.cnf ${MYSQLD_EXTRA_ARGS}"
+    MYSQLDUMP_ARGS=
     if [ "`whoami`" = "root" ]
     then
 	MYSQLD_ARGS="$MYSQLD_ARGS --user=root"
@@ -412,7 +418,7 @@ socket $MYSQLD_SOCKET"
 }
 
 ########################################################################
-# Stop server with the id specified as the first argument.  The server 
+# Stop server with the id specified as the first argument.  The server
 # is stopped in the fastest possible way.
 ########################################################################
 function stop_server_with_id()
@@ -517,19 +523,24 @@ loose-group_replication_recovery_use_ssl=ON
 loose-group_replication_recovery_get_public_key=ON
 loose-group_replication_local_address=\"127.0.0.1:${SRV_MYSQLD_GR_PORT[$i]}\"
 loose-group_replication_group_seeds= \"${GR_CLUSTER_ADDRESS%?}\""
+    if [ "$MYSQL_DEBUG_MODE" = "on" ]; then
+      MYSQLD_EXTRA_MY_CNF_OPTS="
+${MYSQLD_EXTRA_MY_CNF_OPTS}
+plugin_dir=${MYSQL_BASEDIR}/lib/plugin/debug"
+    fi
     start_server_with_id ${i} 'gr' $*
 
     # config GR User
     ${MYSQL} ${MYSQL_ARGS} -e "SET SQL_LOG_BIN=0;
-    CREATE USER rpl_user@'localhost' IDENTIFIED BY 'password' REQUIRE SSL;
+    CREATE USER IF NOT EXISTS rpl_user@'localhost' IDENTIFIED BY 'password' REQUIRE SSL;
     GRANT REPLICATION SLAVE ON *.* TO rpl_user@'localhost';
     GRANT BACKUP_ADMIN ON *.* TO rpl_user@'localhost';
-    CREATE USER rpl_user@'%' IDENTIFIED BY 'password' REQUIRE SSL;
+    CREATE USER IF NOT EXISTS rpl_user@'%' IDENTIFIED BY 'password' REQUIRE SSL;
     GRANT REPLICATION SLAVE ON *.* TO rpl_user@'%';
     GRANT BACKUP_ADMIN ON *.* TO rpl_user@'%';
     FLUSH PRIVILEGES;
-    SET SQL_LOG_BIN=1;
-    CHANGE MASTER TO MASTER_USER='rpl_user', MASTER_PASSWORD='password' FOR CHANNEL 'group_replication_recovery';"
+    SET SQL_LOG_BIN=1;"
+    ${MYSQL} ${MYSQL_ARGS} -e "RESET SLAVE; CHANGE MASTER TO MASTER_USER='rpl_user', MASTER_PASSWORD='password' FOR CHANNEL 'group_replication_recovery';"
 
     # Start/Bootstrap cluster
     if [[ ${i} -eq 1 ]];
@@ -783,7 +794,7 @@ EOF
 ##########################################################################
 function record_db_state()
 {
-    $MYSQLDUMP $MYSQL_ARGS -t --compact --skip-extended-insert \
+    $MYSQLDUMP $MYSQL_ARGS $MYSQLDUMP_ARGS -t --compact --skip-extended-insert \
         $1 >"$topdir/tmp/$1_old.sql"
 }
 
@@ -794,7 +805,7 @@ function record_db_state()
 ##########################################################################
 function verify_db_state()
 {
-    $MYSQLDUMP $MYSQL_ARGS -t --compact --skip-extended-insert \
+    $MYSQLDUMP $MYSQL_ARGS $MYSQLDUMP_ARGS -t --compact --skip-extended-insert \
         $1 >"$topdir/tmp/$1_new.sql"
     diff -u "$topdir/tmp/$1_old.sql" "$topdir/tmp/$1_new.sql"
 }
@@ -837,32 +848,67 @@ function grep_count()
 ####################################################
 function check_full_scan_inc_backup()
 {
-    local xb_performed_bmp_inc_backup="xtrabackup: using the full scan for incremental backup"
-    local xb_performed_full_scan_inc_backup="xtrabackup: using the changed page bitmap"
+    local xb_performed_full_scan_inc_backup="xtrabackup: using the full scan for incremental backup"
+    local xb_performed_bitmap_backup="xtrabackup: using the changed page bitmap"
+    local xb_performed_pagetracking_inc_backup="xtrabackup: using the pagetracking"
 
-    if ! grep -q "$xb_performed_bmp_inc_backup" $OUTFILE ;
+    if ! grep -q "$xb_performed_full_scan_inc_backup" $OUTFILE ;
     then
         vlog "xtrabackup did not perform a full scan for the incremental backup."
         exit -1
     fi
-    if grep -q "$xb_performed_full_scan_inc_backup" $OUTFILE ;
+    if grep -q "$xb_performed_bitmap_backup" $OUTFILE ;
     then
         vlog "xtrabackup appeared to use bitmaps instead of full scan for the incremental backup."
+        exit -1
+    fi
+    if grep -q "$xb_performed_pagetracking_inc_backup" $OUTFILE ;
+    then
+        vlog "xtrabackup appeared to use pagtracking instead of full scan for the incremental backup."
         exit -1
     fi
 }
 
 function check_bitmap_inc_backup()
 {
-    local xb_performed_bmp_inc_backup="xtrabackup: using the full scan for incremental backup"
-    local xb_performed_full_scan_inc_backup="xtrabackup: using the changed page bitmap"
+    local xb_performed_full_scan_inc_backup="xtrabackup: using the full scan for incremental backup"
+    local xb_performed_bitmap_backup="xtrabackup: using the changed page bitmap"
+    local xb_performed_pagetracking_inc_backup="xtrabackup: using the pagetracking"
 
-    if ! grep -q "$xb_performed_full_scan_inc_backup" $OUTFILE ;
+    if ! grep -q "$xb_performed_bitmap_backup" $OUTFILE ;
     then
         vlog "xtrabackup did not use bitmaps for the incremental backup."
         exit -1
     fi
-    if grep -q "$xb_performed_bmp_inc_backup" $OUTFILE ;
+    if grep -q "$xb_performed_full_scan_inc_backup" $OUTFILE ;
+    then
+        vlog "xtrabackup used a full scan instead of bitmaps for the incremental backup."
+        exit -1
+    fi
+    if grep -q "$xb_performed_pagetracking_inc_backup" $OUTFILE ;
+    then
+        vlog "xtrabackup appeared to use pagtracking instead of full scan for the incremental backup."
+        exit -1
+    fi
+}
+
+function check_pagetracking_inc_backup()
+{
+    local xb_performed_full_scan_inc_backup="xtrabackup: using the full scan for incremental backup"
+    local xb_performed_bitmap_backup="xtrabackup: using the changed page bitmap"
+    local xb_performed_pagetracking_inc_backup="xtrabackup: Using pagetracking feature for incremental backup"
+
+    if ! grep -q "$xb_performed_pagetracking_inc_backup" $OUTFILE ;
+    then
+        vlog "xtrabackup did not use pagtracking for the incremental backup."
+        exit -1
+    fi
+    if grep -q "$xb_performed_bitmap_backup" $OUTFILE ;
+    then
+        vlog "xtrabackup used bitmaps for the incremental backup."
+        exit -1
+    fi
+    if grep -q "$xb_performed_full_scan_inc_backup" $OUTFILE ;
     then
         vlog "xtrabackup used a full scan instead of bitmaps for the incremental backup."
         exit -1
@@ -1073,6 +1119,25 @@ function require_tokudb()
     fi
 }
 
+########################################################################
+# Return 0 if the xtrabackup has AddressSanitizer support
+########################################################################
+function is_asan()
+{
+    ldd $XB_BIN | grep -q libasan
+    return $?
+}
+
+#########################################################################
+# Skip test if xtrabackup has AddressSanitizer support
+########################################################################
+function skip_if_asan()
+{
+    if is_asan; then
+        skip_test "Incompatible with AddressSanitizer"
+    fi
+}
+
 ##############################################################################
 # Start a server with TokuDB plugins loaded and enabled.
 # Server id is 1, any arguments are passsed to the mysqld.
@@ -1095,7 +1160,7 @@ tokudb_background_job_status=ha_tokudb.so"
 
 function require_rocksdb()
 {
-   if ! test -a $(dirname ${MYSQLD})/../lib/mysql/plugin/ha_rocksdb.so ; then
+   if ! test -a $(dirname ${MYSQLD})/../lib/plugin/ha_rocksdb.so ; then
         skip_test "Requires RocksDB"
    fi
 }
@@ -1307,6 +1372,52 @@ function innodb_checkpoint_lsn()
 {
     ${MYSQL} ${MYSQL_ARGS} -e "SHOW ENGINE InnoDB STATUS\G" | \
         grep "Last checkpoint at" | awk '{ print $4 }'
+}
+
+#check row count in a database/table
+#@in database
+#@in table
+#@in expected row count
+########################################################################
+function check_count() {
+  local db=$1
+  local table=$2
+  local expected_row_count=$3
+  local row_count=`$MYSQL $MYSQL_ARGS -Ns -e "select count(1) from $table" $db | awk {'print $1'}`
+  vlog "row count in table $table is $row_count"
+
+  if [ "$row_count" != $expected_row_count ]; then
+   vlog "rows in table t1 is $row_count when it should be $expected_row_count"
+   exit -1
+  fi
+}
+
+#general method to restore
+########################################################################
+function backup_and_restore() {
+  local db=$1
+  record_db_state $db
+  rm -rf $topdir/backup
+  mkdir -p $topdir/backup
+
+  ## backup and prepare based on if keyring is used
+  if [ -z ${plugin_dir+x} ]
+  then
+    xtrabackup --backup --target-dir=$topdir/backup
+    run_cmd $XB_BIN $XB_ARGS --prepare --target-dir=$topdir/backup
+  else
+    xtrabackup --backup --target-dir=$topdir/backup --xtrabackup-plugin-dir=${plugin_dir}
+    run_cmd $XB_BIN $XB_ARGS --xtrabackup-plugin-dir=${plugin_dir} --prepare \
+      --target-dir=$topdir/backup ${keyring_args}
+  fi
+
+  # Restore
+  stop_server
+  rm -rf $mysql_datadir
+  xtrabackup --copy-back --target-dir=$topdir/backup
+  start_server
+  # Verify backup
+  run_cmd verify_db_state $db
 }
 
 # Grep mysql.general_log for statements executed by xtrabackup

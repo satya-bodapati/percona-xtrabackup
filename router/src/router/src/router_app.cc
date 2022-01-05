@@ -656,6 +656,7 @@ void MySQLRouter::start() {
     auto pid = getpid();
     std::ofstream pidfile(pid_file_path_);
     if (pidfile.good()) {
+      pid_file_created_ = true;
       pidfile << pid << std::endl;
       pidfile.close();
       log_info("PID %d written to '%s'", pid, pid_file_path_.c_str());
@@ -714,8 +715,8 @@ void MySQLRouter::start() {
 }
 
 void MySQLRouter::stop() {
-  // Remove the pidfile if present
-  if (!pid_file_path_.empty()) {
+  // Remove the pidfile if present and was created by us.
+  if (!pid_file_path_.empty() && pid_file_created_) {
     mysql_harness::Path pid_file_path(pid_file_path_);
     if (pid_file_path.is_regular()) {
       log_debug("Removing pidfile %s", pid_file_path.c_str());
@@ -1166,12 +1167,71 @@ void MySQLRouter::prepare_command_options() noexcept {
   arg_handler_.add_option(
       OptionNames({"--conf-use-gr-notifications"}),
       "Whether to enable handling of cluster state change GR notifications.",
-      CmdOptionValueReq::none, "",
-      [this](const std::string &) {
-        this->bootstrap_options_["use-gr-notifications"] = "1";
+      CmdOptionValueReq::optional, "",
+      [this](const std::string &value) {
+        if (value == "0" || value == "1") {
+          this->bootstrap_options_["use-gr-notifications"] = value;
+        } else if (value.empty()) {
+          this->bootstrap_options_["use-gr-notifications"] = "1";
+        } else {
+          throw std::runtime_error(
+              "Value for parameter '--conf-use-gr-notifications' needs to be "
+              "one of: ['0', '1']");
+        }
       },
       [this](const std::string &) {
         this->assert_bootstrap_mode("--conf-use-gr-notifications");
+      });
+
+  arg_handler_.add_option(
+      OptionNames({"--conf-target-cluster"}),
+      "Router's target Cluster from the ClusterSet('current' or 'primary').",
+      CmdOptionValueReq::required, "",
+      [this](const std::string &value) {
+        if (this->bootstrap_options_.count("target-cluster-by-name") > 0) {
+          throw std::runtime_error(
+              "Parameters '--conf-target-cluster' and "
+              "'--conf-target-cluster-by-name' are mutually exclusive and "
+              "can't be used together");
+        }
+
+        std::string value_lowercase{value};
+        std::transform(value_lowercase.begin(), value_lowercase.end(),
+                       value_lowercase.begin(), ::tolower);
+
+        if (value_lowercase != "primary" && value_lowercase != "current") {
+          throw std::runtime_error(
+              "Value for parameter '--conf-target-cluster' needs to be one of: "
+              "['primary', 'current']");
+        }
+
+        this->bootstrap_options_["target-cluster"] = value_lowercase;
+      },
+      [this](const std::string &) {
+        this->assert_bootstrap_mode("--conf-target-cluster");
+      });
+
+  arg_handler_.add_option(
+      OptionNames({"--conf-target-cluster-by-name"}),
+      "Name of the target Cluster for the Router when bootstrapping against "
+      "the ClusterSet",
+      CmdOptionValueReq::required, "",
+      [this](const std::string &value) {
+        if (this->bootstrap_options_.count("target-cluster") > 0) {
+          throw std::runtime_error(
+              "Parameters '--conf-target-cluster' and "
+              "'--conf-target-cluster-by-name' are mutually exclusive and "
+              "can't be used together");
+        }
+        if (value.empty()) {
+          throw std::runtime_error(
+              "Value for parameter '--conf-target-cluster-by-name' can't be "
+              "empty");
+        }
+        this->bootstrap_options_["target-cluster-by-name"] = value;
+      },
+      [this](const std::string &) {
+        this->assert_bootstrap_mode("--conf-target-cluster-by-name");
       });
 
   arg_handler_.add_option(

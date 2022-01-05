@@ -2005,7 +2005,7 @@ EXECUTING:[11][EXECUTE ps1]
 			[meta][field] org table name: 
 			[meta][field] col name: 1
 			[meta][field] org col name: 
-			[meta][field] length: 1
+			[meta][field] length: 2
 			[meta][field] charsetnr: 8
 			[meta][field] flags: 129 (NOT_NULL BINARY )
 			[meta][field] decimals: 0
@@ -2884,7 +2884,7 @@ EXECUTING:[9][SELECT @a]
 			[meta][field] org col name: 
 			[meta][field] length: 21
 			[meta][field] charsetnr: 33
-			[meta][field] flags: 128 (BINARY )
+			[meta][field] flags: 160 (UNSIGNED BINARY )
 			[meta][field] decimals: 0
 			[meta][field] type: LONGLONG (8)
 
@@ -2916,7 +2916,7 @@ EXECUTING:[9][SELECT @a]
 			[meta][field] org col name: 
 			[meta][field] length: 21
 			[meta][field] charsetnr: 33
-			[meta][field] flags: 128 (BINARY )
+			[meta][field] flags: 160 (UNSIGNED BINARY )
 			[meta][field] decimals: 0
 			[meta][field] type: LONGLONG (8)
 
@@ -5214,7 +5214,7 @@ EXECUTING:[11][EXECUTE ps1]
 			[meta][field] org table name: 
 			[meta][field] col name: 1
 			[meta][field] org col name: 
-			[meta][field] length: 1
+			[meta][field] length: 2
 			[meta][field] charsetnr: 8
 			[meta][field] flags: 129 (NOT_NULL BINARY )
 			[meta][field] decimals: 0
@@ -6093,7 +6093,7 @@ EXECUTING:[9][SELECT @a]
 			[meta][field] org col name: 
 			[meta][field] length: 21
 			[meta][field] charsetnr: 33
-			[meta][field] flags: 128 (BINARY )
+			[meta][field] flags: 160 (UNSIGNED BINARY )
 			[meta][field] decimals: 0
 			[meta][field] type: LONGLONG (8)
 
@@ -6125,7 +6125,7 @@ EXECUTING:[9][SELECT @a]
 			[meta][field] org col name: 
 			[meta][field] length: 21
 			[meta][field] charsetnr: 33
-			[meta][field] flags: 128 (BINARY )
+			[meta][field] flags: 160 (UNSIGNED BINARY )
 			[meta][field] decimals: 0
 			[meta][field] type: LONGLONG (8)
 

@@ -24,6 +24,7 @@
 
 #include "consumer_restore.hpp"
 #include <kernel/ndb_limits.h>
+#include <NdbIndexStat.hpp>
 #include <NdbSleep.h>
 #include <NdbTick.h>
 #include <NdbToolsProgramExitCodes.hpp>
@@ -1475,7 +1476,7 @@ Uint32 BackupRestore::map_ng(Uint32 ng) const
 bool BackupRestore::map_nodegroups(Uint32 *ng_array, Uint32 no_parts) const
 {
   Uint32 i;
-  bool mapped = FALSE;
+  bool mapped = false;
   DBUG_ENTER("map_nodegroups");
 
   assert(no_parts < MAX_NDB_PARTITIONS);
@@ -1484,7 +1485,7 @@ bool BackupRestore::map_nodegroups(Uint32 *ng_array, Uint32 no_parts) const
     Uint32 ng;
     ng = map_ng(ng_array[i]);
     if (ng != ng_array[i])
-      mapped = TRUE;
+      mapped = true;
     ng_array[i] = ng;
   }
   DBUG_RETURN(mapped);
@@ -1506,8 +1507,8 @@ bool BackupRestore::search_replace(char *search_str, char **new_data,
 {
   uint search_str_len = (uint)strlen(search_str);
   uint inx = 0;
-  bool in_delimiters = FALSE;
-  bool escape_char = FALSE;
+  bool in_delimiters = false;
+  bool escape_char = false;
   char start_delimiter = 0;
   DBUG_ENTER("search_replace");
 
@@ -1517,34 +1518,34 @@ bool BackupRestore::search_replace(char *search_str, char **new_data,
     copy_byte(data, new_data, new_data_len);
     if (escape_char)
     {
-      escape_char = FALSE;
+      escape_char = false;
     }
     else if (in_delimiters)
     {
       if (c == start_delimiter)
-        in_delimiters = FALSE;
+        in_delimiters = false;
     }
     else if (c == '\'' || c == '\"')
     {
-      in_delimiters = TRUE;
+      in_delimiters = true;
       start_delimiter = c;
     }
     else if (c == '\\')
     {
-      escape_char = TRUE;
+      escape_char = true;
     }
     else if (c == search_str[inx])
     {
       inx++;
       if (inx == search_str_len)
       {
-        bool found = FALSE;
+        bool found = false;
         uint number = 0;
         while (*data != end_data)
         {
           if (isdigit(**data))
           {
-            found = TRUE;
+            found = true;
             number = (10 * number) + (**data);
             if (number > MAX_NDB_NODES)
               break;
@@ -1571,19 +1572,19 @@ bool BackupRestore::search_replace(char *search_str, char **new_data,
               **new_data = digits[no_digits];
               *new_data_len+=1;
             }
-            DBUG_RETURN(FALSE); 
+            DBUG_RETURN(false);
           }
           else
             break;
           (*data)++;
         }
-        DBUG_RETURN(TRUE);
+        DBUG_RETURN(true);
       }
     }
     else
       inx = 0;
   } while (*data < end_data);
-  DBUG_RETURN(FALSE);
+  DBUG_RETURN(false);
 }
 
 bool BackupRestore::map_in_frm(char *new_data, const char *data,
@@ -1624,9 +1625,9 @@ bool BackupRestore::map_in_frm(char *new_data, const char *data,
   {
     copy_byte(&data, &new_data, new_data_len);
   } while (data < end_data);
-  DBUG_RETURN(FALSE);
+  DBUG_RETURN(false);
 error:
-  DBUG_RETURN(TRUE);
+  DBUG_RETURN(true);
 }
 
 
@@ -1670,12 +1671,12 @@ bool BackupRestore::translate_frm(NdbDictionary::Table *table) const
   const uint extra_growth = no_parts * 4;
   if ((new_data = (char*) malloc(data_len + extra_growth)))
   {
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(true);
   }
   if (map_in_frm(new_data, (const char*)data, (uint)data_len, &new_data_len))
   {
     free(new_data);
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(true);
   }
   const int set_result =
       table->setExtraMetadata(1, // version 1 for frm
@@ -1683,7 +1684,7 @@ bool BackupRestore::translate_frm(NdbDictionary::Table *table) const
   if (set_result != 0)
   {
     free(new_data);
-    DBUG_RETURN(TRUE);
+    DBUG_RETURN(true);
   }
 
   // NOTE! the memory allocated in 'new_data' is not released here
@@ -1692,7 +1693,7 @@ bool BackupRestore::translate_frm(NdbDictionary::Table *table) const
   // NOTE! the usage of this function and its functionality is described in
   // BUG25449055 NDB_RESTORE TRANSLATE FRM FOR USERDEFINED PARTITIOING TABLES
 
-  DBUG_RETURN(FALSE);
+  DBUG_RETURN(false);
 }
 
 #include <signaldata/DictTabInfo.hpp>
@@ -2196,7 +2197,25 @@ BackupRestore::column_compatible_check(const char* tableName,
     restoreLogger.log_info("Column %s.%s "
         "%s nullable in the DB", tableName, backupCol->getName(),
         (dbCol->getNullable()?" is":" is not"));
-    similarEnough = false;
+    if (dbCol->getNullable()) // nullable -> not null conversion
+      similarEnough = ((m_tableChangesMask & TCM_ATTRIBUTE_PROMOTION) != 0);
+    else if (backupCol->getNullable()) // not null -> nullable conversion
+      similarEnough = ((m_tableChangesMask & TCM_ATTRIBUTE_DEMOTION) != 0);
+    if (!similarEnough)
+    {
+      if (backupCol->getNullable())
+      {
+        restoreLogger.log_error("Conversion of nullable column in backup to non-nullable column"
+            " in DB is possible, but cannot be done because option"
+            " --lossy-conversions is not specified");
+      }
+      else
+      {
+        restoreLogger.log_error("Conversion of non-nullable column in backup to nullable column"
+            " in DB is possible, but cannot be done because option "
+            "--promote-attributes is not specified");
+      }
+    }
   }
 
   if (backupCol->getPrecision() != dbCol->getPrecision())
@@ -2422,19 +2441,7 @@ BackupRestore::table_compatible_check(TableS & tableS)
     return true;
 
   const NdbTableImpl & tmptab = NdbTableImpl::getImpl(* tableS.m_dictTable);
-  if ((int) tmptab.m_indexType != (int) NdbDictionary::Index::Undefined)
-  {
-    if((int) tmptab.m_indexType == (int) NdbDictionary::Index::UniqueHashIndex)
-    {
-      BaseString dummy1, dummy2, indexname;
-      dissect_index_name(tablename, dummy1, dummy2, indexname);
-      restoreLogger.log_error( "WARNING: Table %s contains unique index %s."
-           "This can cause ndb_restore failures with duplicate key errors "
-           "while restoring data. To avoid duplicate key errors, use "
-           "--disable-indexes before restoring data and --rebuild-indexes "
-           "after data is restored.",
-           tmptab.m_primaryTable.c_str(), indexname.c_str());
-    }
+  if ((int)tmptab.m_indexType != (int)NdbDictionary::Index::Undefined) {
     return true;
   }
 
@@ -2454,6 +2461,52 @@ BackupRestore::table_compatible_check(TableS & tableS)
     restoreLogger.log_error("Unable to find table: %s error: %u: %s",
         table_name.c_str(), dict->getNdbError().code, dict->getNdbError().message);
     return false;
+  }
+
+  /**
+   * Check if target table is restored with --disable-indexes in previous steps.
+   * If it already has indexes, it indicates that --disable-indexes isn't used.
+   * In that case, dispaly a warning that it could lead to duplicate key errors
+   * if the indexes already restored are unique indexes.
+   */
+  {
+    NdbDictionary::Dictionary::List index_list;
+    if (dict->listIndexes(index_list, *tab) != 0) {
+      restoreLogger.log_error("Failed to list indexes due to NDB error %u: %s",
+                              dict->getNdbError().code,
+                              dict->getNdbError().message);
+      return false;
+    }
+
+    bool contains_unique_indexes = false;
+    for (unsigned i = 0; i < index_list.count; i++) {
+      const char *index_name = index_list.elements[i].name;
+      const NdbDictionary::Index *index =
+          dict->getIndexGlobal(index_name, *tab);
+      if (!index) {
+        restoreLogger.log_error(
+            "Failed to open index %s from NDB due to error %u: %s", index_name,
+            dict->getNdbError().code, dict->getNdbError().message);
+        return false;
+      }
+      if ((int)index->getType() == (int)NdbDictionary::Index::UniqueHashIndex) {
+        if (!contains_unique_indexes) {
+          restoreLogger.log_error("Unique indexes: ");
+        }
+        restoreLogger.log_error("%s", index_name);
+        contains_unique_indexes = true;
+      }
+    }
+
+    if (contains_unique_indexes) {
+      restoreLogger.log_error(
+          "WARNING: Table %s contains unique indexes. "
+          "This can cause ndb_restore failures with duplicate key errors "
+          "while restoring data. To avoid duplicate key errors, use "
+          "--disable-indexes before restoring data and --rebuild-indexes "
+          "after data is restored.",
+          tab->getName());
+    }
   }
 
   /**
@@ -3044,6 +3097,31 @@ BackupRestore::createSystable(const TableS & tables){
 }
 
 bool
+BackupRestore::handle_index_stat_tables() {
+  if (!m_restore_meta) return true;
+
+  m_ndb->setDatabaseName(NDB_REP_DB);
+  m_ndb->setSchemaName("def");
+
+  NdbIndexStat index_stat;
+
+  if (index_stat.check_systables(m_ndb) == 0) {
+    restoreLogger.log_debug("Index stat tables exist");
+    return true;
+  }
+
+  if (index_stat.create_systables(m_ndb) == 0) {
+    restoreLogger.log_debug("Index stat tables created");
+    return true;
+  }
+
+  restoreLogger.log_error("Creation of index stat tables failed: %d: %s",
+                          index_stat.getNdbError().code,
+                          index_stat.getNdbError().message);
+  return false;
+}
+
+bool
 BackupRestore::table(const TableS & table){
   if (!m_restore && !m_metadata_work_requested)
     return true;
@@ -3289,10 +3367,10 @@ BackupRestore::table(const TableS & table){
   }
   const Uint32 orig_table_id = table.m_dictTable->getTableId();
   const NdbDictionary::Table* null = 0;
-  m_new_tables.fill(orig_table_id, null);
+  m_new_tables.fill(orig_table_id + 1, null);
   m_new_tables[orig_table_id] = tab;
   Uint64 zeroAutoVal = 0;
-  m_auto_values.fill(orig_table_id, zeroAutoVal);
+  m_auto_values.fill(orig_table_id + 1, zeroAutoVal);
 
   m_n_tables++;
 
@@ -3354,6 +3432,43 @@ BackupRestore::fk(Uint32 type, const void * ptr)
       }
       m_fks.push_back(fk_ptr);
       restoreLogger.log_info("Save FK %s", fk_ptr->getName());
+
+      if (m_disable_indexes)
+      {
+        // Extract foreign key name from format
+        // like 10/14/fk1 where 10,14 are old table ids
+        const char *fkname = 0;
+        Vector<BaseString> splitname;
+        BaseString tmpname(fk_ptr->getName());
+        int n = tmpname.split(splitname, "/");
+        if (n == 3)
+        {
+          fkname = splitname[2].c_str();
+        }
+        else
+        {
+          restoreLogger.log_error("Invalid foreign key name %s",
+                                  tmpname.c_str());
+          return false;
+        }
+        NdbDictionary::ForeignKey fk;
+        char fullname[MAX_TAB_NAME_SIZE];
+        sprintf(fullname, "%d/%d/%s", parent->getObjectId(),
+                child->getObjectId(), fkname);
+
+        // Drop foreign keys if they exist
+        if (dict->getForeignKey(fk, fullname) == 0)
+        {
+          restoreLogger.log_info("Dropping Foreign key %s", fkname);
+          if (dict->dropForeignKey(fk) != 0)
+          {
+            restoreLogger.log_error("Failed to drop fk '%s' : %u %s",
+                                    fk_ptr->getName(), dict->getNdbError().code,
+                                    dict->getNdbError().message);
+            return false;
+          }
+        }
+      }
     }
     return true;
     break;
@@ -3449,11 +3564,22 @@ BackupRestore::endOfTables(){
     }
     else if (m_disable_indexes)
     {
-      int res = dict->dropIndex(idx->getName(), prim->getName());
-      if (res == 0)
+      // Drop indexes if they exist
+      if(dict->getIndex(idx->getName(), prim->getName()))
       {
-      restoreLogger.log_info("Dropped index `%s` on `%s`",
+        if (dict->dropIndex(idx->getName(), prim->getName()) == 0)
+        {
+          restoreLogger.log_info("Dropped index `%s` on `%s`",
             split_idx[3].c_str(), table_name.c_str());
+        }
+        else
+        {
+          restoreLogger.log_info("Failed to drop index `%s` on `%s`: %u %s",
+                                 split_idx[3].c_str(), table_name.c_str(),
+                                 dict->getNdbError().code,
+                                 dict->getNdbError().message);
+          return false;
+        }
       }
     }
     Uint32 id = prim->getObjectId();
@@ -3788,10 +3914,9 @@ void BackupRestore::tuple_a(restore_callback_t *cb)
     {
       if (errorHandler(cb)) 
 	continue;
-      restoreLogger.log_error("Cannot get operation: %u: %s", cb->connection->getNdbError().code, cb->connection->getNdbError().message);
+      restoreLogger.log_error("Cannot get operation: %u: %s", cb->error_code,
+                              m_ndb->getNdbError(cb->error_code).message);
       set_fatal_error(true);
-      m_ndb->closeTransaction(cb->connection);
-      cb->connection = NULL;
       return;
     } // if
     
@@ -3799,10 +3924,9 @@ void BackupRestore::tuple_a(restore_callback_t *cb)
     {
       if (errorHandler(cb))
 	continue;
-      restoreLogger.log_error("Error defining op: %u: %s", cb->connection->getNdbError().code, cb->connection->getNdbError().message);
+      restoreLogger.log_error("Error defining op: %u: %s", cb->error_code,
+                              m_ndb->getNdbError(cb->error_code).message);
       set_fatal_error(true);
-      m_ndb->closeTransaction(cb->connection);
-      cb->connection = NULL;
       return;
     } // if
 
@@ -3940,10 +4064,9 @@ void BackupRestore::tuple_a(restore_callback_t *cb)
     {
       if (errorHandler(cb)) 
 	continue;
-      restoreLogger.log_error("Error defining op: %u: %s", cb->connection->getNdbError().code, cb->connection->getNdbError().message);
+      restoreLogger.log_error("Error defining op: %u: %s", cb->error_code,
+                              m_ndb->getNdbError(cb->error_code).message);
       set_fatal_error(true);
-      m_ndb->closeTransaction(cb->connection);
-      cb->connection = NULL;
       return;
     }
 
@@ -4420,7 +4543,7 @@ BackupRestore::dropPkMappingIndex(const TableS* table)
         dropped = true;
         break;
       }
-      /* Fall through */
+      [[fallthrough]];
     default:
       restoreLogger.log_error("Error dropping mapping index on %s %u %s",
                               tablename,
@@ -4561,8 +4684,8 @@ retry:
     if (errorHandler(cb)) // temp error, retry
       goto retry;
     set_fatal_error(true);
-    restoreLogger.log_error("Cannot start transaction: %u: %s",
-              m_ndb->getNdbError().code, m_ndb->getNdbError().message);
+    restoreLogger.log_error("Cannot start transaction: %u: %s", cb->error_code,
+                            m_ndb->getNdbError(cb->error_code).message);
     return;
   }
 
@@ -4585,8 +4708,8 @@ retry:
     if (errorHandler(cb)) // temp error, retry
       goto retry;
     set_fatal_error(true);
-    restoreLogger.log_error("Cannot get operation: %u: %s",
-              trans->getNdbError().code, trans->getNdbError().message);
+    restoreLogger.log_error("Cannot get operation: %u: %s", cb->error_code,
+                            m_ndb->getNdbError(cb->error_code).message);
     return;
   }
 

@@ -4,7 +4,7 @@
 How to create a new (or repair a broken) GTID-based Replica
 ================================================================================
 
-|MySQL| 5.6 introduced the new Global Transaction ID (`GTID
+|MySQL| 5.6 introduced the Global Transaction ID (`GTID
 <http://dev.mysql.com/doc/refman/5.6/en/replication-gtids-concepts.html>`_)
 support in replication. |Percona XtraBackup| automatically
 stores the ``GTID`` value in the :file:`xtrabackup_binlog_info` when doing the
@@ -112,25 +112,30 @@ If you are using version 8.0.23 or later, use `CHANGE_REPLICATION_SOURCE_TO and 
 
 .. note::
 
-   The example above is applicable to |PXC|. The ``wsrep_on`` variable
+   The example above is applicable to Percona XtraDB Cluster. The ``wsrep_on`` variable
    is set to `0` before resetting the source (``RESET MASTER``). The
-   reason is that |PXC| will not allow resetting the source if
+   reason is that Percona XtraDB Cluster will not allow resetting the source if
    ``wsrep_on=1``.
 
 STEP 5: Check the replication status
 ================================================================================
 
-The following command will show the replica status:
+The following command returns the replica status:
 
-.. code-block:: guess
+.. code-block:: text 
 
-    > SHOW SLAVE STATUS\G
-            [..]
-            Slave_IO_Running: Yes
-            Slave_SQL_Running: Yes
-            [...]
-            Retrieved_Gtid_Set: c777888a-b6df-11e2-a604-080027635ef5:5
-            Executed_Gtid_Set: c777888a-b6df-11e2-a604-080027635ef5:1-5
+      SHOW REPLICA STATUS\G
+      [..]
+      Slave_IO_Running: Yes
+      Slave_SQL_Running: Yes
+      [...]
+      Retrieved_Gtid_Set: c777888a-b6df-11e2-a604-080027635ef5:5
+      Executed_Gtid_Set: c777888a-b6df-11e2-a604-080027635ef5:1-5
+
+.. note::
+
+
+   The command `SHOW SLAVE STATUS <https://dev.mysql.com/doc/refman/8.0/en/show-slave-status.html>`__  is deprecated. Use `SHOW REPLICA STATUS <https://dev.mysql.com/doc/refman/8.0/en/show-replica-status.html>`__. 
 
 We can see that the replica has retrieved a new transaction with number 5, so
 transactions from 1 to 5 are already on this slave.

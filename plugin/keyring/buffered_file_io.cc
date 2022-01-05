@@ -295,7 +295,7 @@ bool Buffered_file_io::check_if_keyring_file_can_be_opened_or_created() {
   @retval true      - there was an error with initializing keyring file
   @retval false     - keyring file has been initialized successfully
 */
-bool Buffered_file_io::init(std::string *keyring_filename) {
+bool Buffered_file_io::init(const std::string *keyring_filename) {
   // file name can't be empty
   assert(keyring_filename->empty() == false);
 
@@ -345,8 +345,9 @@ bool Buffered_file_io::flush_buffer_to_file(Buffer *buffer,
                     MYF(MY_WME)) == file_version.length() &&
       file_io.write(file, data, data_size, MYF(MY_WME)) == data_size &&
       file_io.write(
-          file, reinterpret_cast<const uchar *>(Checker::eofTAG.c_str()),
-          Checker::eofTAG.length(), MYF(MY_WME)) == Checker::eofTAG.length() &&
+          file, reinterpret_cast<const uchar *>(Checker::get_eofTAG().c_str()),
+          Checker::get_eofTAG().length(),
+          MYF(MY_WME)) == Checker::get_eofTAG().length() &&
       file_io.write(file, reinterpret_cast<const uchar *>(buffer_digest->value),
                     SHA256_DIGEST_LENGTH, MYF(0)) == SHA256_DIGEST_LENGTH)
     return false;

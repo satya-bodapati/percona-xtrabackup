@@ -84,26 +84,6 @@
 #include <mach/mach_time.h>
 #endif
 
-#if defined(__SUNPRO_CC) && defined(__sparcv9) && defined(_LP64) && \
-    !defined(__SunOS_5_7)
-extern "C" ulonglong my_timer_cycles_il_sparc64();
-#elif defined(__SUNPRO_CC) && defined(_ILP32) && !defined(__SunOS_5_7)
-extern "C" ulonglong my_timer_cycles_il_sparc32();
-#elif defined(__SUNPRO_CC) && defined(__i386) && defined(_ILP32)
-extern "C" ulonglong my_timer_cycles_il_i386();
-#elif defined(__SUNPRO_CC) && defined(__x86_64) && defined(_LP64)
-extern "C" ulonglong my_timer_cycles_il_x86_64();
-#elif defined(__SUNPRO_C) && defined(__sparcv9) && defined(_LP64) && \
-    !defined(__SunOS_5_7)
-ulonglong my_timer_cycles_il_sparc64();
-#elif defined(__SUNPRO_C) && defined(_ILP32) && !defined(__SunOS_5_7)
-ulonglong my_timer_cycles_il_sparc32();
-#elif defined(__SUNPRO_C) && defined(__i386) && defined(_ILP32)
-ulonglong my_timer_cycles_il_i386();
-#elif defined(__SUNPRO_C) && defined(__x86_64) && defined(_LP64)
-ulonglong my_timer_cycles_il_x86_64();
-#endif
-
 /*
   For cycles, we depend on RDTSC for x86 platforms,
   or on time buffer (which is not really a cycle count
@@ -118,8 +98,6 @@ ulonglong my_timer_cycles(void) {
   ulonglong result;
   __asm__ __volatile__("rdtsc" : "=A"(result));
   return result;
-#elif defined(__SUNPRO_C) && defined(__i386)
-  __asm("rdtsc");
 #elif defined(__GNUC__) && defined(__x86_64__)
   ulonglong result;
   __asm__ __volatile__(
@@ -163,21 +141,8 @@ ulonglong my_timer_cycles(void) {
     result = x1;
     return (result << 32) | x2;
   }
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(__sparcv9) && \
-    defined(_LP64) && !defined(__SunOS_5_7)
-  return (my_timer_cycles_il_sparc64());
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(_ILP32) && \
-    !defined(__SunOS_5_7)
-  return (my_timer_cycles_il_sparc32());
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(__i386) && \
-    defined(_ILP32)
-  /* This is probably redundant for __SUNPRO_C. */
-  return (my_timer_cycles_il_i386());
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(__x86_64) && \
-    defined(_LP64)
-  return (my_timer_cycles_il_x86_64());
 #elif defined(__GNUC__) && (defined(__sparcv9) || defined(__sparc_v9__)) && \
-    defined(_LP64)
+    defined(_LP64) && !defined(__clang__)
   {
     ulonglong result;
     __asm __volatile__("rd %%tick,%0" : "=r"(result));
@@ -471,8 +436,6 @@ void my_timer_init(MY_TIMER_INFO *mti) {
   mti->cycles.frequency = 1000000000;
 #if defined(__GNUC__) && defined(__i386__)
   mti->cycles.routine = MY_TIMER_ROUTINE_ASM_X86;
-#elif defined(__SUNPRO_C) && defined(__i386)
-  mti->cycles.routine = MY_TIMER_ROUTINE_ASM_X86;
 #elif defined(__GNUC__) && defined(__x86_64__)
   mti->cycles.routine = MY_TIMER_ROUTINE_ASM_X86_64;
 #elif defined(_WIN64) && defined(_M_X64)
@@ -485,23 +448,9 @@ void my_timer_init(MY_TIMER_INFO *mti) {
 #elif defined(__GNUC__) && (defined(__powerpc__) || defined(__POWERPC__)) && \
     (!defined(__64BIT__) && !defined(_ARCH_PPC64))
   mti->cycles.routine = MY_TIMER_ROUTINE_ASM_PPC;
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(__sparcv9) && \
-    defined(_LP64) && !defined(__SunOS_5_7)
-  mti->cycles.routine = MY_TIMER_ROUTINE_ASM_SUNPRO_SPARC64;
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(_ILP32) && \
-    !defined(__SunOS_5_7)
-  mti->cycles.routine = MY_TIMER_ROUTINE_ASM_SUNPRO_SPARC32;
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(__i386) && \
-    defined(_ILP32)
-  mti->cycles.routine = MY_TIMER_ROUTINE_ASM_SUNPRO_I386;
-#elif (defined(__SUNPRO_CC) || defined(__SUNPRO_C)) && defined(__x86_64) && \
-    defined(_LP64)
-  mti->cycles.routine = MY_TIMER_ROUTINE_ASM_SUNPRO_X86_64;
 #elif defined(__GNUC__) && (defined(__sparcv9) || defined(__sparc_v9__)) && \
     defined(_LP64)
   mti->cycles.routine = MY_TIMER_ROUTINE_ASM_GCC_SPARC64;
-#elif defined(__GNUC__) && defined(__sparc__) && !defined(_LP64)
-  mti->cycles.routine = MY_TIMER_ROUTINE_ASM_GCC_SPARC32;
 #elif defined(__GNUC__) && defined(__aarch64__)
   mti->cycles.routine = MY_TIMER_ROUTINE_ASM_AARCH64;
 #elif defined(HAVE_SYS_TIMES_H) && defined(HAVE_GETHRTIME)

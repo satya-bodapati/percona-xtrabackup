@@ -24,6 +24,7 @@
 #define RPL_GTID_H_INCLUDED
 
 #include <atomic>
+#include <cinttypes>
 #include <list>
 #include <mutex>  // std::adopt_lock_t
 
@@ -96,7 +97,7 @@ class THD;
 /// Type of SIDNO (source ID number, first component of GTID)
 typedef int rpl_sidno;
 /// Type of GNO, the second (numeric) component of GTID
-typedef long long int rpl_gno;
+typedef std::int64_t rpl_gno;
 typedef int64 rpl_binlog_pos;
 
 /**
@@ -259,10 +260,10 @@ inline const char *get_gtid_consistency_mode_string() {
   return get_gtid_consistency_mode_string(get_gtid_consistency_mode());
 }
 
-/// The maximum value of GNO
-const rpl_gno MAX_GNO = LLONG_MAX;
+/// One-past-the-max value of GNO
+const rpl_gno GNO_END = INT64_MAX;
 /// If the GNO goes above the number, generate a warning.
-const rpl_gno GNO_WARNING_THRESHOLD = (MAX_GNO / 100) * 99;
+const rpl_gno GNO_WARNING_THRESHOLD = (GNO_END / 100) * 99;
 /// The length of MAX_GNO when printed in decimal.
 const int MAX_GNO_TEXT_LENGTH = 19;
 /// The maximal possible length of thread_id when printed in decimal.
@@ -307,7 +308,7 @@ class Checkable_rwlock {
   /// Initialize this Checkable_rwlock.
   Checkable_rwlock(
 #if defined(HAVE_PSI_INTERFACE)
-      PSI_rwlock_key psi_key MY_ATTRIBUTE((unused)) = 0
+      PSI_rwlock_key psi_key [[maybe_unused]] = 0
 #endif
   ) {
 #ifndef NDEBUG
@@ -357,7 +358,7 @@ class Checkable_rwlock {
       Create a guard, assuming the caller already holds a lock on it.
     */
     Guard(Checkable_rwlock &lock, enum_lock_type lock_type,
-          std::adopt_lock_t t MY_ATTRIBUTE((unused)))
+          std::adopt_lock_t t [[maybe_unused]])
         : m_lock(lock), m_lock_type(lock_type) {
       DBUG_TRACE;
       switch (lock_type) {
@@ -919,7 +920,7 @@ class Mutex_cond_array {
     Assert that this thread owns the n'th mutex.
     This is a no-op if NDEBUG is on.
   */
-  inline void assert_owner(int n MY_ATTRIBUTE((unused))) const {
+  inline void assert_owner(int n [[maybe_unused]]) const {
 #ifndef NDEBUG
     mysql_mutex_assert_owner(&get_mutex_cond(n)->mutex);
 #endif
@@ -928,7 +929,7 @@ class Mutex_cond_array {
     Assert that this thread does not own the n'th mutex.
     This is a no-op if NDEBUG is on.
   */
-  inline void assert_not_owner(int n MY_ATTRIBUTE((unused))) const {
+  inline void assert_not_owner(int n [[maybe_unused]]) const {
 #ifndef NDEBUG
     mysql_mutex_assert_not_owner(&get_mutex_cond(n)->mutex);
 #endif
@@ -1058,6 +1059,7 @@ struct Gtid {
   void set(rpl_sidno sidno_arg, rpl_gno gno_arg) {
     assert(sidno_arg > 0);
     assert(gno_arg > 0);
+    assert(gno_arg < GNO_END);
     sidno = sidno_arg;
     gno = gno_arg;
   }
@@ -1125,9 +1127,9 @@ struct Gtid {
   }
 #endif
   /// Print this Gtid to the trace file if debug is enabled; no-op otherwise.
-  void dbug_print(const Sid_map *sid_map MY_ATTRIBUTE((unused)),
-                  const char *text MY_ATTRIBUTE((unused)) = "",
-                  bool need_lock MY_ATTRIBUTE((unused)) = false) const {
+  void dbug_print(const Sid_map *sid_map [[maybe_unused]],
+                  const char *text [[maybe_unused]] = "",
+                  bool need_lock [[maybe_unused]] = false) const {
 #ifndef NDEBUG
     char buf[MAX_TEXT_LENGTH + 1];
     to_string(sid_map, buf, need_lock);
@@ -1494,6 +1496,9 @@ class Gtid_set {
   */
   void _add_gtid(rpl_sidno sidno, rpl_gno gno) {
     DBUG_TRACE;
+    assert(sidno > 0);
+    assert(gno > 0);
+    assert(gno < GNO_END);
     Interval_iterator ivit(this, sidno);
     Free_intervals_lock lock(this);
     add_gno_interval(&ivit, gno, gno + 1, &lock);
@@ -1824,10 +1829,10 @@ class Gtid_set {
     Print this Gtid_set to the trace file if debug is enabled; no-op
     otherwise.
   */
-  void dbug_print(const char *text MY_ATTRIBUTE((unused)) = "",
-                  bool need_lock MY_ATTRIBUTE((unused)) = false,
-                  const Gtid_set::String_format *sf MY_ATTRIBUTE((unused)) =
-                      nullptr) const {
+  void dbug_print(const char *text [[maybe_unused]] = "",
+                  bool need_lock [[maybe_unused]] = false,
+                  const Gtid_set::String_format *sf
+                  [[maybe_unused]] = nullptr) const {
 #ifndef NDEBUG
     char *str;
     to_string(&str, need_lock, sf);
@@ -2472,7 +2477,7 @@ class Owned_gtids {
           p += global_sid_map->sidno_to_sid(sidno).to_string(p);
           printed_sid = true;
         }
-        p += sprintf(p, ":%lld#%u", node->gno, node->owner);
+        p += sprintf(p, ":%" PRId64 "#%u", node->gno, node->owner);
       }
     }
     *p = 0;
@@ -2534,7 +2539,7 @@ class Owned_gtids {
     Print this Owned_gtids to the trace file if debug is enabled; no-op
     otherwise.
   */
-  void dbug_print(const char *text MY_ATTRIBUTE((unused)) = "") const {
+  void dbug_print(const char *text [[maybe_unused]] = "") const {
 #ifndef NDEBUG
     char *str = to_string();
     DBUG_PRINT("info", ("%s%s%s", text, *text ? ": " : "", str));
@@ -3227,7 +3232,7 @@ class Gtid_state {
     Print this Gtid_state to the trace file if debug is enabled; no-op
     otherwise.
   */
-  void dbug_print(const char *text MY_ATTRIBUTE((unused)) = "") const {
+  void dbug_print(const char *text [[maybe_unused]] = "") const {
 #ifndef NDEBUG
     sid_lock->assert_some_wrlock();
     char *str = to_string();
@@ -3844,8 +3849,8 @@ struct Gtid_specification {
     Print this Gtid_specification to the trace file if debug is
     enabled; no-op otherwise.
   */
-  void dbug_print(const char *text MY_ATTRIBUTE((unused)) = "",
-                  bool need_lock MY_ATTRIBUTE((unused)) = false) const {
+  void dbug_print(const char *text [[maybe_unused]] = "",
+                  bool need_lock [[maybe_unused]] = false) const {
 #ifndef NDEBUG
     char buf[MAX_TEXT_LENGTH + 1];
     to_string(global_sid_map, buf, need_lock);
@@ -3871,6 +3876,18 @@ enum enum_gtid_statement_status {
 };
 
 #ifdef MYSQL_SERVER
+
+/**
+  Check if current transaction should be skipped, that is, if GTID_NEXT
+  was already logged.
+
+  @param  thd    The calling thread.
+
+  @retval true   Transaction was already logged.
+  @retval false  Transaction must be executed.
+*/
+bool is_already_logged_transaction(const THD *thd);
+
 /**
   Perform GTID-related checks before executing a statement:
 

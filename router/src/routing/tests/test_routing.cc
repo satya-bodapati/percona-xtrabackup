@@ -85,7 +85,7 @@ TEST_F(RoutingTests, GetAccessLiteralName) {
 
 TEST_F(RoutingTests, Defaults) {
   ASSERT_EQ(routing::kDefaultWaitTimeout, 0);
-  ASSERT_EQ(routing::kDefaultMaxConnections, 512);
+  ASSERT_EQ(routing::kDefaultMaxConnections, 0);
   ASSERT_EQ(routing::kDefaultDestinationConnectionTimeout,
             std::chrono::seconds(1));
   ASSERT_EQ(routing::kDefaultBindAddress, "127.0.0.1");
@@ -248,14 +248,6 @@ class MockServer {
   std::atomic_bool stop_;
 };
 
-// sunpro tries to invoke the disabled copy-constructor of sock.
-// while GCC complains about "redundant move in return statement".
-#if defined(__SUNPRO_CC)
-#define WORKAROUND_RETURN_NON_COPYABLE_EXPECTED(x) std::move(x)
-#else
-#define WORKAROUND_RETURN_NON_COPYABLE_EXPECTED(x) (x)
-#endif
-
 static stdx::expected<net::ip::tcp::socket, std::error_code> connect_tcp(
     net::io_context &io_ctx, const std::string &host, uint16_t port,
     std::chrono::milliseconds connect_timeout) {
@@ -302,7 +294,7 @@ static stdx::expected<net::ip::tcp::socket, std::error_code> connect_tcp(
           } else {
             // success, we can continue
             sock.native_non_blocking(false);
-            return WORKAROUND_RETURN_NON_COPYABLE_EXPECTED(sock);
+            return sock;
           }
         }
       } else {
@@ -312,7 +304,7 @@ static stdx::expected<net::ip::tcp::socket, std::error_code> connect_tcp(
       // everything is fine, we are connected
       sock.native_non_blocking(false);
 
-      return WORKAROUND_RETURN_NON_COPYABLE_EXPECTED(sock);
+      return sock;
     }
 
     // it failed, try the next address
@@ -364,7 +356,7 @@ connect_socket(net::io_context &io_ctx,
     return stdx::make_unexpected(socket_res.error());
   }
 
-  return WORKAROUND_RETURN_NON_COPYABLE_EXPECTED(sock);
+  return sock;
 }
 #endif
 
@@ -458,7 +450,18 @@ TEST_F(RoutingTests, bug_24841281) {
   routing.set_destinations_from_csv("127.0.0.1:" + std::to_string(server_port));
   mysql_harness::ConfigSection cs{"routing", "testroute", nullptr};
   mysql_harness::PluginFuncEnv env(nullptr, &cs, true);
+
   std::thread thd(&MySQLRouting::start, &routing, &env);
+
+  mysql_harness::ScopeGuard guard([&]() {
+    env.clear_running();  // shut down MySQLRouting
+    routing.stop_socket_acceptors();
+    server.stop();
+    thd.join();
+  });
+
+  mysql_harness::Config conf;
+  MySQLRoutingComponent::get_instance().init(conf);
 
   // set the number of accepts that the server should expect for before
   // stopping
@@ -579,10 +582,6 @@ TEST_F(RoutingTests, bug_24841281) {
   });
   EXPECT_EQ(0, routing.get_context().info_active_routes_.load());
 #endif
-  env.clear_running();  // shut down MySQLRouting
-  routing.stop_socket_acceptors();
-  server.stop();
-  thd.join();
 }
 #endif  // #ifndef _WIN32 [_HERE_]
 

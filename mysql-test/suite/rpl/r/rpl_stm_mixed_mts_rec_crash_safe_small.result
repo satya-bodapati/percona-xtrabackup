@@ -463,6 +463,7 @@ slave_master_info	CREATE TABLE `slave_master_info` (
   `Master_zstd_compression_level` int unsigned NOT NULL COMMENT 'Compression level associated with zstd compression algorithm.',
   `Tls_ciphersuites` text CHARACTER SET utf8 COLLATE utf8_bin COMMENT 'Ciphersuites used for TLS 1.3 communication with the master server.',
   `Source_connection_auto_failover` tinyint(1) NOT NULL DEFAULT '0' COMMENT 'Indicates whether the channel connection failover is enabled.',
+  `Gtid_only` tinyint(1) NOT NULL DEFAULT '0' COMMENT 'Indicates if this channel only uses GTIDs and does not persist positions.',
   PRIMARY KEY (`Channel_name`)
 ) /*!50100 TABLESPACE `mysql` */ ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 STATS_PERSISTENT=0 ROW_FORMAT=DYNAMIC COMMENT='Master Information'
 SHOW CREATE TABLE mysql.slave_relay_log_info;
@@ -541,6 +542,7 @@ slave_master_info	CREATE TABLE `slave_master_info` (
   `Master_zstd_compression_level` int unsigned NOT NULL COMMENT 'Compression level associated with zstd compression algorithm.',
   `Tls_ciphersuites` text CHARACTER SET utf8 COLLATE utf8_bin COMMENT 'Ciphersuites used for TLS 1.3 communication with the master server.',
   `Source_connection_auto_failover` tinyint(1) NOT NULL DEFAULT '0' COMMENT 'Indicates whether the channel connection failover is enabled.',
+  `Gtid_only` tinyint(1) NOT NULL DEFAULT '0' COMMENT 'Indicates if this channel only uses GTIDs and does not persist positions.',
   PRIMARY KEY (`Channel_name`)
 ) /*!50100 TABLESPACE `mysql` */ ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 STATS_PERSISTENT=0 ROW_FORMAT=DYNAMIC COMMENT='Master Information'
 SHOW CREATE TABLE mysql.slave_relay_log_info;
@@ -585,8 +587,8 @@ slave_worker_info	CREATE TABLE `slave_worker_info` (
 ########################################################################
 #                                TEST
 ########################################################################
-SET @@global.slave_parallel_workers= 4;
-SET @@global.slave_checkpoint_period= 2;
+SET @@global.replica_parallel_workers= 4;
+SET @@global.replica_checkpoint_period= 2;
 Generating Number of Workers 4 --- Number of Groups per worker 4 --- Debugging Groups 3 --- Database test_1
 ==== begin rpl_mts_crash_safe.inc:rpl_mixing_engines.inc ====
 rpl_mixing_engines.inc [commands=B T T C]
@@ -863,17 +865,17 @@ master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 ==== begin rpl_mts_crash_safe.inc:recovery ====
 include/start_slave_io.inc
 ** fixing gaps **
-include/rpl_start_server.inc [server_number=2 parameters: --skip-slave-start --relay-log-recovery=0 --slave-parallel-workers=0]
+include/rpl_start_server.inc [server_number=2 parameters: --skip-replica-start --relay-log-recovery=0 --replica-parallel-workers=0]
 START REPLICA UNTIL SQL_AFTER_MTS_GAPS;
 include/wait_for_slave_param.inc [Until_Condition]
 include/wait_for_slave_sql_to_stop.inc
 ** regular restart **
-include/rpl_restart_server.inc [server_number=2 parameters: --skip-slave-start --slave-transaction-retries=0 --sync-master-info=1]
+include/rpl_restart_server.inc [server_number=2 parameters: --skip-replica-start --replica-transaction-retries=0 --sync-source-info=1]
 include/start_slave_io.inc
 include/start_slave_sql.inc
 include/stop_slave.inc
-SET @@global.slave_parallel_workers= 4;
-SET @@global.slave_checkpoint_period= 2;
+SET @@global.replica_parallel_workers= 4;
+SET @@global.replica_checkpoint_period= 2;
 ==== end rpl_mts_crash_safe.inc:recovery ====
 ########################################################################
 #                          CHECK CONSISTENCY

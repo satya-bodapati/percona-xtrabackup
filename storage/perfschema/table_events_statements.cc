@@ -317,8 +317,8 @@ int table_events_statements_common::make_row_part_1(
                         &m_row.m_timer_wait);
   m_row.m_lock_time = statement->m_lock_time * MICROSEC_TO_PICOSEC;
 
-  m_row.m_name = klass->m_name;
-  m_row.m_name_length = klass->m_name_length;
+  m_row.m_name = klass->m_name.str();
+  m_row.m_name_length = klass->m_name.length();
 
   m_row.m_current_schema_name_length = statement->m_current_schema_name_length;
   if (m_row.m_current_schema_name_length > 0)
@@ -792,7 +792,7 @@ ha_rows table_events_statements_current::get_row_count(void) {
   return global_thread_container.get_row_count() * statement_stack_max;
 }
 
-int table_events_statements_current::index_init(uint idx MY_ATTRIBUTE((unused)),
+int table_events_statements_current::index_init(uint idx [[maybe_unused]],
                                                 bool) {
   PFS_index_events_statements *result;
   assert(idx == 0);
@@ -952,7 +952,7 @@ ha_rows table_events_statements_history::get_row_count(void) {
          global_thread_container.get_row_count();
 }
 
-int table_events_statements_history::index_init(uint idx MY_ATTRIBUTE((unused)),
+int table_events_statements_history::index_init(uint idx [[maybe_unused]],
                                                 bool) {
   PFS_index_events_statements *result;
   assert(idx == 0);

@@ -1,5 +1,5 @@
 /******************************************************
-Copyright (c) 2019 Percona LLC and/or its affiliates.
+Copyright (c) 2019, 2021 Percona LLC and/or its affiliates.
 
 HTTP client implementation using cURL.
 
@@ -18,11 +18,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 *******************************************************/
 
-#ifndef __XBCLOUD_HTTP_H__
-#define __XBCLOUD_HTTP_H__
+#ifndef XBCLOUD_HTTP_H
+#define XBCLOUD_HTTP_H
 
 #include <curl/curl.h>
 #include <ev.h>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <memory>
@@ -138,6 +139,8 @@ class Http_request {
 
   using header_t = std::pair<std::string, std::string>;
   using headers_t = std::map<std::string, std::string>;
+  using param_t = std::pair<std::string, std::string>;
+  using params_t = std::map<std::string, std::string>;
 
  private:
   method_t method_;
@@ -145,7 +148,7 @@ class Http_request {
   std::string host_;
   std::string path_;
   headers_t headers_;
-  std::vector<std::string> params_;
+  params_t params_;
   Http_buffer payload_;
 
  public:
@@ -159,8 +162,9 @@ class Http_request {
     headers_[name] = value;
   }
   void remove_header(const std::string &name) { headers_.erase(name); }
-  void add_param(const std::string &name, const std::string &value);
-  void add_param(const std::string &name) { params_.push_back(name); }
+  void add_param(const std::string &name, const std::string &value) {
+    params_[name] = value;
+  }
   template <typename T>
   void append_payload(const T &payload) {
     payload_.append(payload);
@@ -181,7 +185,7 @@ class Http_request {
   std::string header_value(const std::string &header_name) const {
     return headers_.at(header_name);
   }
-  const std::vector<std::string> &params() const { return params_; }
+  const params_t &params() const { return params_; }
   method_t method() const { return method_; }
   protocol_t protocol() const { return protocol_; }
   const Http_buffer &payload() const { return payload_; }
@@ -195,7 +199,7 @@ class Http_response {
   std::map<std::string, std::string> headers_;
 
  public:
-  Http_response(){};
+  Http_response() {}
   const Http_buffer &body() const { return body_; }
   Http_buffer move_body() { return std::move(body_); }
   const std::map<std::string, std::string> &headers() const { return headers_; }
@@ -215,7 +219,7 @@ class Http_response {
     response->body_.append(reinterpret_cast<char *>(ptr), size * nmemb);
     return size * nmemb;
   }
-  void reset_body() { body_.clear(); };
+  void reset_body() { body_.clear(); }
 };
 
 class Http_connection {
@@ -241,11 +245,11 @@ class Http_connection {
       : curl_(std::move(curl)), response_(response), callback_(callback) {
     curl_easy_setopt(curl_.get(), CURLOPT_PRIVATE, this);
     curl_easy_setopt(curl_.get(), CURLOPT_ERRORBUFFER, error_);
-  };
+  }
 
   ~Http_connection() { curl_slist_free_all(headers_); }
 
-  CURL *curl_easy() const { return curl_.get(); };
+  CURL *curl_easy() const { return curl_.get(); }
 
   const char *error() const { return error_; }
 
@@ -332,24 +336,28 @@ class Event_handler {
   void stop();
 };
 
-bool retriable_curl_error(CURLcode rc);
-
-bool retriable_http_error(long code);
-
 class Http_client {
  public:
   using async_callback_t = std::function<void(CURLcode, Http_connection *)>;
-
  private:
   bool insecure{false};
   bool verbose{false};
   std::string cacert;
-
+  /*
+   * CURLcode::CURLE_OBSOLETE16 is used as backwards compatible error.
+   * On newer versions of curl library it translates to CURLcode::CURLE_HTTP2.
+   */
+  std::vector<CURLcode> curl_retriable_errors{
+      CURLcode::CURLE_GOT_NOTHING,       CURLcode::CURLE_OPERATION_TIMEDOUT,
+      CURLcode::CURLE_RECV_ERROR,        CURLcode::CURLE_SEND_ERROR,
+      CURLcode::CURLE_SEND_FAIL_REWIND,  CURLcode::CURLE_PARTIAL_FILE,
+      CURLcode::CURLE_SSL_CONNECT_ERROR, CURLcode::CURLE_OBSOLETE16};
+  std::vector<long> http_retriable_errors{503, 500, 504, 408};
   mutable curl_easy_unique_ptr curl{nullptr, curl_easy_cleanup};
 
   static void async_result_callback(async_callback_t user_callback,
-                                    const char *action, Event_handler *h,
-                                    CURLcode rc, Http_connection *conn);
+                                    Event_handler *h, CURLcode rc,
+                                    Http_connection *conn);
 
   void setup_request(CURL *curl, const Http_request &request,
                      Http_response &response, curl_slist *&headers,
@@ -358,7 +366,8 @@ class Http_client {
   static int upload_callback(char *ptr, size_t size, size_t nmemb, void *data);
 
  public:
-  Http_client(){};
+  Http_client() {}
+  virtual ~Http_client() {}
   Http_client(const Http_client &) = delete;
 
   virtual bool make_request(const Http_request &request,
@@ -368,12 +377,35 @@ class Http_client {
                                   Http_response &response, Event_handler *h,
                                   async_callback_t callback = {},
                                   bool nowait = false) const;
-  void set_verbose(bool val) { verbose = val; };
-  void set_insecure(bool val) { insecure = val; };
-  void set_cacaert(const std::string &val) { cacert = val; };
+  template <typename CLIENT, typename CALLBACK>
+  void callback(CLIENT *client, std::string container, std::string name,
+                Http_request *req, Http_response *resp,
+                const Http_client *http_client, Event_handler *h,
+                CALLBACK callback, CURLcode rc, const Http_connection *conn,
+                ulong count) const;
+  void set_verbose(bool val) { verbose = val; }
+  void set_insecure(bool val) { insecure = val; }
+  void set_cacaert(const std::string &val) { cacert = val; }
+  void set_curl_retriable_errors(CURLcode code) {
+    if (code < CURLcode::CURL_LAST) {
+      if (std::find(curl_retriable_errors.begin(), curl_retriable_errors.end(),
+                    code) == curl_retriable_errors.end()) {
+        curl_retriable_errors.push_back(code);
+      }
+    }
+  }
+  void set_http_retriable_errors(long error) {
+    if (std::find(http_retriable_errors.begin(), http_retriable_errors.end(),
+                  error) == http_retriable_errors.end()) {
+      http_retriable_errors.push_back(error);
+    }
+  }
+  bool retriable_curl_error(const CURLcode &rc) const;
+  bool retriable_http_error(const long &code) const;
   void reset() const { curl = nullptr; }
+  virtual bool get_verbose() const { return verbose; }
 };
 
 }  // namespace xbcloud
 
-#endif  // __XBCLOUD_HTTP_H__
+#endif  // XBCLOUD_HTTP_H

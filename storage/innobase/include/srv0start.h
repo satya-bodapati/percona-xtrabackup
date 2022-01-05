@@ -91,7 +91,7 @@ dberr_t srv_undo_tablespaces_upgrade();
 @param[in]  create_new_db     Whether to create a new database
 @param[in]  to_lsn            LSN to stop recovery at
 @return DB_SUCCESS or error code */
-dberr_t srv_start(bool create_new_db, lsn_t to_lsn);
+[[nodiscard]] dberr_t srv_start(bool create_new_db, lsn_t to_lsn);
 
 /** Fix up an undo tablespace if it was in the process of being truncated
 when the server crashed. This is the second call and is done after the DD
@@ -119,19 +119,15 @@ void srv_start_threads_after_ddl_recovery();
 purge threads early to apply purge. */
 void srv_start_purge_threads();
 
-/** If early redo/undo log encryption processing is done.
-@return true if it's done. */
-bool is_early_redo_undo_encryption_done();
-
 /** Copy the file path component of the physical file to parameter. It will
  copy up to and including the terminating path separator.
  @return number of bytes copied or ULINT_UNDEFINED if destination buffer
          is smaller than the path to be copied. */
-ulint srv_path_copy(char *dest,             /*!< out: destination buffer */
-                    ulint dest_len,         /*!< in: max bytes to copy */
-                    const char *basedir,    /*!< in: base directory */
-                    const char *table_name) /*!< in: source table name */
-    MY_ATTRIBUTE((warn_unused_result));
+[[nodiscard]] ulint srv_path_copy(
+    char *dest,              /*!< out: destination buffer */
+    ulint dest_len,          /*!< in: max bytes to copy */
+    const char *basedir,     /*!< in: base directory */
+    const char *table_name); /*!< in: source table name */
 
 /** Get the encryption-data filename from the table name for a
 single-table tablespace.

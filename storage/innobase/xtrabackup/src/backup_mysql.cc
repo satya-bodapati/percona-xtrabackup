@@ -55,12 +55,14 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <limits>
 #include "backup_copy.h"
 #include "common.h"
+#include "components/mysqlbackup/backup_comp_constants.h"
 #include "keyring_plugins.h"
 #include "mysqld.h"
 #include "os0event.h"
 #include "rpl_log_encryption.h"
 #include "space_map.h"
 #include "typelib.h"
+#include "utils.h"
 #include "xb0xb.h"
 #include "xtrabackup.h"
 #include "xtrabackup_version.h"
@@ -69,18 +71,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "fsp0fsp.h"
 #include "xb_regex.h"
 
-extern uint opt_ssl_mode;
 extern bool opt_no_server_version_check;
-extern char *opt_ssl_ca;
-extern char *opt_ssl_capath;
-extern char *opt_ssl_cert;
-extern char *opt_ssl_cipher;
-extern char *opt_ssl_key;
-extern char *opt_ssl_crl;
-extern char *opt_ssl_crlpath;
-extern char *opt_tls_version;
-extern ulong opt_ssl_fips_mode;
-extern bool ssl_mode_set_explicitly;
 
 /** Possible values for system variable "innodb_checksum_algorithm". */
 extern const char *innodb_checksum_algorithm_names[];
@@ -168,30 +159,7 @@ MYSQL *xb_mysql_connect() {
       << ", port: " << (opt_port != 0 ? mysql_port_str : "not set")
       << ", socket: " << (opt_socket ? opt_socket : "not set");
 
-#ifdef HAVE_OPENSSL
-  /*
-  Print a warning if explicitly defined combination of --ssl-mode other than
-  VERIFY_CA or VERIFY_IDENTITY with explicit --ssl-ca or --ssl-capath values.
-  */
-  if (ssl_mode_set_explicitly && opt_ssl_mode < SSL_MODE_VERIFY_CA &&
-      (opt_ssl_ca || opt_ssl_capath)) {
-    xb::warn() << "no verification of server certificate will "
-                  "be done. Use --ssl-mode=VERIFY_CA or "
-                  "VERIFY_IDENTITY.";
-  }
-
-  /* Set SSL parameters: key, cert, ca, capath, cipher, clr, clrpath. */
-  if (opt_ssl_mode >= SSL_MODE_VERIFY_CA)
-    mysql_ssl_set(connection, opt_ssl_key, opt_ssl_cert, opt_ssl_ca,
-                  opt_ssl_capath, opt_ssl_cipher);
-  else
-    mysql_ssl_set(connection, opt_ssl_key, opt_ssl_cert, NULL, NULL,
-                  opt_ssl_cipher);
-  mysql_options(connection, MYSQL_OPT_SSL_CRL, opt_ssl_crl);
-  mysql_options(connection, MYSQL_OPT_SSL_CRLPATH, opt_ssl_crlpath);
-  mysql_options(connection, MYSQL_OPT_TLS_VERSION, opt_tls_version);
-  mysql_options(connection, MYSQL_OPT_SSL_MODE, &opt_ssl_mode);
-#endif
+  set_client_ssl_options(connection);
 
   if (!mysql_real_connect(connection, opt_host ? opt_host : "localhost",
                           opt_user, opt_password, "" /*database*/, opt_port,
@@ -366,24 +334,6 @@ void parse_show_engine_innodb_status(MYSQL *connection) {
   mysql_free_result(mysql_result);
 }
 
-/* find the pxb base version */
-static unsigned long pxb_base_version() {
-  std::string pxb_base = MYSQL_SERVER_VERSION;
-  unsigned long major = 0, minor = 0, version = 0;
-  std::size_t major_p = pxb_base.find(".");
-  if (major_p != std::string::npos) major = stoi(pxb_base.substr(0, major_p));
-
-  std::size_t minor_p = pxb_base.find(".", major_p + 1);
-  if (minor_p != std::string::npos)
-    minor = stoi(pxb_base.substr(major_p + 1, minor_p - major_p));
-
-  std::size_t version_p = pxb_base.find(".", minor_p + 1);
-  if (version_p != std::string::npos)
-    version = stoi(pxb_base.substr(minor_p + 1, version_p - minor_p));
-  else
-    version = stoi(pxb_base.substr(minor_p + 1));
-  return major * 10000 + minor * 100 + version;
-}
 
 static bool check_server_version(unsigned long version_number,
                                  const char *version_string,
@@ -431,8 +381,8 @@ static bool check_server_version(unsigned long version_number,
     }
   }
 
-
-  auto pxb_base_ver = pxb_base_version();
+  auto pxb_base_ver =
+      xtrabackup::utils::get_version_number(MYSQL_SERVER_VERSION);
 
   DBUG_EXECUTE_IF("simulate_lower_version", pxb_base_ver = 80014;);
 
@@ -1022,11 +972,11 @@ static void kill_query_thread() {
   mysql_close(mysql);
 
 stop_thread:
-  xb::info() << "Kill query thread stopped";
-
   my_thread_end();
 
   os_event_set(kill_query_thread_stopped);
+
+  xb::info() << "Kill query thread stopped";
 }
 
 static void start_query_killer() {
@@ -1034,14 +984,14 @@ static void start_query_killer() {
   kill_query_thread_started = os_event_create();
   kill_query_thread_stopped = os_event_create();
 
-  os_thread_create(PSI_NOT_INSTRUMENTED, kill_query_thread).start();
+  os_thread_create(PSI_NOT_INSTRUMENTED, 0, kill_query_thread).start();
 
   os_event_wait(kill_query_thread_started);
 }
 
 static void stop_query_killer() {
   os_event_set(kill_query_thread_stop);
-  os_event_wait_time(kill_query_thread_stopped, 60000);
+  os_event_wait(kill_query_thread_stopped);
 
   os_event_destroy(kill_query_thread_stop);
   os_event_destroy(kill_query_thread_started);
@@ -1390,6 +1340,9 @@ bool write_slave_info(MYSQL *connection) {
   int channel_idx = 0;
   for (auto &channel : log_status.channels) {
     auto ch = channels.find(channel.channel_name);
+    if (channel.channel_name == "group_replication_applier" ||
+        channel.channel_name == "group_replication_recovery")
+      continue;
     std::string for_channel;
 
     if (!channel.channel_name.empty()) {
@@ -1680,7 +1633,7 @@ static void log_status_storage_engines_parse(const char *s,
   }
 }
 
-/** Parse binaty log position from JSON.
+/** Parse binary log position from JSON.
 @param[in]   s            JSON string
 @param[out]  log_status   binary log info */
 static void log_status_local_parse(const char *s, log_status_t &log_status) {
@@ -1709,7 +1662,7 @@ static void log_status_local_parse(const char *s, log_status_t &log_status) {
   }
 }
 
-/** Read binaty log position and InnoDB LSN from p_s.log_status.
+/** Read binary log position and InnoDB LSN from p_s.log_status.
 @param[in]   conn         mysql connection handle */
 const log_status_t &log_status_get(MYSQL *conn) {
   xb::info() << "Selecting LSN and binary log position from p_s.log_status";

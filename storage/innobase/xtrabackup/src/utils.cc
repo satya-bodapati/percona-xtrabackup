@@ -19,6 +19,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <my_default.h>
 #include <mysqld.h>
 
+#include "common.h"
+#include "xtrabackup.h"
+
 namespace xtrabackup {
 namespace utils {
 
@@ -47,6 +50,53 @@ bool load_backup_my_cnf(my_option *options, char *path) {
   }
 
   return (true);
+}
+
+bool read_server_uuid() {
+  /* for --stats we not always have a backup-my.cnf */
+  if (xtrabackup_stats) return true;
+
+  char *uuid = NULL;
+  bool ret;
+  my_option config_options[] = {
+      {"server-uuid", 0, "", &uuid, &uuid, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0,
+       0, 0},
+      {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
+  if (xtrabackup_incremental_dir != nullptr) {
+    ret = xtrabackup::utils::load_backup_my_cnf(config_options,
+                                                xtrabackup_incremental_dir);
+  } else {
+    ret = xtrabackup::utils::load_backup_my_cnf(config_options,
+                                                xtrabackup_real_target_dir);
+  }
+  if (!ret) {
+    msg("xtrabackup: Error: failed to load backup-my.cnf\n");
+    return (false);
+  }
+  memset(server_uuid, 0, Encryption::SERVER_UUID_LEN + 1);
+  if (uuid != NULL) {
+    strncpy(server_uuid, uuid, Encryption::SERVER_UUID_LEN);
+  }
+  return (true);
+}
+
+/* find the pxb base version */
+unsigned long get_version_number(std::string version_str) {
+  unsigned long major = 0, minor = 0, version = 0;
+  std::size_t major_p = version_str.find(".");
+  if (major_p != std::string::npos)
+    major = stoi(version_str.substr(0, major_p));
+
+  std::size_t minor_p = version_str.find(".", major_p + 1);
+  if (minor_p != std::string::npos)
+    minor = stoi(version_str.substr(major_p + 1, minor_p - major_p));
+
+  std::size_t version_p = version_str.find(".", minor_p + 1);
+  if (version_p != std::string::npos)
+    version = stoi(version_str.substr(minor_p + 1, version_p - minor_p));
+  else
+    version = stoi(version_str.substr(minor_p + 1));
+  return major * 10000 + minor * 100 + version;
 }
 
 }  // namespace utils

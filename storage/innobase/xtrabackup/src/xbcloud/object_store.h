@@ -18,8 +18,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 *******************************************************/
 
-#ifndef __XBCLOUD_OBJECT_STORE__
-#define __XBCLOUD_OBJECT_STORE__
+#ifndef XBCLOUD_OBJECT_STORE
+#define XBCLOUD_OBJECT_STORE
 
 #include <functional>
 #include <string>
@@ -41,11 +41,10 @@ class Object_store {
   virtual bool upload_object(const std::string &container,
                              const std::string &object,
                              const Http_buffer &contents) = 0;
-  virtual bool async_upload_object(const std::string &container,
-                                   const std::string &object,
-                                   const Http_buffer &contents,
-                                   Event_handler *h,
-                                   std::function<void(bool)> f = {}) = 0;
+  virtual bool async_upload_object(
+      const std::string &container, const std::string &object,
+      const Http_buffer &contents, Event_handler *h,
+      std::function<void(bool, const Http_buffer &contents)> f = {}) = 0;
   virtual bool async_download_object(
       const std::string &container, const std::string &object, Event_handler *h,
       std::function<void(bool, const Http_buffer &contents)> f = {}) = 0;
@@ -57,9 +56,9 @@ class Object_store {
   virtual Http_buffer download_object(const std::string &container,
                                       const std::string &name,
                                       bool &success) = 0;
-  virtual ~Object_store(){};
+  virtual ~Object_store() {}
 };
 
 }  // namespace xbcloud
 
-#endif
+#endif  // XBCLOUD_OBJECT_STORE

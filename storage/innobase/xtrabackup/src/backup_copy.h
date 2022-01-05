@@ -51,7 +51,8 @@ enum file_purpose_t {
 /************************************************************************
 Write buffer into .ibd file and preserve it's sparsiness. */
 bool write_ibd_buffer(ds_file_t *file, unsigned char *buf, size_t buf_len,
-                      size_t page_size, size_t block_size);
+                      size_t page_size, size_t block_size,
+                      bool punch_hole_supported);
 
 /************************************************************************
 Copy file for backup/restore.
@@ -67,6 +68,14 @@ bool backup_start(Backup_context &context);
 /* Finsh the backup. Release all locks. Write down backup metadata.
 @return true if success. */
 bool backup_finish(Backup_context &context);
+
+/**
+  Copies redo log encrypted info from xtraback_logfile to ib_logfile0
+  This is used at --prepare
+
+  @return false in case of error, true otherwise
+*/
+bool copy_redo_encryption_info();
 
 bool apply_log_finish();
 bool copy_back(int argc, char **argv);

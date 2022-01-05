@@ -42,10 +42,11 @@ Usage: $0 [-f] [-g] [-h] [-s suite] [-t test_name] [-d mysql_basedir] [-c build_
 -f          Continue running tests after failures
 -d path     Server installation directory. Default is './server'.
 -g          Debug mode
+-k          Make a copy of failed var directory
 -t path     Run only a single named test. This option can be passed multiple times.
 -h          Print this help message
--s suite    Select a test suite to run. Possible values: experimental, gr, main.
-            Default is 'main and gr'.
+-s suite    Select a test suite to run. Possible values: binlog, bitmap, experimental, gr, keyring, rocksdb, pagetracking,  main.
+            Default is 'binlog, main, gr, pagetracking, rocksdb and keyring'.
 -j N        Run tests in N parallel processes.
 -T seconds  Test timeout (default is $TEST_TIMEOUT seconds).
 -x options  Extra options to pass to xtrabackup
@@ -464,6 +465,30 @@ function get_version_info()
 	XB_BIN XB_ARGS MYSQLD_EXTRA_ARGS WSREP_READY LIBGALERA_PATH
 }
 
+############################################################################
+# Make a copy of var directory
+############################################################################
+function copy_worker_var_dir()
+{
+  local keep_worker_number=$1
+  [ -d $TEST_BASEDIR/results/debug/ ] || mkdir $TEST_BASEDIR/results/debug/
+  for worker_dir in $TEST_BASEDIR/var/w+([0-9])
+  do
+      [ -d $worker_dir ] || continue
+      [[ $worker_dir =~ w([0-9]+)$ ]] || continue
+
+      local worker=${BASH_REMATCH[1]}
+
+      if [ "$worker" = "$keep_worker_number" ]
+      then
+          local tname=`basename $tpath .sh`
+          local debug_dir=$(mktemp -d -p $TEST_BASEDIR/results/debug/ -t ${tname}.XXXXXX)
+          cp -R ${worker_outfiles[$worker]} ${debug_dir}
+          cp -R $TEST_BASEDIR/var/w${worker} ${debug_dir}
+      fi
+  done
+}
+
 ###########################################################################
 # Kill all server processes started by a worker specified with its var root
 # directory
@@ -643,6 +668,10 @@ function reap_worker()
 
            if [ -z "$DEBUG" ]
            then
+                if [ ! -z "$KEEP_VAR" ]
+                then
+                  copy_worker_var_dir $worker
+                fi
                cleanup_worker $worker
            else
                DEBUG_WORKER=$worker
@@ -650,6 +679,10 @@ function reap_worker()
 
            return 1
        else
+           if [ ! -z "$KEEP_VAR" ]
+           then
+             copy_worker_var_dir $worker
+           fi
            cleanup_worker $worker
 
            return 0
@@ -784,12 +817,13 @@ suites=""
 NOFSUITES=0
 XTRACE_OPTION=""
 force=""
+KEEP_VAR=""
 SUBUNIT_OUT=test_results.subunit
 NWORKERS=
 DEBUG_WORKER=""
 MYSQL_DEBUG_MODE=off
 
-while getopts "fghD?:t:s:d:c:j:T:x:X:i:r:" options; do
+while getopts "fgkhD?:t:s:d:c:j:T:x:X:i:r:" options; do
         case $options in
             f ) force="yes";;
             t )
@@ -803,6 +837,7 @@ while getopts "fghD?:t:s:d:c:j:T:x:X:i:r:" options; do
                 ;;
 
             g ) DEBUG=on;;
+            k ) KEEP_VAR=on;;
             h ) usage; exit;;
             s )
                 if [[ "$OPTARG" = "default" ]];
@@ -814,7 +849,7 @@ while getopts "fghD?:t:s:d:c:j:T:x:X:i:r:" options; do
                 suites="${suites} $OPTARG"
                 ;;
             d ) export MYSQL_BASEDIR="$OPTARG";;
-            D ) MYSQL_DEBUG_MODE=on ;;
+            D ) export MYSQL_DEBUG_MODE=on ;;
             c ) echo "Warning: -c does not have any effect and is only \
 recognized for compatibility";;
             j )
@@ -865,8 +900,8 @@ if [ -n "$tname" ]
 then
    tests="$tname"
 else
-   tests="t/*.sh suites/gr/*.sh"
-   suites=" main gr"
+   tests="suites/binlog/* suites/pagetracking/* suites/gr/*.sh suites/keyring/*.sh suites/rocksdb/*.sh t/*.sh"
+   suites=" pagetracking binlog gr keyring rocksdb main"
 fi
 
 export OUTFILE="$PWD/results/setup"
@@ -958,6 +993,15 @@ do
    TOTAL_COUNT=$((TOTAL_COUNT+1))
 
    name=`basename $t .sh`
+   suite=`dirname $t | awk -F'/' '{print $NF}'`
+   if [[ "${suite}" = "t" ]];
+   then
+     suite="main"
+   fi
+   if [[ $NOFSUITES -ge 1 ]];
+   then
+     name="${suite}.${name}"
+   fi
    worker_names[$worker]=$t
    worker_outfiles[$worker]="$PWD/results/$name"
    worker_skip_files[$worker]="$PWD/results/$name.skipped"

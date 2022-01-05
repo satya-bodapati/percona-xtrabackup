@@ -5187,3 +5187,9 @@ REPLACE INTO mysql.st_spatial_reference_systems(id, catalog_id, name, organizati
 REPLACE INTO mysql.st_spatial_reference_systems(id, catalog_id, name, organization, organization_coordsys_id, definition, description) VALUES (32766, 1, 'WGS 84 / TM 36 SE', 'EPSG', 32766, 'PROJCS["WGS 84 / TM 36 SE",GEOGCS["WGS 84",DATUM["World Geodetic System 1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.017453292519943278,AUTHORITY["EPSG","9122"]],AXIS["Lat",NORTH],AXIS["Lon",EAST],AUTHORITY["EPSG","4326"]],PROJECTION["Transverse Mercator",AUTHORITY["EPSG","9807"]],PARAMETER["Latitude of natural origin",0,AUTHORITY["EPSG","8801"]],PARAMETER["Longitude of natural origin",36,AUTHORITY["EPSG","8802"]],PARAMETER["Scale factor at natural origin",0.9996,AUTHORITY["EPSG","8805"]],PARAMETER["False easting",500000,AUTHORITY["EPSG","8806"]],PARAMETER["False northing",10000000,AUTHORITY["EPSG","8807"]],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["E",EAST],AXIS["N",NORTH],AUTHORITY["EPSG","32766"]]', NULL);
 
 COMMIT;
+
+START TRANSACTION;
+INSERT IGNORE INTO mysql.replication_group_member_actions (name, event, enabled, type, priority, error_handling) VALUES ("mysql_disable_super_read_only_if_primary", "AFTER_PRIMARY_ELECTION", 1, "INTERNAL", 1, "IGNORE");
+INSERT IGNORE INTO mysql.replication_group_member_actions (name, event, enabled, type, priority, error_handling) VALUES ("mysql_start_failover_channels_if_primary", "AFTER_PRIMARY_ELECTION", 1, "INTERNAL", 10, "CRITICAL");
+INSERT IGNORE INTO mysql.replication_group_configuration_version (name, version) VALUES ("replication_group_member_actions", 1);
+COMMIT;

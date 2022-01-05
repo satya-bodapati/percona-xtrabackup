@@ -69,7 +69,8 @@ static bool wf_incremental_init(xb_write_filt_ctxt_t *ctxt, char *dst_name,
   /* allocate buffer for incremental backup (4096 pages) */
   buf_size =
       (cursor->page_size / 4 + 1) * cursor->page_size + UNIV_PAGE_SIZE_MAX;
-  cp->delta_buf_base = static_cast<byte *>(ut_malloc_nokey(buf_size));
+  cp->delta_buf_base = static_cast<byte *>(
+      ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, buf_size));
   memset(cp->delta_buf_base, 0, buf_size);
   cp->delta_buf =
       static_cast<byte *>(ut_align(cp->delta_buf_base, UNIV_PAGE_SIZE_MAX));
@@ -119,7 +120,7 @@ static bool wf_incremental_process(xb_write_filt_ctxt_t *ctxt,
      * since the last backup. Hence we copy all changes to mysql.ibd since last
      * backup start_lsn instead of last backup end_lsn.
      */
-    if (cursor->space_id == dict_sys_t::s_space_id &&
+    if (cursor->space_id == dict_sys_t::s_dict_space_id &&
         metadata_from_lsn > mach_read_from_8(page + FIL_PAGE_LSN))
       continue;
     else if (incremental_lsn > mach_read_from_8(page + FIL_PAGE_LSN))
@@ -179,7 +180,7 @@ static void wf_incremental_deinit(xb_write_filt_ctxt_t *ctxt) {
   xb_wf_incremental_ctxt_t *cp = &(ctxt->wf_incremental_ctxt);
 
   if (cp->delta_buf_base != NULL) {
-    ut_free(cp->delta_buf_base);
+    ut::free(cp->delta_buf_base);
   }
 }
 
@@ -202,7 +203,7 @@ Write the next batch of pages to the destination datasink.
 static bool wf_wt_process(xb_write_filt_ctxt_t *ctxt, ds_file_t *dstfile) {
   const auto cursor = ctxt->cursor;
 
-  return write_ibd_buffer(dstfile, cursor->buf,
-                          cursor->buf_npages * cursor->page_size,
-                          cursor->page_size, cursor->block_size);
+  return write_ibd_buffer(
+      dstfile, cursor->buf, cursor->buf_npages * cursor->page_size,
+      cursor->page_size, cursor->block_size, punch_hole_supported);
 }

@@ -47,7 +47,7 @@ class ha_blackhole : public handler {
 
  public:
   ha_blackhole(handlerton *hton, TABLE_SHARE *table_arg);
-  ~ha_blackhole() override {}
+  ~ha_blackhole() override = default;
   /* The name that will be used for display purposes */
   const char *table_type() const override { return "BLACKHOLE"; }
   enum ha_key_alg get_default_index_algorithm() const override {
@@ -69,15 +69,15 @@ class ha_blackhole : public handler {
                       HA_KEYREAD_ONLY);
   }
   /* The following defines can be increased if necessary */
-#define BLACKHOLE_MAX_KEY 64     /* Max allowed keys */
-#define BLACKHOLE_MAX_KEY_SEG 16 /* Max segments for key */
-#define BLACKHOLE_MAX_KEY_LENGTH 1000
+#define BLACKHOLE_MAX_KEY 64          /* Max allowed keys */
+#define BLACKHOLE_MAX_KEY_SEG 16      /* Max segments for key */
+#define BLACKHOLE_MAX_KEY_LENGTH 3072 /* Keep compatible with innoDB */
   uint max_supported_keys() const override { return BLACKHOLE_MAX_KEY; }
   uint max_supported_key_length() const override {
     return BLACKHOLE_MAX_KEY_LENGTH;
   }
-  uint max_supported_key_part_length(
-      HA_CREATE_INFO *create_info MY_ATTRIBUTE((unused))) const override {
+  uint max_supported_key_part_length(HA_CREATE_INFO *create_info
+                                     [[maybe_unused]]) const override {
     return BLACKHOLE_MAX_KEY_LENGTH;
   }
   int open(const char *name, int mode, uint test_if_locked,
