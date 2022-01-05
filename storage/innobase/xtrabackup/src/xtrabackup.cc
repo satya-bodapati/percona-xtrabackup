@@ -7764,6 +7764,20 @@ int main(int argc, char **argv) {
 
   print_version();
 
+  system_charset_info = &my_charset_utf8_general_ci;
+  files_charset_info = &my_charset_utf8_general_ci;
+  national_charset_info = &my_charset_utf8_general_ci;
+  table_alias_charset = &my_charset_bin;
+  character_set_filesystem = &my_charset_bin;
+
+  sys_var_init();
+  setup_error_messages();
+
+  init_error_log();
+  setup_error_log_components();
+  atexit(destroy_error_log);
+
+
   if (xtrabackup_encrypt) {
     xb_libgcrypt_init();
   }
@@ -7925,19 +7939,6 @@ int main(int argc, char **argv) {
     signal(SIGCONT, sigcont_handler);
   }
 #endif
-
-  system_charset_info = &my_charset_utf8_general_ci;
-  files_charset_info = &my_charset_utf8_general_ci;
-  national_charset_info = &my_charset_utf8_general_ci;
-  table_alias_charset = &my_charset_bin;
-  character_set_filesystem = &my_charset_bin;
-
-  sys_var_init();
-  setup_error_messages();
-
-  init_error_log();
-  setup_error_log_components();
-  atexit(destroy_error_log);
 
   /* --backup */
   if (xtrabackup_backup) {
