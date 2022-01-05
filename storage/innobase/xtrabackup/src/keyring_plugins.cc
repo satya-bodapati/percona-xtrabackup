@@ -119,6 +119,8 @@ static void init_plugins(int argc, char **argv) {
 bool xb_fetch_tablespace_key(ulint space_id, byte *key, byte *iv) {
   std::map<ulint, tablespace_encryption_info>::iterator it;
 
+  xb::info() << "xb_fetch_tablespace_key";
+
   it = encryption_info.find(space_id);
 
   if (it == encryption_info.end()) {
@@ -254,7 +256,8 @@ bool xb_keyring_init_for_backup(MYSQL *connection) {
     keyring_plugin_lib = row[1];
     opt_plugin_load_list_ptr->push_back(new i_string(my_strdup(
         PSI_NOT_INSTRUMENTED, keyring_plugin_lib.c_str(), MYF(MY_FAE))));
-    msg_ts("Added plugin '%s' to load list.\n", keyring_plugin_lib.c_str());
+    xb::info() << "Added plugin '" << keyring_plugin_lib.c_str()
+               << "' to load list.";
   }
 
   mysql_free_result(mysql_result);

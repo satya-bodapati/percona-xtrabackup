@@ -33,6 +33,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "os0event.h"
 #include "xb0xb.h"
 #include "xtrabackup.h"
+#include "sql_thd_internal_api.h"
 
 extern ds_ctxt_t *ds_redo;
 /* first block of redo archive file which is all zero in 8.0.22  */
@@ -336,8 +337,8 @@ bool Redo_Log_Parser::parse_log(const byte *buf, size_t len, lsn_t start_lsn,
       recv_sys->parse_start_lsn =
           scanned_lsn + log_block_get_first_rec_group(log_block);
 
-      msg("Starting to parse redo log at lsn = " LSN_PF "\n",
-          recv_sys->parse_start_lsn);
+      xb::info() << "Starting to parse redo log at lsn = "
+                 << recv_sys->parse_start_lsn;
 
       if (recv_sys->parse_start_lsn < recv_sys->checkpoint_lsn) {
         /* We start to parse log records even before
@@ -680,7 +681,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
   read_mysql_variables(mysql, "SHOW VARIABLES", vars, true);
 
   if (redo_log_archive_dirs == nullptr || *redo_log_archive_dirs == 0) {
-    msg("xtrabackup: Redo Log Archiving is not set up.\n");
+    xb::info() << "Redo Log Archiving is not set up.";
     free_mysql_variables(vars);
     mysql_close(mysql);
     my_thread_end();
@@ -690,7 +691,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
   parse_archive_dirs(redo_log_archive_dirs);
 
   if (archived_dirs.empty()) {
-    msg("xtrabackup: Redo Log Archiving is not set up.\n");
+    xb::info() << "Redo Log Archiving is not set up.";
     free_mysql_variables(vars);
     mysql_close(mysql);
     my_thread_end();
@@ -736,7 +737,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
   auto res = xb_mysql_query(mysql, start_query.c_str(), true, false);
 
   if (res == nullptr) {
-    msg("xtrabackup: Redo Log Archiving is not used.\n");
+    xb::info() << "Redo Log Archiving is not used.";
     mysql_close(mysql);
     my_thread_end();
     return;
@@ -1124,7 +1125,9 @@ bool Redo_Log_Data_Manager::copy_once(bool is_last, bool *finished) {
 }
 
 void Redo_Log_Data_Manager::copy_func() {
+
   my_thread_init();
+  THD* thd = create_thd(false, false, true, 0);
 
   aborted = false;
 
@@ -1138,7 +1141,7 @@ void Redo_Log_Data_Manager::copy_func() {
     }
 
     if (finished) {
-      msg_ts(">> log scanned up to (" LSN_PF ")\n", reader.get_scanned_lsn());
+      xb::info() << ">> log scanned up to (" << reader.get_scanned_lsn() << ")";
 
       debug_sync_point("xtrabackup_copy_logfile_pause");
 
@@ -1151,6 +1154,7 @@ void Redo_Log_Data_Manager::copy_func() {
     error = true;
   }
 
+  destroy_thd(thd);
   my_thread_end();
 }
 
@@ -1183,9 +1187,8 @@ Redo_Log_Data_Manager::~Redo_Log_Data_Manager() { os_event_destroy(event); }
 
 bool Redo_Log_Data_Manager::stop_at(lsn_t lsn, lsn_t checkpoint_lsn) {
   last_checkpoint_lsn = checkpoint_lsn;
-  msg("xtrabackup: The latest check point (for incremental): '" LSN_PF "'\n",
-      last_checkpoint_lsn);
-  msg("xtrabackup: Stopping log copying thread at LSN " LSN_PF ".\n", lsn);
+  xb::info() << "The latest check point (for incremental): '" << last_checkpoint_lsn << "'";
+  xb::info() << "Stopping log copying thread at LSN " << lsn;
 
   stop_lsn = lsn;
   os_event_set(event);

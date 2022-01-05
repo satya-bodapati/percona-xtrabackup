@@ -476,10 +476,11 @@ extern mysql_mutex_t LOCK_sql_rand;
 static void check_all_privileges();
 static bool validate_options(const char *file, int argc, char **argv);
 
-#define CLIENT_WARN_DEPRECATED(opt, new_opt)                     \
-  msg("WARNING: " opt                                            \
-      " is deprecated and will be removed in a future version. " \
-      "Use " new_opt " instead.\n")
+#define CLIENT_WARN_DEPRECATED(opt, new_opt)                               \
+  xb::warn() << opt                                                        \
+             << " is deprecated and will be removed in a future version." \
+             << " Use "                                                     \
+             << new_opt << " instead"
 
 /* Simple datasink creation tracking...add datasinks in the reverse order you
 want them destroyed. */
@@ -1550,15 +1551,14 @@ void debug_sync_point(const char *name) {
            xtrabackup_target_dir);
   fp = fopen(pid_path, "w");
   if (fp == NULL) {
-    msg("xtrabackup: Error: cannot open %s\n", pid_path);
+    xb::error() << "cannot open " << pid_path;
     exit(EXIT_FAILURE);
   }
   fprintf(fp, "%u\n", (uint)pid);
   fclose(fp);
 
-  msg("xtrabackup: DEBUG: Suspending at debug sync point '%s'. "
-      "Resume with 'kill -SIGCONT %u'.\n",
-      name, (uint)pid);
+  xb::info() << "DEBUG: Suspending at debug sync point " << name
+      << "Resume with 'kill -SIGCONT " << (uint)pid << "'";
 
   debug_sync_resumed = 0;
   kill(pid, SIGSTOP);
@@ -1567,7 +1567,7 @@ void debug_sync_point(const char *name) {
   }
 
   /* On resume */
-  msg("xtrabackup: DEBUG: removing the pid file.\n");
+  xb::info() << "DEBUG: removing the pid file";
   my_delete(pid_path, MYF(MY_WME));
 #endif
 }
@@ -1579,7 +1579,7 @@ static const char *xb_server_default_groups[] = {"xtrabackup", "mysqld", 0, 0,
                                                  0};
 
 static void print_version(void) {
-  msg("%s version %s based on MySQL server %s %s (%s) (revision id: %s)\n",
+  fprintf(stderr, "%s version %s based on MySQL server %s %s (%s) (revision id: %s)\n",
       my_progname, XTRABACKUP_VERSION, MYSQL_SERVER_VERSION, SYSTEM_TYPE,
       MACHINE_TYPE, XTRABACKUP_REVISION);
 }
@@ -1741,7 +1741,7 @@ bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
       if (!strcasecmp(argument, "xbstream"))
         xtrabackup_stream_fmt = XB_STREAM_FMT_XBSTREAM;
       else {
-        msg("Invalid --stream argument: %s\n", argument);
+        xb::error() << "Invalid --stream argument: " << argument;
         return 1;
       }
       xtrabackup_stream = TRUE;
@@ -1754,22 +1754,23 @@ bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
       } else if (strcasecmp(argument, "lz4") == 0) {
         xtrabackup_compress = XTRABACKUP_COMPRESS_LZ4;
       } else {
-        msg("Invalid --compress argument: %s\n", argument);
+	xb::error() << "Invalid --compress argument: " << argument;
         return 1;
       }
       break;
     case OPT_XTRA_ENCRYPT:
       if (argument == NULL) {
-        msg("Missing --encrypt argument, must specify a valid encryption "
-            " algorithm.\n");
+        xb::error()
+            << "Missing --encrypt argument, must specify a valid encryption"
+            << " algorithm.";
         return 1;
       }
       xtrabackup_encrypt = TRUE;
       break;
     case OPT_DECRYPT:
       if (argument == NULL) {
-        msg("Missing --decrypt argument, must specify a "
-            "valid encryption  algorithm.\n");
+        xb::error() << "Missing --decrypt argument, must specify a"
+                       " valid encryption  algorithm.";
         return (1);
       }
       opt_decrypt = TRUE;
@@ -1864,7 +1865,7 @@ static bool innodb_init_param(void) {
   return the associated srv_page_size_shift. */
   srv_page_size_shift = innodb_page_size_validate(innobase_page_size);
   if (!srv_page_size_shift) {
-    msg("xtrabackup: Invalid page size=%llu.\n", innobase_page_size);
+    xb::error() << "xtrabackup: Invalid page size=" << innobase_page_size;
     goto error;
   }
   srv_page_size = innobase_page_size;
@@ -1872,20 +1873,20 @@ static bool innodb_init_param(void) {
   /* Check that values don't overflow on 32-bit systems. */
   if (sizeof(ulint) == 4) {
     if (xtrabackup_use_memory > UINT_MAX32) {
-      msg("xtrabackup: use-memory can't be over 4GB"
-          " on 32-bit systems\n");
+      xb::error() << "xtrabackup: use-memory can't be over 4GB"
+                     " on 32-bit systems";
     }
 
     if (innobase_buffer_pool_size > UINT_MAX32) {
-      msg("xtrabackup: innobase_buffer_pool_size can't be "
-          "over 4GB on 32-bit systems\n");
+      xb::error() << "xtrabackup: innobase_buffer_pool_size can't be"
+                     " over 4GB on 32-bit systems";
 
       goto error;
     }
 
     if (innobase_log_file_size > UINT_MAX32) {
-      msg("xtrabackup: innobase_log_file_size can't be "
-          "over 4GB on 32-bit systemsi\n");
+      xb::error() << "innobase_log_file_size can't be "
+                     "over 4GB on 32-bit systems";
 
       goto error;
     }
@@ -1919,10 +1920,10 @@ static bool innodb_init_param(void) {
   read from MySQL .cnf file */
 
   if (xtrabackup_backup || xtrabackup_stats) {
-    msg("xtrabackup: using the following InnoDB configuration:\n");
+    xb::info() << "using the following InnoDB configuration:";
   } else {
-    msg("xtrabackup: using the following InnoDB configuration "
-        "for recovery:\n");
+    xb::info() << "using the following InnoDB configuration "
+                  "for recovery:";
   }
 
   /*--------------- Data files -------------------------*/
@@ -1935,7 +1936,7 @@ static bool innodb_init_param(void) {
                        ? innobase_data_home_dir
                        : default_path);
   Fil_path::normalize(srv_data_home);
-  msg("xtrabackup:   innodb_data_home_dir = %s\n", srv_data_home);
+  xb::info() << "innodb_data_home_dir = " << srv_data_home;
 
   /*--------------- Shared tablespaces -------------------------*/
 
@@ -1946,7 +1947,7 @@ static bool innodb_init_param(void) {
   if (!innobase_data_file_path) {
     innobase_data_file_path = (char *)"ibdata1:10M:autoextend";
   }
-  msg("xtrabackup:   innodb_data_file_path = %s\n", innobase_data_file_path);
+  xb::info() << "innodb_data_file_path = " << innobase_data_file_path;
 
   /* This is the first time univ_page_size is used.
   It was initialized to 16k pages before srv_page_size was set */
@@ -1991,8 +1992,8 @@ static bool innodb_init_param(void) {
 
   /* Perform all sanity check before we take action of deleting files*/
   if (srv_sys_space.intersection(&srv_tmp_space)) {
-    msg("%s and %s file names seem to be the same.", srv_tmp_space.name(),
-        srv_sys_space.name());
+    xb::error() << srv_tmp_space.name() << " and " << srv_sys_space.name()
+                << " file names seem to be the same";
     goto error;
   }
 
@@ -2006,12 +2007,13 @@ static bool innodb_init_param(void) {
   if (xtrabackup_prepare && xtrabackup_incremental_dir) {
     srv_log_group_home_dir = xtrabackup_incremental_dir;
   }
-  msg("xtrabackup:   innodb_log_group_home_dir = %s\n", srv_log_group_home_dir);
+
+  xb::info() << "innodb_log_group_home_dir = " << srv_log_group_home_dir;
 
   Fil_path::normalize(srv_log_group_home_dir);
 
   if (strchr(srv_log_group_home_dir, ';')) {
-    msg("syntax error in innodb_log_group_home_dir, ");
+    xb::error() << "syntax error in innodb_log_group_home_dir";
 
     goto error;
   }
@@ -2021,9 +2023,8 @@ static bool innodb_init_param(void) {
 
   srv_n_log_files = (ulint)innobase_log_files_in_group;
   srv_log_file_size = (ulint)innobase_log_file_size;
-  msg("xtrabackup:   innodb_log_files_in_group = %ld\n", srv_n_log_files);
-  msg("xtrabackup:   innodb_log_file_size = %lld\n",
-      (long long int)srv_log_file_size);
+  xb::info() << "innodb_log_files_in_group = " << srv_n_log_files;
+  xb::info() << "innodb_log_file_size = " << srv_log_file_size;
 
   srv_log_buffer_size = (ulint)innobase_log_buffer_size;
   srv_log_write_ahead_size = INNODB_LOG_WRITE_AHEAD_SIZE_DEFAULT;
@@ -2114,7 +2115,7 @@ static bool innodb_init_param(void) {
 
   if (srv_use_native_aio) {
     ut_print_timestamp(stderr);
-    msg(" InnoDB: Using Linux native AIO\n");
+    xb::info() << " InnoDB: Using Linux native AIO";
   }
 #else
   /* Currently native AIO is supported only on windows and linux
@@ -2152,7 +2153,7 @@ static bool innodb_init_param(void) {
   return (FALSE);
 
 error:
-  msg("xtrabackup: innodb_init_param(): Error occured.\n");
+  xb::error() << "nnodb_init_param(): Error occured.";
   return (TRUE);
 }
 
@@ -2275,7 +2276,7 @@ static void xb_scan_for_tablespaces() {
   --innodb-undo-directory also. */
   fil_set_scan_dir(Fil_path::remove_quotes(MySQL_undo_path), true);
 
-  msg("xtrabackup: Generating a list of tablespaces\n");
+  xb::info() << "Generating a list of tablespaces";
 
   if (fil_scan_for_tablespaces(true) != DB_SUCCESS) {
     exit(EXIT_FAILURE);
@@ -2367,7 +2368,7 @@ static bool innodb_init(bool init_dd, bool for_apply_log) {
   return (false);
 
 error:
-  msg("xtrabackup: innodb_init(): Error occured.\n");
+  xb::error() << "innodb_init(): Error occured";
   return (true);
 }
 
@@ -2375,8 +2376,8 @@ static bool innodb_end(void) {
   srv_fast_shutdown = (ulint)innobase_fast_shutdown;
   innodb_inited = 0;
 
-  msg("xtrabackup: starting shutdown with innodb_fast_shutdown = %lu\n",
-      srv_fast_shutdown);
+  xb::info() << "starting shutdown with innodb_fast_shutdown = "
+             << srv_fast_shutdown;
 
   srv_pre_dd_shutdown();
 
@@ -2401,7 +2402,7 @@ static bool xtrabackup_read_metadata(char *filename) {
 
   fp = fopen(filename, "r");
   if (!fp) {
-    msg("xtrabackup: Error: cannot open %s\n", filename);
+    xb::error() << "cannot open " << filename;
     return (FALSE);
   }
 
@@ -2470,9 +2471,8 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
 
   stream = ds_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat);
   if (stream == NULL) {
-    msg("xtrabackup: Error: cannot open output stream "
-        "for %s\n",
-        XTRABACKUP_METADATA_FILENAME);
+    xb::error() << "cannot open output stream for "
+                << XTRABACKUP_METADATA_FILENAME;
     return (FALSE);
   }
 
@@ -2491,7 +2491,7 @@ static bool write_to_file(const char *filepath, const char *data) {
   size_t len = strlen(data);
   FILE *fp = fopen(filepath, "w");
   if (!fp) {
-    msg("xtrabackup: Error: cannot open %s\n", filepath);
+    xb::error() << "cannot open " << filepath;
     return (FALSE);
   }
   if (fwrite(data, len, 1, fp) < 1) {
@@ -2552,13 +2552,14 @@ static bool xb_read_delta_metadata(const char *filepath,
   fclose(fp);
 
   if (info->page_size == ULINT_UNDEFINED) {
-    msg("xtrabackup: page_size is required in %s\n", filepath);
+    xb::error() << "page_size is required in " << filepath;
     r = FALSE;
   }
   if (info->space_id == SPACE_UNKNOWN) {
-    msg("xtrabackup: Warning: This backup was taken with XtraBackup 2.0.1 "
-        "or earlier, some DDL operations between full and incremental "
-        "backups may be handled incorrectly\n");
+    xb::warn()
+        << "This backup was taken with XtraBackup 2.0.1 "
+           "or earlier, some DDL operations between full and incremental "
+           "backups may be handled incorrectly";
   }
 
   return (r);
@@ -2588,7 +2589,7 @@ bool xb_write_delta_metadata(const char *filename,
 
   f = ds_open(ds_meta, filename, &mystat);
   if (f == NULL) {
-    msg("xtrabackup: Error: cannot open output stream for %s\n", filename);
+    xb::error() << "cannot open output stream for " << filename;
     return (FALSE);
   }
 
@@ -2885,7 +2886,7 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
 
   if (!is_system && check_if_skip_table(node_name)) {
-    msg("[%02u] Skipping %s.\n", thread_n, node_name);
+    xb::info() << " Skipping " << node_name;
     return (FALSE);
   }
 
@@ -2915,8 +2916,7 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
   if (write_filter->init != NULL &&
       !write_filter->init(&write_filt_ctxt, dst_name, &cursor)) {
-    msg("[%02u] xtrabackup: error: failed to initialize page write filter.\n",
-        thread_n);
+    xb::info() << "failed to initialize page write filter.";
     goto error;
   }
 
@@ -2927,17 +2927,15 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
     dstfile = ds_open(ds_uncompressed_data, dst_name, &cursor.statinfo);
   }
   if (dstfile == NULL) {
-    msg("[%02u] xtrabackup: error: cannot open the destination stream for %s\n",
-        thread_n, dst_name);
+    xb::info() << "cannot open the destination stream for %s" << dst_name;
     goto error;
   }
 
   action = xb_get_copy_action();
 
   if (xtrabackup_stream) {
-    msg_ts("[%02u] %s %s\n", thread_n, action, node_path);
+    xb::info() << action << " " << node_path;
   } else {
-    //msg_ts("[%02u] %s %s to %s\n", thread_n, action, node_path, dstfile->path);
     xb::info() << action << " " << node_path << " to " << dstfile->path;
   }
 
@@ -2958,8 +2956,7 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   }
 
   /* close */
-//  msg_ts("[%02u]        ...done\n", thread_n);
-  xb::info() << "        ...done4";
+  xb::info() << "...done";
   xb_fil_cur_close(&cursor);
   if (ds_close(dstfile)) {
     rc = TRUE;
@@ -2978,8 +2975,7 @@ error:
     write_filter->deinit(&write_filt_ctxt);
     ;
   }
-  msg("[%02u] xtrabackup: Error: xtrabackup_copy_datafile() failed.\n",
-      thread_n);
+  xb::error() << "xtrabackup_copy_datafile() failed";
   return (TRUE); /*ERROR*/
 
 skip:
@@ -2990,12 +2986,11 @@ skip:
   if (write_filter && write_filter->deinit) {
     write_filter->deinit(&write_filt_ctxt);
   }
-  msg("[%02u] xtrabackup: Warning: We assume the "
-      "table was dropped during xtrabackup execution "
-      "and ignore the file.\n",
-      thread_n);
-  msg("[%02u] xtrabackup: Warning: skipping tablespace %s.\n", thread_n,
-      node_name);
+
+  xb::warn() << "We assume the "
+             << "table was dropped during xtrabackup execution "
+             << "and ignore the file.";
+  xb::warn() << "skipping tablespace %s." << node_name;
   return (FALSE);
 }
 
@@ -3051,7 +3046,7 @@ static void data_copy_thread_func(data_thread_ctxt_t *ctxt) {
   while ((node = datafiles_iter_next(ctxt->it)) != NULL && !*(ctxt->error)) {
     /* copy the datafile */
     if (xtrabackup_copy_datafile(node, num)) {
-      msg("[%02u] xtrabackup: Error: failed to copy datafile.\n", num);
+      xb::error() << "failed to copy datafile " << node->name;
       *(ctxt->error) = true;
     }
   }
@@ -3083,10 +3078,9 @@ bool validate_missing_encryption_tablespaces() {
       }
       mutex_exit(&recv_sys->mutex);
       if (!found) {
-        msg_ts(
-            "xtrabackup: Error: Space ID %lu is missing encryption "
-            "information.\n",
-            m_space_id);
+        xb::error() << "Space ID " << m_space_id
+                    << " is missing encryption "
+                       "information.";
         ret = false;
       }
     }
@@ -3269,7 +3263,7 @@ static dberr_t xb_load_tablespaces(void)
   err = srv_sys_space.check_file_spec(false, 0);
 
   if (err != DB_SUCCESS) {
-    msg("xtrabackup: could not find data files at the specified datadir\n");
+    xb::error() << "could not find data files at the specified datadir";
     return (DB_ERROR);
   }
 
@@ -3277,23 +3271,23 @@ static dberr_t xb_load_tablespaces(void)
       srv_sys_space.open_or_create(false, false, &sum_of_new_sizes, &flush_lsn);
 
   if (err != DB_SUCCESS) {
-    msg("xtrabackup: Could not open or create data files.\n"
-        "xtrabackup: If you tried to add new data files, and it "
-        "failed here,\n"
-        "xtrabackup: you should now edit innodb_data_file_path in "
-        "my.cnf back\n"
-        "xtrabackup: to what it was, and remove the new ibdata "
-        "files InnoDB created\n"
-        "xtrabackup: in this failed attempt. InnoDB only wrote "
-        "those files full of\n"
-        "xtrabackup: zeros, but did not yet use them in any way. "
-        "But be careful: do not\n"
-        "xtrabackup: remove old data files which contain your "
-        "precious data!\n");
+    xb::info() << "Could not open or create data files.\n"
+                  "xtrabackup: If you tried to add new data files, and it "
+                  "failed here,\n"
+                  "xtrabackup: you should now edit innodb_data_file_path in "
+                  "my.cnf back\n"
+                  "xtrabackup: to what it was, and remove the new ibdata "
+                  "files InnoDB created\n"
+                  "xtrabackup: in this failed attempt. InnoDB only wrote "
+                  "those files full of\n"
+                  "xtrabackup: zeros, but did not yet use them in any way. "
+                  "But be careful: do not\n"
+                  "xtrabackup: remove old data files which contain your "
+                  "precious data!\n";
     return (err);
   }
 
-  msg("xtrabackup: Generating a list of tablespaces\n");
+  xb::info() << "Generating a list of tablespaces";
   xb_scan_for_tablespaces();
 
   /* Add separate undo tablespaces to fil_system */
@@ -3433,12 +3427,12 @@ static void xb_validate_name(
   /* perform only basic validation. validate length and
   path symbols */
   if (len > NAME_LEN) {
-    msg("xtrabackup: name `%s` is too long.\n", name);
+    xb::error() << "name " << name << " is too long";
     exit(EXIT_FAILURE);
   }
   p = strpbrk(name, "/\\~");
   if (p && p - name < NAME_LEN) {
-    msg("xtrabackup: name `%s` is not valid.\n", name);
+    xb::error() << "name " << name << " is not valid";
     exit(EXIT_FAILURE);
   }
 }
@@ -3496,7 +3490,7 @@ static void xb_register_table(
     const char *name) /*!< in: name of table */
 {
   if (strchr(name, '.') == NULL) {
-    msg("xtrabackup: `%s` is not fully qualified name.\n", name);
+    xb::error() << name << " is not fully qualified name";
     exit(EXIT_FAILURE);
   }
 
@@ -3509,8 +3503,7 @@ bool compile_regex(const char *regex_string, const char *error_context,
   int ret = xb_regcomp(compiled_re, regex_string, REG_EXTENDED);
   if (ret != 0) {
     xb_regerror(ret, compiled_re, errbuf, sizeof(errbuf));
-    msg("xtrabackup: error: %s regcomp(%s): %s\n", error_context, regex_string,
-        errbuf);
+    xb::error() << error_context << " regcomp(" << regex_string << "): " << errbuf;
     return false;
   }
   return true;
@@ -3581,7 +3574,7 @@ static void xb_load_list_file(
   /* read and store the filenames */
   fp = fopen(filename, "r");
   if (!fp) {
-    msg("xtrabackup: cannot open %s\n", filename);
+    xb::error() << "cannot open " << filename;
     exit(EXIT_FAILURE);
   }
   while (fgets(name_buf, sizeof(name_buf), fp) != NULL) {
@@ -3589,7 +3582,7 @@ static void xb_load_list_file(
     if (p) {
       *p = '\0';
     } else {
-      msg("xtrabackup: `%s...` name is too long", name_buf);
+      xb::error() << name_buf << " name is too long";
       exit(EXIT_FAILURE);
     }
 
@@ -3767,9 +3760,8 @@ static void xb_tables_compatibility_check() {
   while ((row = mysql_fetch_row(result))) {
     if (!check_if_skip_table(row[0])) {
       *strchr(row[0], '/') = '.';
-      msg("Warning: \"%s\" uses engine \"%s\" "
-          "and will not be backed up.\n",
-          row[0], row[1]);
+      xb::warn() << row[0] << " uses engine " << row[1]
+                 << "and will not be backed up.";
     }
   }
 
@@ -3842,19 +3834,19 @@ void xtrabackup_backup_func(void) {
   xb::info() << "uses blah";
 
 #ifdef USE_POSIX_FADVISE
-  msg("xtrabackup: uses posix_fadvise().\n");
+  xb::info() << "uses posix_fadvise().";
 #endif
 
   /* cd to datadir */
 
   if (my_setwd(mysql_real_data_home, MYF(MY_WME))) {
-    msg("xtrabackup: cannot my_setwd %s\n", mysql_real_data_home);
+    xb::error() << "cannot my_setwd " << mysql_real_data_home;
     exit(EXIT_FAILURE);
   }
-  msg("xtrabackup: cd to %s\n", mysql_real_data_home);
+  xb::info() << "cd to " << mysql_real_data_home;
 
-  msg("xtrabackup: open files limit requested %u, set to %u\n",
-      (uint)xb_open_files_limit, xb_set_max_open_files(xb_open_files_limit));
+  xb::info() << "open files limit requested " << xb_open_files_limit
+             << " , set to " << xb_set_max_open_files(xb_open_files_limit);
 
   mysql_data_home = mysql_data_home_buff;
   mysql_data_home[0] = FN_CURLIB;  // all paths are relative from here
@@ -3868,10 +3860,12 @@ void xtrabackup_backup_func(void) {
   srv_close_files = xb_close_files || opt_lock_ddl;
 
   if (xb_close_files)
-    msg("xtrabackup: warning: close-files specified. Use it "
-        "at your own risk. If there are DDL operations like table DROP TABLE "
-        "or RENAME TABLE during the backup, inconsistent backup will be "
-        "produced.\n");
+    xb::warn()
+        << "close-files specified. Use it "
+           "at your own risk. If there are DDL operations like table DROP "
+           "TABLE "
+           "or RENAME TABLE during the backup, inconsistent backup will be "
+           "produced.";
 
   /* initialize components */
   if (innodb_init_param()) exit(EXIT_FAILURE);
@@ -3888,10 +3882,10 @@ void xtrabackup_backup_func(void) {
 #endif
   switch (srv_unix_file_flush_method) {
     case SRV_UNIX_O_DIRECT:
-      msg("xtrabackup: using O_DIRECT\n");
+      xb::info() << "using O_DIRECT";
       break;
     case SRV_UNIX_O_DIRECT_NO_FSYNC:
-      msg("xtrabackup: using O_DIRECT_NO_FSYNC\n");
+      xb::info() << "using O_DIRECT_NO_FSYNC";
       break;
     default:
       break;
@@ -3920,18 +3914,19 @@ void xtrabackup_backup_func(void) {
 
   xb_filters_init();
   if (opt_component_keyring_file_config != nullptr) {
-    msg("xtrabackup: Warning: --component-keyring-file-config will be ignored "
-        "for --backup operation\n");
+    xb::warn() << "--component-keyring-file-config will be ignored "
+                  "for --backup operation";
   }
 
   if (have_keyring_component &&
       !xtrabackup::components::keyring_init_online(mysql_connection)) {
-    msg("xtrabackup: Error: failed to init keyring component\n");
+    xb::error() << "failed to init keyring component";
     exit(EXIT_FAILURE);
   }
+
   if (!xtrabackup::components::keyring_component_initialized &&
       !xb_keyring_init_for_backup(mysql_connection)) {
-    msg("xtrabackup: Error: failed to init keyring plugin\n");
+    xb::error() << "failed to init keyring plugin";
     exit(EXIT_FAILURE);
   }
   xtrabackup::components::inititialize_service_handles();
@@ -3971,16 +3966,16 @@ void xtrabackup_backup_func(void) {
   if (xtrabackup_extra_lsndir &&
       !my_stat(xtrabackup_extra_lsndir, &stat_info, MYF(0)) &&
       (my_mkdir(xtrabackup_extra_lsndir, 0777, MYF(0)) < 0)) {
-    msg("xtrabackup: Error: cannot mkdir %d: %s\n", my_errno(),
-        xtrabackup_extra_lsndir);
+    xb::error() << "cannot mkdir: " << my_errno() << " "
+                << xtrabackup_extra_lsndir;
     exit(EXIT_FAILURE);
   }
 
   /* create target dir if not exist */
   if (!my_stat(xtrabackup_target_dir, &stat_info, MYF(0)) &&
       (my_mkdir(xtrabackup_target_dir, 0777, MYF(0)) < 0)) {
-    msg("xtrabackup: Error: cannot mkdir %d: %s\n", my_errno(),
-        xtrabackup_target_dir);
+    xb::error() << "cannot mkdir: " << my_errno() << " "
+                << xtrabackup_target_dir;
     exit(EXIT_FAILURE);
   }
 
@@ -4003,9 +3998,7 @@ void xtrabackup_backup_func(void) {
   /* Populate fil_system with tablespaces to copy */
   dberr_t err = xb_load_tablespaces();
   if (err != DB_SUCCESS) {
-    msg("xtrabackup: error: xb_load_tablespaces() failed with error code "
-        "%u\n",
-        err);
+    xb::error() << "xb_load_tablespaces() failed with error code " << err;
     exit(EXIT_FAILURE);
   }
 
@@ -4021,25 +4014,25 @@ void xtrabackup_backup_func(void) {
           xb_page_bitmap_init(redo_mgr.get_start_checkpoint_lsn());
     }
     if (!changed_page_bitmap) {
-      msg("xtrabackup: using the full scan for incremental backup\n");
+      xb::info() << "using the full scan for incremental backup";
     } else if (incremental_lsn != redo_mgr.get_start_checkpoint_lsn()) {
       /* Do not print that bitmaps are used when dummy bitmap
       is build for an empty LSN range. */
-      msg("xtrabackup: using the changed page bitmap\n");
+      xb::info() << "using the changed page bitmap";
     }
   }
 
   ut_a(xtrabackup_parallel > 0);
 
   if (xtrabackup_parallel > 1) {
-    msg("xtrabackup: Starting %u threads for parallel data files transfer\n",
-        xtrabackup_parallel);
+    xb::info() << "Starting " << xtrabackup_parallel
+               << " threads for parallel data files transfer";
   }
 
 
   auto it = datafiles_iter_new();
   if (it == NULL) {
-    msg("xtrabackup: Error: datafiles_iter_new() failed.\n");
+    xb::error() << "datafiles_iter_new() failed.";
     exit(EXIT_FAILURE);
   }
 
@@ -4069,7 +4062,7 @@ void xtrabackup_backup_func(void) {
       break;
     }
     if (redo_mgr.is_error()) {
-      msg("xtrabackup: error: log copyiing failed.\n");
+      xb::error() << "log copyiing failed.";
       exit(EXIT_FAILURE);
     }
     mutex_exit(&count_mutex);
@@ -4093,7 +4086,8 @@ void xtrabackup_backup_func(void) {
   }
 
   if (opt_debug_sleep_before_unlock) {
-    msg_ts("Debug sleep for %u seconds\n", opt_debug_sleep_before_unlock);
+    xb::info() << "Debug sleep for " << opt_debug_sleep_before_unlock
+               << " seconds";
     std::this_thread::sleep_for(std::chrono::seconds(opt_debug_sleep_before_unlock));
   }
 
@@ -4102,10 +4096,9 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
   if (redo_mgr.is_error()) {
-    msg("xtrabackup: error: log copyiing failed.\n");
+    xb::error() << "log copyiing failed.";
     exit(EXIT_FAILURE);
   }
-  msg("\n");
 
   io_watching_thread_stop = true;
 
@@ -4124,7 +4117,7 @@ void xtrabackup_backup_func(void) {
   metadata_last_lsn = redo_mgr.get_stop_lsn();
 
   if (!xtrabackup_stream_metadata(ds_meta)) {
-    msg("xtrabackup: Error: failed to stream metadata.\n");
+    xb::error() << "failed to stream metadata.";
     exit(EXIT_FAILURE);
   }
 
@@ -4138,15 +4131,13 @@ void xtrabackup_backup_func(void) {
     sprintf(filename, "%s/%s", xtrabackup_extra_lsndir,
             XTRABACKUP_METADATA_FILENAME);
     if (!xtrabackup_write_metadata(filename)) {
-      msg("xtrabackup: Error: failed to write metadata to '%s'.\n", filename);
+      xb::error() << "failed to write metadata to " << filename;
       exit(EXIT_FAILURE);
     }
 
     sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
     if (!xtrabackup_write_info(filename)) {
-      msg("xtrabackup: Error: failed to write info "
-          "to '%s'.\n",
-          filename);
+      xb::error() << "failed to write info to " << filename;
       exit(EXIT_FAILURE);
     }
   }
@@ -4161,7 +4152,7 @@ void xtrabackup_backup_func(void) {
     if (!xb_tablespace_keys_dump(
             ds_data, opt_transition_key,
             opt_transition_key != NULL ? strlen(opt_transition_key) : 0)) {
-      msg("xtrabackup: Error: failed to dump tablespace keys.\n");
+      xb::error() << "failed to dump tablespace keys.";
       exit(EXIT_FAILURE);
     }
   }
@@ -4177,9 +4168,9 @@ void xtrabackup_backup_func(void) {
     wait_throttle = NULL;
   }
 
-  msg("xtrabackup: Transaction log of lsn (" LSN_PF ") to (" LSN_PF
-      ") was copied.\n",
-      redo_mgr.get_start_checkpoint_lsn(), redo_mgr.get_scanned_lsn());
+  xb::info() << "Transaction log of lsn ("
+             << redo_mgr.get_start_checkpoint_lsn() << ") to ("
+             << redo_mgr.get_scanned_lsn() << ") was copied.";
 
   xb_filters_free();
 
@@ -4469,10 +4460,10 @@ static void xtrabackup_stats_func(int argc, char **argv) {
   /* cd to datadir */
 
   if (my_setwd(mysql_real_data_home, MYF(MY_WME))) {
-    msg("xtrabackup: cannot my_setwd %s\n", mysql_real_data_home);
+    xb::error() << "cannot my_setwd " << mysql_real_data_home;
     exit(EXIT_FAILURE);
   }
-  msg("xtrabackup: cd to %s\n", mysql_real_data_home);
+  xb::info() << "cd to " << mysql_real_data_home;
 
   mysql_data_home = mysql_data_home_buff;
   mysql_data_home[0] = FN_CURLIB;  // all paths are relative from here
@@ -4484,12 +4475,12 @@ static void xtrabackup_stats_func(int argc, char **argv) {
   init_mysql_environment();
   if(!xtrabackup::components::keyring_init_offline())
   {
-    msg("xtrabackup: Error: failed to init keyring component\n");
+    xb::error() << "failed to init keyring component";
     exit(EXIT_FAILURE);
   }
   if (!xtrabackup::components::keyring_component_initialized &&
       !xb_keyring_init_for_stats(argc, argv)) {
-    msg("xtrabackup: error: failed to init keyring plugin.\n");
+    xb::error() << "failed to init keyring plugin.";
     exit(EXIT_FAILURE);
   }
   xtrabackup::components::inititialize_service_handles();
@@ -4525,22 +4516,21 @@ static void xtrabackup_stats_func(int argc, char **argv) {
 
     if (!os_file_status(logname, &exists, &type) || !exists ||
         type != OS_FILE_TYPE_FILE) {
-      msg("xtrabackup: Error: Cannot find log file %s.\n", logname);
-      msg("xtrabackup: Error: "
-          "to use the statistics feature, you need a "
-          "clean copy of the database including "
-          "correctly sized log files, so you need to "
-          "execute with --prepare twice to use this "
-          "functionality on a backup.\n");
+      xb::error() << "Cannot find log file " << logname;
+      xb::error() << "to use the statistics feature, you need a "
+                     "clean copy of the database including "
+                     "correctly sized log files, so you need to "
+                     "execute with --prepare twice to use this "
+                     "functionality on a backup.";
       exit(EXIT_FAILURE);
     }
   }
 
-  msg("xtrabackup: Starting 'read-only' InnoDB instance to gather "
-      "index statistics.\n"
-      "xtrabackup: Using %lld bytes for buffer pool (set by "
-      "--use-memory parameter)\n",
-      xtrabackup_use_memory);
+  xb::info() << "xtrabackup: Starting 'read-only' InnoDB instance to gather "
+                "index statistics.";
+  xb::info() << "Using " << xtrabackup_use_memory
+             << " bytes for buffer pool (set by "
+                "--use-memory parameter)";
 
   if (innodb_init(true, false)) exit(EXIT_FAILURE);
 
@@ -4699,7 +4689,7 @@ retry:
     /* The following call prints an error message */
     os_file_get_last_error(TRUE);
 
-    msg("xtrabackup: Warning: cannot open %s. will try to find.\n", src_path);
+    xb::warn() << "cannot open %s. will try to find." << src_path;
 
     /* check if ib_logfile0 may be xtrabackup_logfile */
     src_file = os_file_create_simple_no_error_handling(
@@ -4707,7 +4697,7 @@ retry:
         &success);
     if (!success) {
       os_file_get_last_error(TRUE);
-      msg("  xtrabackup: Fatal error: cannot find %s.\n", src_path);
+      xb::error() << "cannot find %s." << src_path;
 
       goto error;
     }
@@ -4720,8 +4710,8 @@ retry:
 
     if (ut_memcmp(log_buf + LOG_HEADER_CREATOR, (byte *)"xtrabkup",
                   (sizeof "xtrabkup") - 1) == 0) {
-      msg("  xtrabackup: 'ib_logfile0' seems to be 'xtrabackup_logfile'. will "
-          "retry.\n");
+      xb::info() << "'ib_logfile0' seems to be 'xtrabackup_logfile'. will "
+                    "retry.";
 
       os_file_close(src_file);
       src_file = XB_FILE_UNDEFINED;
@@ -4735,7 +4725,7 @@ retry:
       goto retry;
     }
 
-    msg("  xtrabackup: Fatal error: cannot find %s.\n", src_path);
+    xb::info() << "cannot find " << src_path;
 
     os_file_close(src_file);
     src_file = XB_FILE_UNDEFINED;
@@ -4761,22 +4751,23 @@ retry:
   if (ut_memcmp(log_buf + LOG_HEADER_CREATOR, (byte *)"xtrabkup",
                 (sizeof "xtrabkup") - 1) != 0) {
     if (xtrabackup_incremental_dir) {
-      msg("xtrabackup: error: xtrabackup_logfile was already used "
-          "to '--prepare'.\n");
+      xb::error() << "xtrabackup_logfile was already used "
+                     "to '--prepare'.";
       goto error;
     }
-    msg("xtrabackup: notice: xtrabackup_logfile was already used "
-        "to '--prepare'.\n");
+    xb::info() << "xtrabackup_logfile was already used "
+                  "to '--prepare'.";
     goto skip_modify;
   }
 
   if (log_format < LOG_HEADER_FORMAT_8_0_1) {
-    msg("xtrabackup: error: Unsupported redo log format " UINT32PF
-        "\n"
-        "This version of Percona XtraBackup can only perform backups and "
-        "restores against MySQL 8.0 and Percona Server 8.0, please use Percona "
-        "Xtrabackup 2.4 for this database.\n",
-        log_format);
+    xb::error() << "Unsupported redo log format " << log_format;
+    xb::error()
+        << "This version of Percona XtraBackup can only perform backups and "
+           "restores against MySQL 8.0 and Percona Server 8.0, please use "
+           "Percona "
+           "Xtrabackup 2.4 for this database.";
+
     goto error;
   }
 
@@ -4810,7 +4801,7 @@ retry:
   }
 
   if (!checkpoint_found) {
-    msg("xtrabackup: No valid checkpoint found.\n");
+    xb::error() << "No valid checkpoint found.\n";
     goto error;
   }
 
@@ -4877,9 +4868,8 @@ retry:
     file_size = os_file_get_size(src_file);
   }
 
-  msg("xtrabackup: xtrabackup_logfile detected: size=" UINT64PF
-      ", start_lsn=(" LSN_PF ")\n",
-      file_size, max_lsn);
+  xb::info() << "xtrabackup_logfile detected: size=" << file_size
+             << ", start_lsn=(" << max_lsn;
 
   os_file_close(src_file);
   src_file = XB_FILE_UNDEFINED;
@@ -5143,12 +5133,12 @@ static space_id_t get_space_id_from_page_0(const char *file_name) {
     if (err == DB_SUCCESS) {
       space_id = fsp_header_get_space_id(page);
     } else {
-      msg("xtrabackup: error reading first page on file %s\n", file_name);
+      xb::error() << "error reading first page on file" << file_name;
     }
     os_file_close(file);
 
   } else {
-    msg("xtrabackup: Cannot open file to read first page %s\n", file_name);
+    xb::error() << "Cannot open file to read first page " << file_name;
   }
 
   ut_free(buf);
@@ -5205,7 +5195,7 @@ static pfs_os_file_t xb_delta_open_matching_space(
 
   /* Create the database directory if it doesn't exist yet */
   if (!os_file_create_directory(dest_dir, FALSE)) {
-    msg("xtrabackup: error: cannot create dir %s\n", dest_dir);
+    xb::error() << "cannot create dir " << dest_dir;
     return file;
   }
 
@@ -5231,7 +5221,7 @@ static pfs_os_file_t xb_delta_open_matching_space(
         f_space_id = get_space_id_from_page_0(real_name);
 
         if (f_space_id == SPACE_UNKNOWN) {
-          msg("could not find space id from file %s", real_name);
+          xb::error() << "could not find space id from file " << real_name;
           goto exit;
         }
 
@@ -5250,12 +5240,14 @@ static pfs_os_file_t xb_delta_open_matching_space(
         bool res =
             fil_space_read_name_and_filepath(f_space_id, &space_name, &oldpath);
         ut_a(res);
-        msg("xtrabackup: Renaming %s to %s.ibu\n", dest_space_name, tmpname);
+        xb::info() << "Renaming " << dest_space_name << " to " << tmpname
+                   << ".ibu";
 
         ut_a(os_file_status(oldpath, &exists, &type));
 
         if (!fil_rename_tablespace(f_space_id, oldpath, tmpname, tmpname)) {
-          msg("xtrabackup: Cannot rename %s to %s\n", dest_space_name, tmpname);
+          xb::error() << "Cannot rename " << dest_space_name << "to "
+                      << tmpname;
           ut_free(oldpath);
           ut_free(space_name);
           goto exit;
@@ -5267,7 +5259,7 @@ static pfs_os_file_t xb_delta_open_matching_space(
       /* either file doesn't exist or it has been renamed above */
       if (!fil_space_create(dest_space_name, space_id, space_flags,
                             FIL_TYPE_TABLESPACE)) {
-        msg("xtrabackup: Cannot create tablespace %s\n", dest_space_name);
+        xb::error() << "Cannot create tablespace " << dest_space_name;
         goto exit;
       }
       *success = xb_space_create_file(real_name, space_id, space_flags, &file);
@@ -5301,13 +5293,14 @@ static pfs_os_file_t xb_delta_open_matching_space(
           fil_space_read_name_and_filepath(f_space_id, &space_name, &oldpath);
       ut_a(res);
 
-      msg("xtrabackup: Renaming %s to %s.ibd\n", dest_space_name, tmpname);
+      xb::info() << "Renaming " << dest_space_name << " to " << tmpname
+                 << ".ibd";
 
       ut_a(os_file_status(oldpath, &exists, &type));
 
       if (exists &&
           !fil_rename_tablespace(f_space_id, oldpath, tmpname, NULL)) {
-        msg("xtrabackup: Cannot rename %s to %s\n", dest_space_name, tmpname);
+        xb::error() << "Cannot rename " << dest_space_name << " to " << tmpname;
         ut_free(oldpath);
         ut_free(space_name);
         goto exit;
@@ -5318,8 +5311,8 @@ static pfs_os_file_t xb_delta_open_matching_space(
   }
 
   if (space_id == SPACE_UNKNOWN) {
-    msg("xtrabackup: Error: Cannot handle DDL operation on tablespace %s\n",
-        dest_space_name);
+    xb::error() << "Cannot handle DDL operation on tablespace "
+                << dest_space_name;
     exit(EXIT_FAILURE);
   }
 
@@ -5339,14 +5332,15 @@ static pfs_os_file_t xb_delta_open_matching_space(
 
     ut_a(res);
 
-    msg("xtrabackup: Renaming %s to %s\n", fil_space->name, dest_space_name);
+    xb::info() << "Renaming " << fil_space->name << "to "
+               << dest_space_name;
 
     ut_a(os_file_status(oldpath, &exists, &type));
 
     if (exists &&
         !fil_rename_tablespace(fil_space->id, oldpath, tmpname, NULL)) {
-      msg("xtrabackup: Cannot rename %s to %s\n", fil_space->name,
-          dest_space_name);
+      xb::error() << "Cannot rename " << fil_space->name << " to "
+                  << dest_space_name;
       ut_free(oldpath);
       ut_free(space_name);
       goto exit;
@@ -5361,7 +5355,7 @@ static pfs_os_file_t xb_delta_open_matching_space(
 
   if (!fil_space_create(dest_space_name, space_id, space_flags,
                         FIL_TYPE_TABLESPACE)) {
-    msg("xtrabackup: Cannot create tablespace %s\n", dest_space_name);
+    xb::error() << " Cannot create tablespace " << dest_space_name;
     goto exit;
   }
 
@@ -5385,7 +5379,7 @@ found:
   if (ok) {
     *success = true;
   } else {
-    msg("xtrabackup: Cannot open file %s\n", real_name);
+    xb::error() << "Cannot open file " << real_name;
   }
 
 exit:
@@ -5459,11 +5453,10 @@ static bool xtrabackup_apply_delta(
 
   page_size = info.page_size;
   page_size_shift = get_bit_shift(page_size);
-  msg("xtrabackup: page size for %s is %lu bytes\n", src_path, page_size);
+  xb::info() << "page size for " << src_path << " is " << page_size << " bytes";
   if (page_size_shift < 10 || page_size_shift > UNIV_PAGE_SIZE_SHIFT_MAX) {
-    msg("xtrabackup: error: invalid value of page_size "
-        "(%lu bytes) read from %s\n",
-        page_size, meta_path);
+    xb::error() << "invalid value of page_size (" << page_size
+                << " bytes) read from " << meta_path;
     goto error;
   }
 
@@ -5472,7 +5465,7 @@ static bool xtrabackup_apply_delta(
       &success);
   if (!success) {
     os_file_get_last_error(TRUE);
-    msg("xtrabackup: error: cannot open %s\n", src_path);
+    xb::error() << "cannot open " << src_path;
     goto error;
   }
 
@@ -5485,7 +5478,7 @@ static bool xtrabackup_apply_delta(
       info.space_id, info.space_flags, info.zip_size, dst_path,
       sizeof(dst_path), &success);
   if (!success) {
-    msg("xtrabackup: error: cannot open %s\n", dst_path);
+    xb::error() << "cannot open " << dst_path;
     goto error;
   }
 
@@ -5501,7 +5494,7 @@ static bool xtrabackup_apply_delta(
   incremental_buffer = static_cast<byte *>(
       ut_align(incremental_buffer_base, UNIV_PAGE_SIZE_MAX));
 
-  msg("Applying %s to %s...\n", src_path, dst_path);
+  xb::info() << "Applying " << src_path << "to " << dst_path;
 
   while (!last_buffer) {
     ulint cluster_header;
@@ -5523,7 +5516,7 @@ static bool xtrabackup_apply_delta(
         last_buffer = true;
         break;
       default:
-        msg("xtrabackup: error: %s is not valid .delta file.\n", src_path);
+        xb::info() << src_path << " is not valid .delta file.";
         goto error;
     }
 
@@ -5570,7 +5563,7 @@ static bool xtrabackup_apply_delta(
           if (os_file_punch_hole(dst_file.m_file,
                                  offset_in_file + compressed_len,
                                  page_size - compressed_len) != DB_SUCCESS) {
-            msg("xtrabackup: os_file_punch_hole returned error\n");
+            xb::error() << "os_file_punch_hole returned error";
             goto error;
           }
         }
@@ -5589,9 +5582,8 @@ error:
   if (incremental_buffer_base) ut_free(incremental_buffer_base);
   if (src_file != XB_FILE_UNDEFINED) os_file_close(src_file);
   if (dst_file != XB_FILE_UNDEFINED) os_file_close(dst_file);
-  msg("xtrabackup: Error: xtrabackup_apply_delta(): failed to apply %s to "
-      "%s.\n",
-      src_path, dst_path);
+  xb::error() << "xtrabackup_apply_delta(): failed to apply " << src_path
+              << " to " << dst_path;
   return false;
 }
 
@@ -5643,9 +5635,9 @@ static void check_datadir_enctry_access(const char *name,
                                         const struct stat *statinfo) {
   const char *entry_type = S_ISDIR(statinfo->st_mode) ? "directory" : "file";
   if ((statinfo->st_mode & S_IRUSR) != S_IRUSR) {
-    msg("xtrabackup: Error: %s '%s' is not readable by "
-        "XtraBackup\n",
-        entry_type, name);
+    xb::error() << entry_type << " " << name
+                << " is not readable by "
+                   "XtraBackup";
     exit(EXIT_FAILURE);
   }
 }
@@ -5819,7 +5811,7 @@ static bool xtrabackup_close_temp_log(bool clear_flag) {
   return (FALSE);
 error:
   if (src_file != XB_FILE_UNDEFINED) os_file_close(src_file);
-  msg("xtrabackup: Error: xtrabackup_close_temp_log() failed.\n");
+  xb::error() << "xtrabackup_close_temp_log() failed.";
   return (TRUE); /*ERROR*/
 }
 
@@ -5844,7 +5836,7 @@ static bool xb_export_cfg_write_index_fields(
     mach_write_to_4(ptr, field->fixed_len);
 
     if (fwrite(row, 1, sizeof(row), file) != sizeof(row)) {
-      msg("xtrabackup: Error: writing index fields.");
+      xb::error() << "writing index fields.";
 
       return (false);
     }
@@ -5857,7 +5849,7 @@ static bool xb_export_cfg_write_index_fields(
 
     if (fwrite(row, 1, sizeof(len), file) != sizeof(len) ||
         fwrite(field->name, 1, len, file) != len) {
-      msg("xtrabackup: Error: writing index column.");
+      xb::error() << "writing index column.";
 
       return (false);
     }
@@ -5910,7 +5902,7 @@ xb_export_cfg_write_one_index(
   mach_write_to_4(ptr, index->n_fields);
 
   if (fwrite(row, 1, sizeof(row), file) != sizeof(row)) {
-    msg("xtrabackup: Error: writing index meta-data.");
+    xb::error() << "writing index meta-data.";
     return (false);
   }
 
@@ -5923,7 +5915,7 @@ xb_export_cfg_write_one_index(
 
   if (fwrite(row, 1, sizeof(len), file) != sizeof(len) ||
       fwrite(index->name, 1, len, file) != len) {
-    msg("xtrabackup: Error:  writing index name.");
+    xb::error() << "writing index name.";
     return (false);
   }
 
@@ -5958,7 +5950,7 @@ xb_export_cfg_write_indexes(
   mach_write_to_4(row, num_indexes);
 
   if (fwrite(row, 1, sizeof(row), file) != sizeof(row)) {
-    msg("xtrabackup: Error: writing index count.");
+    xb::error() << "writing index count.";
     return (false);
   }
 
@@ -6022,7 +6014,7 @@ xb_export_cfg_write_table(
     mach_write_to_4(ptr, col->max_prefix);
 
     if (fwrite(row, 1, sizeof(row), file) != sizeof(row)) {
-      msg("xtrabackup: Error: writing table column data.");
+      xb::error() << "writing table column data.";
 
       return (false);
     }
@@ -6042,7 +6034,7 @@ xb_export_cfg_write_table(
 
     if (fwrite(row, 1, sizeof(len), file) != sizeof(len) ||
         fwrite(col_name, 1, len, file) != len) {
-      msg("xtrabackup: Error: writing column name.");
+      xb::error() << "writing column name.";
 
       return (false);
     }
@@ -6067,7 +6059,7 @@ xb_export_cfg_write_header(
   mach_write_to_4(value, IB_EXPORT_CFG_VERSION_V2);
 
   if (fwrite(&value, 1, sizeof(value), file) != sizeof(value)) {
-    msg("xtrabackup: Error: writing meta-data version number.");
+    xb::error() << "writing meta-data version number.";
 
     return (false);
   }
@@ -6082,7 +6074,7 @@ xb_export_cfg_write_header(
 
   if (fwrite(&value, 1, sizeof(value), file) != sizeof(value) ||
       fwrite(hostname, 1, len, file) != len) {
-    msg("xtrabackup: Error: writing hostname.");
+    xb::error() << "writing hostname.";
 
     return (false);
   }
@@ -6096,7 +6088,7 @@ xb_export_cfg_write_header(
 
   if (fwrite(&value, 1, sizeof(value), file) != sizeof(value) ||
       fwrite(table->name.m_name, 1, len, file) != len) {
-    msg("xtrabackup: Error: writing table name.");
+    xb::error() << "writing table name.";
 
     return (false);
   }
@@ -6107,7 +6099,7 @@ xb_export_cfg_write_header(
   mach_write_to_8(row, table->autoinc);
 
   if (fwrite(row, 1, sizeof(ib_uint64_t), file) != sizeof(ib_uint64_t)) {
-    msg("xtrabackup: Error: writing table autoinc value.");
+    xb::error() << "writing table autoinc value.";
 
     return (false);
   }
@@ -6126,7 +6118,7 @@ xb_export_cfg_write_header(
   mach_write_to_4(ptr, table->n_cols);
 
   if (fwrite(row, 1, sizeof(row), file) != sizeof(row)) {
-    msg("xtrabackup: Error: writing table meta-data.");
+    xb::error() << "writing table meta-data.";
 
     return (false);
   }
@@ -6137,7 +6129,7 @@ xb_export_cfg_write_header(
   mach_write_to_4(value, space_flags);
 
   if (fwrite(&value, 1, sizeof(value), file) != sizeof(value)) {
-    msg("xtrabackup: Error: writing writing space_flags.");
+    xb::error() << "writing writing space_flags.";
     return (false);
   }
 
@@ -6161,7 +6153,7 @@ static bool xb_export_cfg_write(
   file = fopen(file_path, "w+b");
 
   if (file == NULL) {
-    msg("xtrabackup: Error: cannot open %s\n", node->name);
+    xb::error() << "cannot open " << node->name;
 
     success = false;
   } else {
@@ -6176,7 +6168,7 @@ static bool xb_export_cfg_write(
     }
 
     if (fclose(file) != 0) {
-      msg("xtrabackup: Error: cannot close %s\n", node->name);
+      xb::error() << "cannot close " << node->name;
       success = false;
     }
   }
@@ -6202,8 +6194,8 @@ xb_export_write_transfer_key(const dict_table_t *table, FILE *file) {
   mach_write_to_4(key_size, Encryption::KEY_LEN);
 
   if (fwrite(&key_size, 1, sizeof(key_size), file) != sizeof(key_size)) {
-    msg("IO Write error: (%d, %s) %s", errno, strerror(errno),
-        "while writing key size.");
+    xb::error() << "IO Write error: (" << errno << "," << strerror(errno) << ")"
+                << "while writing key size.";
 
     return (DB_IO_ERROR);
   }
@@ -6212,8 +6204,8 @@ xb_export_write_transfer_key(const dict_table_t *table, FILE *file) {
   Encryption::random_value(transfer_key);
   if (fwrite(transfer_key, 1, Encryption::KEY_LEN, file) !=
       Encryption::KEY_LEN) {
-    msg("IO Write error: (%d, %s) %s", errno, strerror(errno),
-        "while writing transfer key.");
+    xb::error() << "IO Write error: (" << errno << "," << strerror(errno) << ")"
+                << "while writing transfer key.";
 
     return (DB_IO_ERROR);
   }
@@ -6227,15 +6219,15 @@ xb_export_write_transfer_key(const dict_table_t *table, FILE *file) {
       Encryption::KEY_LEN, my_aes_256_ecb, NULL, false);
 
   if (elen == MY_AES_BAD_DATA) {
-    msg("IO Write error: (%d, %s) %s", errno, strerror(errno),
-        "while encrypt tablespace key.");
+    xb::error() << "IO Write error: (" << errno << "," << strerror(errno) << ")"
+                << "while encrypt tablespace key.";
     return (DB_ERROR);
   }
 
   /* Write encrypted tablespace key */
   if (fwrite(ptr, 1, Encryption::KEY_LEN, file) != Encryption::KEY_LEN) {
-    msg("IO Write error: (%d, %s) %s", errno, strerror(errno),
-        "while writing encrypted tablespace key.");
+    xb::error() << "IO Write error: (" << errno << "," << strerror(errno) << ")"
+                << "while writing encrypted tablespace key.";
 
     return (DB_IO_ERROR);
   }
@@ -6248,15 +6240,15 @@ xb_export_write_transfer_key(const dict_table_t *table, FILE *file) {
                         Encryption::KEY_LEN, my_aes_256_ecb, NULL, false);
 
   if (elen == MY_AES_BAD_DATA) {
-    msg("IO Write error: (%d, %s) %s", errno, strerror(errno),
-        "while encrypt tablespace iv.");
+    xb::error() << "IO Write error: (" << errno << "," << strerror(errno) << ")"
+                << "while encrypt tablespace iv.";
     return (DB_ERROR);
   }
 
   /* Write encrypted tablespace iv */
   if (fwrite(ptr, 1, Encryption::KEY_LEN, file) != Encryption::KEY_LEN) {
-    msg("IO Write error: (%d, %s) %s", errno, strerror(errno),
-        "while writing encrypted tablespace iv.");
+    xb::error() << "IO Write error: (" << errno << "," << strerror(errno) << ")"
+                << "while writing encrypted tablespace iv.";
 
     return (DB_IO_ERROR);
   }
@@ -6303,8 +6295,8 @@ static __attribute__((nonnull, warn_unused_result)) dberr_t xb_export_cfp_write(
   FILE *file = fopen(name, "w+b");
 
   if (file == NULL) {
-    msg("Can't create file '%-.200s' (errno: %d - %s)", name, errno,
-        strerror(errno));
+    xb::error() << "Can't create file '" << name << "' (errno: " << errno
+               << " - " << strerror(errno) << ")";
 
     err = DB_IO_ERROR;
   } else {
@@ -6315,7 +6307,8 @@ static __attribute__((nonnull, warn_unused_result)) dberr_t xb_export_cfp_write(
 
       snprintf(buf, sizeof(buf), "%s flush() failed", name);
 
-      msg("IO Write error: (%d, %s) %s", errno, strerror(errno), buf);
+      xb::error() << "IO Write error: (" << errno << ", " << strerror(errno)
+                  << ") " << buf;
 
       err = DB_IO_ERROR;
     }
@@ -6325,7 +6318,8 @@ static __attribute__((nonnull, warn_unused_result)) dberr_t xb_export_cfp_write(
 
       snprintf(buf, sizeof(buf), "%s flose() failed", name);
 
-      msg("IO Write error: (%d, %s) %s", errno, strerror(errno), buf);
+      xb::error() << "IO Write error: (" << errno << ", " << strerror(errno)
+                  << ") " << buf;
       err = DB_IO_ERROR;
     }
   }
@@ -6362,14 +6356,13 @@ static bool store_binlog_info(const char *filename) {
     return (true);
   }
 
-  msg("xtrabackup: Last MySQL binlog file position " UINT64PF
-      ", file name %s\n",
-      binlog_offset, binlog_file);
+  xb::info() << "Last MySQL binlog file position " << binlog_offset
+             << ", file name " << binlog_file;
 
   fp = fopen(filename, "w");
 
   if (!fp) {
-    msg("xtrabackup: failed to open '%s'\n", filename);
+    xb::error() << "failed to open " << filename;
     return (false);
   }
 
@@ -6391,7 +6384,7 @@ static bool store_master_key_id(
   fp = fopen(filename, "w");
 
   if (!fp) {
-    msg("xtrabackup: failed to open '%s'\n", filename);
+    xb::info() << "failed to open " << filename;
     return (false);
   }
 
@@ -6412,10 +6405,10 @@ static void xtrabackup_prepare_func(int argc, char **argv) {
   /* cd to target-dir */
 
   if (my_setwd(xtrabackup_real_target_dir, MYF(MY_WME))) {
-    msg("xtrabackup: cannot my_setwd %s\n", xtrabackup_real_target_dir);
+    xb::error() << "cannot my_setwd " << xtrabackup_real_target_dir;
     exit(EXIT_FAILURE);
   }
-  msg("xtrabackup: cd to %s\n", xtrabackup_real_target_dir);
+  xb::info() << "cd to " << xtrabackup_real_target_dir;
 
   xtrabackup_target_dir = mysql_data_home_buff;
   xtrabackup_target_dir[0] = FN_CURLIB;  // all paths are relative from here
@@ -6429,38 +6422,37 @@ static void xtrabackup_prepare_func(int argc, char **argv) {
           XTRABACKUP_METADATA_FILENAME);
 
   if (!xtrabackup_read_metadata(metadata_path)) {
-    msg("xtrabackup: Error: failed to read metadata from '%s'\n",
-        metadata_path);
+    xb::error() << "failed to read metadata from " << metadata_path;
     exit(EXIT_FAILURE);
   }
 
   if (!strcmp(metadata_type_str, "full-backuped")) {
-    msg("xtrabackup: This target seems to be not prepared yet.\n");
+    xb::info() << "This target seems to be not prepared yet.";
     metadata_type = METADATA_FULL_BACKUP;
   } else if (!strcmp(metadata_type_str, "log-applied")) {
-    msg("xtrabackup: This target seems to be already prepared with "
-        "--apply-log-only.\n");
+    xb::info() << "This target seems to be already prepared with "
+                  "--apply-log-only.";
     metadata_type = METADATA_LOG_APPLIED;
     goto skip_check;
   } else if (!strcmp(metadata_type_str, "full-prepared")) {
-    msg("xtrabackup: This target seems to be already prepared.\n");
+    xb::info() << "xtrabackup: This target seems to be already prepared.";
     metadata_type = METADATA_FULL_PREPARED;
   } else {
-    msg("xtrabackup: This target seems not to have correct metadata...\n");
+    xb::info() << "This target seems not to have correct metadata...";
     exit(EXIT_FAILURE);
   }
 
   if (xtrabackup_incremental) {
-    msg("xtrabackup: error: applying incremental backup needs target prepared "
-        "with --apply-log-only.\n");
+    xb::error() << "applying incremental backup needs target prepared "
+                   "with --apply-log-only.";
     exit(EXIT_FAILURE);
   }
 skip_check:
   if (xtrabackup_incremental && metadata_to_lsn != incremental_lsn) {
-    msg("xtrabackup: error: This incremental backup seems not to be proper for "
-        "the target.\n"
-        "xtrabackup:  Check 'to_lsn' of the target and 'from_lsn' of the "
-        "incremental.\n");
+    xb::error() << "This incremental backup seems not to be proper for "
+                   "the target.";
+    xb::error() << "Check 'to_lsn' of the target and 'from_lsn' of the "
+                   "incremental.";
     exit(EXIT_FAILURE);
   }
 
@@ -6495,34 +6487,34 @@ skip_check:
   }
 
   if (opt_transition_key && !xb_tablespace_keys_exist()) {
-    msg("xtrabackup: Error: --transition-key specified, but "
-        "xtrabackup_keys is not found.\n");
+    xb::error() << "--transition-key specified, but "
+                   "xtrabackup_keys is not found.";
     goto error_cleanup;
   }
 
   if (opt_transition_key) {
     if (!xb_tablespace_keys_load(xtrabackup_incremental, opt_transition_key,
                                  strlen(opt_transition_key))) {
-      msg("xtrabackup: Error: failed to load tablespace "
-          "keys\n");
+      xb::error() << "failed to load tablespace "
+                     "keys";
       goto error_cleanup;
     }
   } else {
     if(!xtrabackup::components::keyring_init_offline())
     {
-      msg("xtrabackup: Error: failed to init keyring component\n");
+      xb::error() << "failed to init keyring component";
       goto error_cleanup;
     }
     if (!xtrabackup::components::keyring_component_initialized &&
         !xb_keyring_init_for_prepare(argc, argv)) {
-      msg("xtrabackup: Error: failed to init keyring plugin\n");
+      xb::error() << "failed to init keyring plugin";
       goto error_cleanup;
     }
     xtrabackup::components::inititialize_service_handles();
     if (xb_tablespace_keys_exist()) {
       use_dumped_tablespace_keys = true;
       if (!xb_tablespace_keys_load(xtrabackup_incremental, NULL, 0)) {
-        msg("xtrabackup: Error: failed to load tablespace keys\n");
+        xb::error() << "failed to load tablespace keys";
         goto error_cleanup;
       }
     }
@@ -6542,9 +6534,8 @@ skip_check:
     Tablespace_map::instance().deserialize(xtrabackup_incremental_dir);
     err = xb_data_files_init();
     if (err != DB_SUCCESS) {
-      msg("xtrabackup: error: xb_data_files_init() failed "
-          "with error code %lu\n",
-          err);
+      xb::error() << "xb_data_files_init() failed "
+                  << "with error code " << err;
       goto error_cleanup;
     }
     inc_dir_tables_hash = hash_create(1000);
@@ -6591,10 +6582,10 @@ skip_check:
     srv_n_write_io_threads = 4;
   }
 
-  msg("xtrabackup: Starting InnoDB instance for recovery.\n"
-      "xtrabackup: Using %lld bytes for buffer pool "
-      "(set by --use-memory parameter)\n",
-      xtrabackup_use_memory);
+  xb::info() << "Starting InnoDB instance for recovery.";
+  xb::info() << "xtrabackup: Using " << xtrabackup_use_memory
+             << " bytes for buffer pool "
+                "(set by --use-memory parameter)";
 
   if (innodb_init(true, true)) {
     goto error_cleanup;
@@ -6602,7 +6593,7 @@ skip_check:
 
   it = datafiles_iter_new();
   if (it == NULL) {
-    msg("xtrabackup: Error: datafiles_iter_new() failed.\n");
+    xb::info() << "datafiles_iter_new() failed.";
     exit(EXIT_FAILURE);
   }
 
@@ -6641,15 +6632,15 @@ skip_check:
   datafiles_iter_free(it);
 
   if (xtrabackup_export) {
-    msg("xtrabackup: export option is specified.\n");
+    xb::info() << "export option is specified.";
 
     /* flush insert buffer at shutdwon */
     innobase_fast_shutdown = 0;
 
     it = datafiles_iter_new();
     if (it == NULL) {
-      msg("xtrabackup: Error: datafiles_iter_new() "
-          "failed.\n");
+      xb::error() << "datafiles_iter_new() "
+                     "failed.";
       exit(EXIT_FAILURE);
     }
 
@@ -6671,8 +6662,7 @@ skip_check:
 
       mutex_enter(&(dict_sys->mutex));
       if (!table) {
-        msg("xtrabackup: error: cannot find dictionary record of table %s\n",
-            space->name);
+        xb::error() << "cannot find dictionary record of table " << space->name;
         goto next_node;
       }
 
@@ -6714,15 +6704,15 @@ skip_check:
   /* Check whether the log is applied enough or not. */
   if ((xtrabackup_incremental && log_get_lsn(*log_sys) < incremental_to_lsn) ||
       (!xtrabackup_incremental && log_get_lsn(*log_sys) < metadata_to_lsn)) {
-    msg("xtrabackup: error: "
-        "The transaction log file is corrupted.\n"
-        "xtrabackup: error: "
-        "The log was not applied to the intended LSN!\n");
-    msg("xtrabackup: Log applied to lsn " LSN_PF "\n", log_get_lsn(*log_sys));
+	  xb::error() << 
+        "The transaction log file is corrupted.";
+	  xb::error() << 
+        "The log was not applied to the intended LSN!";
+	  xb::info() << "Log applied to lsn " << log_get_lsn(*log_sys);
     if (xtrabackup_incremental) {
-      msg("xtrabackup: The intended lsn is " LSN_PF "\n", incremental_to_lsn);
+      xb::info() << "The intended lsn is " << incremental_to_lsn;
     } else {
-      msg("xtrabackup: The intended lsn is " LSN_PF "\n", metadata_to_lsn);
+      xb::info() << "The intended lsn is " << metadata_to_lsn;
     }
     exit(EXIT_FAILURE);
   }
@@ -6761,7 +6751,7 @@ skip_check:
     sprintf(filename, "%s/%s", xtrabackup_target_dir,
             XTRABACKUP_METADATA_FILENAME);
     if (!xtrabackup_write_metadata(filename)) {
-      msg("xtrabackup: Error: failed to write metadata to '%s'\n", filename);
+      xb::error() << "failed to write metadata to " << filename;
       exit(EXIT_FAILURE);
     }
 
@@ -6769,7 +6759,7 @@ skip_check:
       sprintf(filename, "%s/%s", xtrabackup_extra_lsndir,
               XTRABACKUP_METADATA_FILENAME);
       if (!xtrabackup_write_metadata(filename)) {
-        msg("xtrabackup: Error: failed to write metadata to '%s'\n", filename);
+        xb::error() << "failed to write metadata to " << filename;
         exit(EXIT_FAILURE);
       }
     }
@@ -6868,7 +6858,7 @@ static void setup_signals()
   (innobackupex) is terminated with an unhandled signal */
 
   if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
-    msg("prctl() failed with errno = %d\n", errno);
+    xb::info() << "prctl() failed with errno = " << errno;
     exit(EXIT_FAILURE);
   }
 #endif
@@ -6899,26 +6889,27 @@ bool xb_init() {
 
   /* sanity checks */
   if (opt_lock_ddl && opt_lock_ddl_per_table) {
-    msg("Error: --lock-ddl and --lock-ddl-per-table are mutually exclusive. "
-        "Please specify --lock-ddl=false to use --lock-ddl-per-table.\n");
+    xb::error()
+        << "--lock-ddl and --lock-ddl-per-table are mutually exclusive. "
+           "Please specify --lock-ddl=false to use --lock-ddl-per-table.";
     return (false);
   }
 
   if (opt_slave_info && opt_no_lock && !opt_safe_slave_backup) {
-    msg("Error: --slave-info is used with --no-lock but "
-        "without --safe-slave-backup. The binlog position "
-        "cannot be consistent with the backup data.\n");
+    xb::info() << "--slave-info is used with --no-lock but "
+                  "without --safe-slave-backup. The binlog position "
+                  "cannot be consistent with the backup data.";
     return (false);
   }
 
   if (opt_rsync && xtrabackup_stream_fmt) {
-    msg("Error: --rsync doesn't work with --stream\n");
+    xb::info() << "--rsync doesn't work with --stream";
     return (false);
   }
 
   if (opt_transition_key && opt_generate_transition_key) {
-    msg("Error: options --transition-key and "
-        "--generate-transition-key are mutually exclusive.\n");
+    xb::info() << "options --transition-key and "
+               << "--generate-transition-key are mutually exclusive.";
     return (false);
   }
 
@@ -6943,8 +6934,8 @@ bool xb_init() {
   }
 
   if (n_mixed_options > 1) {
-    msg("Error: %s and %s are mutually exclusive\n", mixed_options[0],
-        mixed_options[1]);
+    xb::error() << mixed_options[0] << " and " << mixed_options[1]
+                << " are mutually exclusive";
     return (false);
   }
 
@@ -6964,9 +6955,8 @@ bool xb_init() {
     }
 
     if (opt_lock_ddl_per_table) {
-      msg_ts(
-          "Option --lock-ddl-per-table is deprecated. Please use "
-          "--lock-ddl instead.\n");
+      xb::warn() << "Option --lock-ddl-per-table is deprecated. Please use "
+                    "--lock-ddl instead.";
     }
 
     if (opt_check_privileges) {
@@ -7065,9 +7055,9 @@ static int check_privilege(
                                          is not granted */
 {
   if (!has_privilege(granted_priv, required, target_database, target_table)) {
-    msg("xtrabackup: %s: missing required privilege %s on %s.%s\n",
-        (error == PRIVILEGE_ERROR ? "Error" : "Warning"), required,
-        target_database, target_table);
+    xb::error() << (error == PRIVILEGE_ERROR ? "Error" : "Warning")
+                << " missing required privilege " << required << " on "
+                << target_database << "." << target_table;
     return error;
   }
   return PRIVILEGE_OK;
@@ -7279,7 +7269,7 @@ static bool validate_options(const char *file, int argc, char **argv) {
   if (!opt_strict && my_argc > 0) {
     for (int i = 0; i < my_argc; ++i) {
       if (strncmp(my_argv[i], "--", 2) == 0) {
-        msg("WARNING: unknown option %s\n", my_argv[i]);
+        xb::warn() << "unknown option %s" << my_argv[i];
       }
     }
   }
@@ -7368,14 +7358,14 @@ static void handle_options(int argc, char **argv, int *argc_client,
 
     if (optend - argv[i] == 15 &&
         !strncmp(argv[i], "--defaults-file", optend - argv[i])) {
-      msg("xtrabackup: Error: --defaults-file must be specified first "
-          "on the command line\n");
+      xb::error() << "--defaults-file must be specified first "
+                     "on the command line";
       exit(EXIT_FAILURE);
     }
     if (optend - argv[i] == 21 &&
         !strncmp(argv[i], "--defaults-extra-file", optend - argv[i])) {
-      msg("xtrabackup: Error: --defaults-extra-file must be specified first "
-          "on the command line\n");
+      xb::error() << "--defaults-extra-file must be specified first "
+                     "on the command line";
       exit(EXIT_FAILURE);
     }
   }
@@ -7386,8 +7376,7 @@ static void handle_options(int argc, char **argv, int *argc_client,
     exit(ho_error);
 
   if (!param_str.str().empty()) {
-    msg("xtrabackup: recognized server arguments: %s\n",
-        param_str.str().c_str());
+    xb::info() << "recognized server arguments: " << param_str.str().c_str();
     param_str.str("");
     param_str.clear();
   }
@@ -7403,8 +7392,6 @@ static void handle_options(int argc, char **argv, int *argc_client,
     exit(ho_error);
 
   if (!param_str.str().empty()) {
-    //msg("xtrabackup: recognized client arguments: %s\n",
-    //    param_str.str().c_str());
     xb::info() << "recognized client arguments: " << param_str.str().c_str();
     param_str.clear();
   }
@@ -7426,7 +7413,7 @@ static void handle_options(int argc, char **argv, int *argc_client,
       }
 
       if (!server_option) {
-        msg("xtrabackup: Error: unknown argument: '%s'\n", opt);
+        xb::error() << "unknown argument: " << opt;
         exit(EXIT_FAILURE);
       }
     }
@@ -7495,7 +7482,7 @@ int main(int argc, char **argv) {
   if ((!xtrabackup_print_param) && (!xtrabackup_prepare) &&
       (strcmp(mysql_data_home, "./") == 0)) {
     if (!xtrabackup_print_param) usage();
-    msg("\nxtrabackup: Error: Please set parameter 'datadir'\n");
+    xb::error() << "Please set parameter 'datadir'";
     exit(EXIT_FAILURE);
   }
 
@@ -7558,9 +7545,9 @@ int main(int argc, char **argv) {
     if (*endchar != '\0') error = 1;
 
     if (error) {
-      msg("xtrabackup: value '%s' may be wrong format for "
-          "incremental option.\n",
-          xtrabackup_incremental);
+      xb::error() << "value " << xtrabackup_incremental
+                  << "  may be wrong format for "
+                     "incremental option.";
       exit(EXIT_FAILURE);
     }
   } else if (xtrabackup_backup && xtrabackup_incremental_basedir) {
@@ -7570,7 +7557,7 @@ int main(int argc, char **argv) {
             XTRABACKUP_METADATA_FILENAME);
 
     if (!xtrabackup_read_metadata(filename)) {
-      msg("xtrabackup: error: failed to read metadata from %s\n", filename);
+      xb::error() << "failed to read metadata from " << filename;
       exit(EXIT_FAILURE);
     }
 
@@ -7583,7 +7570,7 @@ int main(int argc, char **argv) {
             XTRABACKUP_METADATA_FILENAME);
 
     if (!xtrabackup_read_metadata(filename)) {
-      msg("xtrabackup: error: failed to read metadata from %s\n", filename);
+      xb::error() << "failed to read metadata from " << filename;
       exit(EXIT_FAILURE);
     }
 
@@ -7613,18 +7600,19 @@ int main(int argc, char **argv) {
   }
 
   if (xtrabackup_incremental) {
-    msg("incremental backup from " LSN_PF " is enabled.\n", incremental_lsn);
+    xb::info() << "incremental backup from " << incremental_lsn
+               << " is enabled.";
   }
 
   if (xtrabackup_export && innobase_file_per_table == FALSE) {
-    msg("xtrabackup: auto-enabling --innodb-file-per-table due to "
-        "the --export option\n");
+    xb::info() << "auto-enabling --innodb-file-per-table due to "
+                  "the --export option";
     innobase_file_per_table = TRUE;
   }
 
   if (xtrabackup_throttle && !xtrabackup_backup) {
     xtrabackup_throttle = 0;
-    msg("xtrabackup: warning: --throttle has effect only with --backup\n");
+    xb::warn() << "--throttle has effect only with --backup";
   }
 
   /* cannot execute both for now */
@@ -7679,7 +7667,7 @@ int main(int argc, char **argv) {
 
   if (xtrabackup_copy_back || xtrabackup_move_back) {
     if (!check_if_param_set("datadir")) {
-      msg("Error: datadir must be specified.\n");
+      xb::error() << "datadir must be specified.";
       exit(EXIT_FAILURE);
     }
     init_mysql_environment();
@@ -7697,7 +7685,7 @@ int main(int argc, char **argv) {
 
   xb_regex_end();
 
-  msg_ts("completed OK!\n");
+  xb::info() << "completed OK!";
 
   exit(EXIT_SUCCESS);
 }
