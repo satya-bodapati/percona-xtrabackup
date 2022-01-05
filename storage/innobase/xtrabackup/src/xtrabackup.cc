@@ -2268,8 +2268,8 @@ static dberr_t get_id_from_dd_scan(const std::string &name, uint64 *id,
 
   ut_ad(schema_id != 0);
   if (schema_id == 0) {
-    msg("xtrabackup: can't find %s entry in mysql/schemata for tablespace %s\n",
-        db_name.c_str(), name.c_str());
+    xb::error() << "can't find " << db_name.c_str()
+                << " entry in mysql/schemata for tablespace " << name.c_str();
     return (DB_NOT_FOUND);
   }
 
@@ -2277,8 +2277,9 @@ static dberr_t get_id_from_dd_scan(const std::string &name, uint64 *id,
 
   ut_ad(*id != 0);
   if (id == 0) {
-    msg("xtrabackup: can't find %s entry in mysql/tables for tablespace %s\n",
-        table_name.c_str(), name.c_str());
+    xb::error() << "xtrabackup: can't find " << table_name.c_str()
+                << " entry in mysql/tables for tablespace ",
+        name.c_str();
     return (DB_NOT_FOUND);
   }
   return (DB_SUCCESS);
@@ -2319,9 +2320,10 @@ dberr_t dict_load_tables_from_space_id(space_id_t space_id, THD *thd,
       fsp_is_file_per_table(space_id, space->flags)) {
     std::string table_name;
     err = get_id_from_dd_scan(space->name, &sdi_id, table_name, thd);
-    msg("duplicate SDI found for tablespace %s. To remove duplicate SDI, "
-        "please execute OPTIMIZE TABLE on %s\n",
-        space->name, table_name.c_str());
+    xb::info() << "duplicate SDI found for tablespace " << space->name
+               << " To remove duplicate SDI, "
+                  "please execute OPTIMIZE TABLE on "
+               << table_name.c_str();
     if (err != DB_SUCCESS) {
       goto error;
     }
@@ -2575,7 +2577,7 @@ static bool xtrabackup_read_info(char *filename) {
 
   fp = fopen(filename, "r");
   if (!fp) {
-    msg("xtrabackup: Error: cannot open %s\n", filename);
+    xb::error() << "cannot open " << filename;
     return (FALSE);
   }
   /* skip uuid, name, tool_name, tool_command, tool_version, ibbackup_version */
@@ -3105,9 +3107,10 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   }
 
   if (changed_page_tracking && changed_page_bitmap) {
-    msg("xtrabackup: WARNING: Can't use both page bitmap and page tracking "
-        "together. PXB will use page-tracking. \n To Disable bitmap on server, "
-        "use SET GLOBAL innodb_track_changed_pages=OFF\n");
+    xb::warn() << "Can't use both page bitmap and page tracking "
+               << "together. PXB will use page-tracking.";
+    xb::warn() << "To Disable bitmap on server, "
+               << "use SET GLOBAL innodb_track_changed_pages=OFF";
   }
 
   if (changed_page_tracking) {
@@ -4237,9 +4240,8 @@ void xtrabackup_backup_func(void) {
   lsn_t page_tracking_start_lsn = 0;
   if (opt_page_tracking &&
       pagetracking::start(mysql_connection, &page_tracking_start_lsn)) {
-    msg("xtrabackup: pagetracking is started on the server with LSN " LSN_PF
-        "\n",
-        page_tracking_start_lsn);
+    xb::info() << "pagetracking is started on the server with LSN "
+               << page_tracking_start_lsn;
   }
 
   if (xtrabackup_incremental) {
@@ -4321,9 +4323,10 @@ void xtrabackup_backup_func(void) {
   }
 
   if (changed_page_bitmap) {
-    msg("xtrabackup: WARNING: Incremental backup using page bitmap is "
-        "deprecated and will be removed in a future release. Please use "
-        "--page-tracking\n");
+    xb::warn()
+        << "Incremental backup using page bitmap is "
+        << "deprecated and will be removed in a future release. Please use "
+        << "--page-tracking";
     xb_page_bitmap_deinit(changed_page_bitmap);
   }
   if (changed_page_tracking) {
@@ -6396,7 +6399,7 @@ static bool xb_export_cfg_write_index_fields(
     mach_write_to_4(value, table->first_index()->n_instant_nullable);
 
     if (fwrite(&value, 1, sizeof(value), file) != sizeof(value)) {
-      msg("xtrabackup: Error: writing table meta-data.");
+      xb::error() << "Error writing table meta-data.";
 
       return (false);
     }
@@ -6408,7 +6411,7 @@ static bool xb_export_cfg_write_index_fields(
   mach_write_to_4(value, space_flags);
 
   if (fwrite(&value, 1, sizeof(value), file) != sizeof(value)) {
-    xb::error() << "writing writing space_flags.";
+    xb::error() << "Error writing space_flags.";
     return (false);
   }
 
@@ -6419,7 +6422,7 @@ static bool xb_export_cfg_write_index_fields(
     mach_write_to_1(value, compression_type);
 
     if (fwrite(&value, 1, sizeof(uint8_t), file) != sizeof(uint8_t)) {
-      msg("xtrabackup: Error: writing compression type info.");
+      xb::info() << "Error writing compression type info.";
 
       return (false);
     }
@@ -6694,8 +6697,8 @@ static void xtrabackup_prepare_func(int argc, char **argv) {
   sprintf(xtrabackup_info_path, "%s/%s", xtrabackup_target_dir,
           XTRABACKUP_INFO);
   if (xtrabackup_export && !xtrabackup_read_info(xtrabackup_info_path)) {
-    msg("xtrabackup: Error: failed to read xtrabackup_info from '%s'\n",
-        xtrabackup_info_path);
+    xb::error() << "failed to read xtrabackup_info from "
+                << xtrabackup_info_path;
     exit(EXIT_FAILURE);
   }
 
@@ -7233,9 +7236,10 @@ bool xb_init() {
 
     if (opt_page_tracking &&
         !pagetracking::is_component_installed(mysql_connection)) {
-      msg("xtrabackup: pagetracking: Error Please install mysqlbackup "
-          "component.(INSTALL COMPONENT \"file://component_mysqlbackup\") to "
-          "use page tracking\n");
+      xb::error() << "pagetracking: Please install mysqlbackup "
+                  << "component.(INSTALL COMPONENT "
+                  << "\"file://component_mysqlbackup\") to "
+                  << "use page tracking";
       return (false);
     }
 
