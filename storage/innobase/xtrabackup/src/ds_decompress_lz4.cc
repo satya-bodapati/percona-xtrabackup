@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "ds_istream.h"
 #include "my_xxhash.h"
 #include "thread_pool.h"
+#include "msg.h"
 
 #define LZ4F_MAGICNUMBER 0x184d2204U
 #define LZ4F_UNCOMPRESSED_BIT (1U << 31)

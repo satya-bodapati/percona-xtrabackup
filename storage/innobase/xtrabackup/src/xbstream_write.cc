@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "crc_glue.h"
 #include "datasink.h"
 #include "xbstream.h"
+#include "msg.h"
 
 /* Group writes smaller than this into a single chunk */
 #define XB_STREAM_MIN_CHUNK_SIZE (10 * 1024 * 1024)

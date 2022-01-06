@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "crc_glue.h"
 #include "xbstream.h"
+#include "msg.h"
 
 /* Allocate 1 MB for the payload buffer initially */
 #define INIT_BUFFER_LEN (1024 * 1024)

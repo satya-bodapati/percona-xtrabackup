@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "datasink.h"
 #include "thread_pool.h"
+#include "msg.h"
 
 /* Possible states of input data parsing. There are quite a few different
 states since we want to be able to do multithreaded processing while avoiding

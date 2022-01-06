@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 #include "common.h"
 #include "xtrabackup.h"
+#include "msg.h"
 
 namespace xtrabackup {
 namespace utils {

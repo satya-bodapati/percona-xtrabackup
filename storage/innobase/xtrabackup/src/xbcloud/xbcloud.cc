@@ -47,6 +47,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/swift.h"
 #include "xbcloud/util.h"
 #include "xbcrypt_common.h"
+#include "msg.h"
 
 using namespace xbcloud;
 

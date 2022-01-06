@@ -60,17 +60,17 @@ bool inititialize_service_handles() {
 
   reg_srv = mysql_plugin_registry_acquire();
   if (reg_srv == nullptr) {
-    msg("xtrabackup: mysql_plugin_registry_acquire failed\n");
+    xb::error() << "mysql_plugin_registry_acquire failed";
     return false;
   }
 
   /* Add module specific initialization here */
   if (innobase::encryption::init_keyring_services(reg_srv) == false) {
-    msg("xtrabackup: init_keyring_services failed\n");
+    xb::error() << "xtrabackup: init_keyring_services failed";
     cleanup();
     return false;
   }
-  msg("xtrabackup: inititialize_service_handles suceeded\n");
+  xb::info() << "inititialize_service_handles suceeded";
   service_handler_initialized = true;
   return true;
 }
@@ -194,28 +194,28 @@ bool keyring_init_offline() {
   std::string component_name = "file://component_keyring_file";
   if (!component_config.valid()) {
     if (opt_component_keyring_file_config != nullptr) {
-      msg("xtrabackup: Error: Component configuration file is not readable or "
-          "not found.\n");
+      xb::error() << "Component configuration file is not readable or "
+                     "not found.";
       return false;
     }
     /* XTRABACKUP_KEYRING_FILE_CONFIG not found. Attempt to init plugin. */
     return true;
   }
   if (config.length() == 0) {
-    msg("xtrabackup: Error: Component configuration file is empty.\n");
+    xb::error() << "Component configuration file is empty.";
     return false;
   }
 
   rapidjson::Document config_json;
   config_json.Parse(config);
   if (config_json.HasParseError()) {
-    msg("xtrabackup: Error: Component configuration file is not a valid "
-        "JSON.\n");
+    xb::error() << "Component configuration file is not a valid "
+                << "JSON.";
     return false;
   }
   if (!config_json.HasMember("path")) {
-    msg("xtrabackup: Error: Component configuration does not have path "
-        "member.\n");
+    xb::error() << "Component configuration does not have path "
+                   "member.";
     return false;
   }
 

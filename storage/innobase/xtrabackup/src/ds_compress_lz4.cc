@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "datasink.h"
 #include "my_xxhash.h"
 #include "thread_pool.h"
+#include "msg.h"
 
 #define COMPRESS_CHUNK_SIZE ((size_t)(xtrabackup_compress_chunk_size))
 

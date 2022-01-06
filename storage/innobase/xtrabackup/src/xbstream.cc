@@ -38,6 +38,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "template_utils.h"
 #include "xbcrypt_common.h"
 #include "xtrabackup_version.h"
+#include "msg.h"
 
 #define XBSTREAM_VERSION XTRABACKUP_VERSION
 #define XBSTREAM_REVISION XTRABACKUP_REVISION

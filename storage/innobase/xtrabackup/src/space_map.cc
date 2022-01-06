@@ -32,6 +32,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include "common.h"
 #include "space_map.h"
 #include "xb0xb.h"
+#include "msg.h"
 
 Tablespace_map Tablespace_map::static_tablespace_map;
 

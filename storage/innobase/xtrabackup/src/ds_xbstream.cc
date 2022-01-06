@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "datasink.h"
 #include "xbstream.h"
+#include "msg.h"
 
 typedef struct {
   xb_wstream_t *xbstream;

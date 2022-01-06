@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "thread_pool.h"
 #include "xbcrypt.h"
 #include "xbcrypt_common.h"
+#include "msg.h"
 
 #define XB_CRYPT_CHUNK_SIZE ((size_t)(ds_encrypt_encrypt_chunk_size))
 

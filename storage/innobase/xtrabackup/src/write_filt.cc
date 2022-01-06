@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "dict0dict.h"
 #include "fil_cur.h"
 #include "xtrabackup.h"
+#include "msg.h"
 
 /************************************************************************
 Write-through page write filter. */

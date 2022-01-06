@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "datasink.h"
 #include "thread_pool.h"
+#include "msg.h"
 
 #define COMPRESS_CHUNK_SIZE ((size_t)(xtrabackup_compress_chunk_size))
 #define MY_QLZ_COMPRESS_OVERHEAD 400

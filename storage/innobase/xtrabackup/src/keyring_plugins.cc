@@ -43,6 +43,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include "utils.h"
 #include "xb0xb.h"
 #include "xtrabackup.h"
+#include "msg.h"
 
 #include <map>
 

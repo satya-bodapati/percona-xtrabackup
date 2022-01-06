@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "thread_pool.h"
 #include "xbcrypt.h"
 #include "xbcrypt_common.h"
+#include "msg.h"
 
 struct decrypt_thread_ctxt_t {
   const uchar *from{nullptr};

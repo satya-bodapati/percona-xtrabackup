@@ -50,7 +50,7 @@ bool Redo_Log_Reader::find_start_checkpoint_lsn() {
   auto err = recv_find_max_checkpoint(*log_sys, &max_cp_field);
 
   if (err != DB_SUCCESS) {
-    msg("xtrabackup: Error: recv_find_max_checkpoint() failed.\n");
+    xb::error() << "recv_find_max_checkpoint() failed.";
     return (false);
   }
 
@@ -68,14 +68,14 @@ bool Redo_Log_Reader::find_start_checkpoint_lsn() {
                  LOG_FILE_HDR_SIZE, log_hdr_buf, nullptr);
 
     if (err != DB_SUCCESS) {
-      msg("xtrabackup: Error: fil_io() failed.\n");
+      xb::error() << "fil_io() failed.";
       return (false);
     }
 
     err = recv_find_max_checkpoint(*log_sys, &max_cp_field);
 
     if (err != DB_SUCCESS) {
-      msg("xtrabackup: Error: recv_find_max_checkpoint() failed.\n");
+      xb::error() << "recv_find_max_checkpoint() failed.";
       return (false);
     }
 
@@ -103,7 +103,7 @@ bool Redo_Log_Reader::validate_redo_log_file() {
   auto err = recv_find_max_checkpoint(*log_sys, &max_cp_field);
 
   if (err != DB_SUCCESS) {
-    msg("xtrabackup: Error: recv_find_max_checkpoint() failed.\n");
+    xb::error() << "recv_find_max_checkpoint() failed.";
     return (false);
   }
   return (true);
@@ -189,7 +189,7 @@ ssize_t Redo_Log_Reader::read_logfile(bool is_last, bool *finished) {
                       &scanned_lsn, log_scanned_lsn, finished);
 
     if (size < 0) {
-      msg("xtrabackup: Error: read_logfile() failed.\n");
+      xb::error() << "read_logfile() failed.";
       return (-1);
     }
 
@@ -231,34 +231,31 @@ ssize_t Redo_Log_Reader::scan_log_recs(byte *buf, bool is_last, lsn_t start_lsn,
         break;
       }
 
-      msg("xtrabackup: error: log block numbers mismatch:\n"
-          "xtrabackup: error: expected log block no. %lu,"
-          " but got no. %lu from the log file.\n",
-          static_cast<ulong>(scanned_no), static_cast<ulong>(no));
+      xb::error() << "log block numbers mismatch:";
+      xb::error() << "expected log block no. " << scanned_no <<
+          " , but got no. " << no << " from the log file.";
 
       if ((no - scanned_no) % blocks_in_group == 0) {
-        msg("xtrabackup: error:"
-            " it looks like InnoDB log has wrapped"
-            " around before xtrabackup could"
-            " process all records due to either"
-            " log copying being too slow, or "
-            " log files being too small.\n");
+        xb::error() << " it looks like InnoDB log has wrapped"
+                       " around before xtrabackup could"
+                       " process all records due to either"
+                       " log copying being too slow, or "
+                       " log files being too small.";
       }
 
       return (-1);
 
     } else if (!checksum_is_ok) {
       /* Garbage or an incompletely written log block */
-      msg("xtrabackup: warning: Log block checksum mismatch"
-          " (block no %lu at lsn " LSN_PF
-          "): \n"
-          "expected %lu, calculated checksum %lu\n",
-          static_cast<ulong>(no), scanned_lsn,
-          static_cast<ulong>(log_block_get_checksum(log_block)),
-          static_cast<ulong>(log_block_calc_checksum(log_block)));
-      msg("xtrabackup: warning: this is possible when the "
-          "log block has not been fully written by the "
-          "server, will retry later.\n");
+      xb::warn() << "Log block checksum mismatch (block no "
+                 << no << " at lsn " << scanned_lsn
+                 << "): expected "
+                 << log_block_get_checksum(log_block)
+                 << ", calculated checksum "
+                 << log_block_calc_checksum(log_block);
+      xb::warn() << "this is possible when the "
+                    "log block has not been fully written by the "
+                    "server, will retry later.";
       *finished = true;
       break;
     }
@@ -436,8 +433,7 @@ bool Redo_Log_Writer::create_logfile(const char *name) {
   log_file = ds_open(ds_redo, XB_LOG_FILENAME, &stat_info);
 
   if (log_file == NULL) {
-    msg("xtrabackup: error: failed to open the target stream for '%s'.\n",
-        XB_LOG_FILENAME);
+    xb::error() << "failed to open the target stream for " << XB_LOG_FILENAME;
     return (false);
   }
 
@@ -453,7 +449,7 @@ bool Redo_Log_Writer::write_header(byte *hdr) {
                        (LOG_HEADER_CREATOR + creator_size));
 
   if (ds_write(log_file, hdr, LOG_FILE_HDR_SIZE)) {
-    msg("xtrabackup: error: write to logfile failed\n");
+    xb::error() << "write to logfile failed";
     return (false);
   }
 
@@ -462,7 +458,7 @@ bool Redo_Log_Writer::write_header(byte *hdr) {
 
 bool Redo_Log_Writer::close_logfile() {
   if (ds_close(log_file) != 0) {
-    msg("xtrabackup: error: failed to close logfile\n");
+    xb::error() << "failed to close logfile";
     return (false);
   }
   return (true);
@@ -483,7 +479,7 @@ bool Redo_Log_Writer::write_buffer(byte *buf, size_t len) {
   }
 
   if (ds_write(log_file, write_buf, len)) {
-    msg("xtrabackup: Error: write to logfile failed\n");
+    xb::error() << "write to logfile failed";
     return (false);
   }
 
@@ -629,15 +625,15 @@ void Archived_Redo_Log_Monitor::skip_for_block(lsn_t lsn,
       if (redo_block_no == arch_block_no &&
           (redo_block_checksum == arch_block_checksum ||
            redo_block_len != arch_block_len)) {
-        msg("xtrabackup: Archived redo log has caught up\n");
+        xb::info() << "Archived redo log has caught up";
         reader.set_start_lsn(lsn - bytes_read);
         return;
       }
     }
     if (finished) {
-      msg_ts(
-          "xtrabackup: Finished reading archive, did not find a matching "
-          "block\n");
+      xb::info()
+          << "xtrabackup: Finished reading archive, did not find a matching "
+             "block";
       return;
     }
   }
@@ -751,14 +747,15 @@ void Archived_Redo_Log_Monitor::thread_func() {
 
   mysql_free_result(res);
 
-  msg("xtrabackup: Waiting for archive file '%s'\n", archive.filename.c_str());
+  xb::info() << "xtrabackup: Waiting for archive file "
+             << archive.filename.c_str();
 
   /* wait for archive file to appear */
   while (!stopped) {
     bool exists;
     os_file_type_t type;
     if (!os_file_status(archive.filename.c_str(), &exists, &type)) {
-      msg("xtrabackup: cannot stat file '%s'\n", archive.filename.c_str());
+      xb::error() << "cannot stat file " << archive.filename.c_str();
       break;
     }
     if (exists) {
@@ -772,7 +769,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
   if (!stopped) {
     file = my_open(archive.filename.c_str(), O_RDONLY, MYF(MY_WME));
     if (file < 0) {
-      msg("xtrabackup: error: cannot open '%s'\n", archive.filename.c_str());
+      xb::error() << "cannot open " << archive.filename.c_str();
       mysql_close(mysql);
       my_thread_end();
       return;
@@ -785,7 +782,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
     while (hdr_len > 0 && !stopped) {
       size_t n_read = my_read(file, buf, hdr_len, MYF(MY_WME));
       if (n_read == MY_FILE_ERROR) {
-        msg("xtrabackup: cannot read from '%s'\n", archive.filename.c_str());
+        xb::error() << "cannot read from " << archive.filename.c_str();
         mysql_close(mysql);
         my_thread_end();
         return;
@@ -805,7 +802,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
       while (hdr_len > 0 && !stopped) {
         size_t n_read = my_read(file, buf2, hdr_len, MYF(MY_WME));
         if (n_read == MY_FILE_ERROR) {
-          msg("xtrabackup: cannot read from '%s'\n", archive.filename.c_str());
+          xb::error() << "cannot read from " << archive.filename.c_str();
           mysql_close(mysql);
           my_thread_end();
           return;
@@ -820,7 +817,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
       while (hdr_len > 0 && !stopped) {
         size_t n_read = my_read(file, buf, hdr_len, MYF(MY_WME));
         if (n_read == MY_FILE_ERROR) {
-          msg("xtrabackup: cannot read from '%s'\n", archive.filename.c_str());
+          xb::error() << "cannot read from " << archive.filename.c_str();
           mysql_close(mysql);
           my_thread_end();
           return;
@@ -848,10 +845,9 @@ void Archived_Redo_Log_Monitor::thread_func() {
   }
 
   if (ready && !stopped) {
-    msg("xtrabackup: Redo Log Archive '%s' found. First log block is "
-        "%lu, checksum is %lu.\n",
-        archive.filename.c_str(), static_cast<ulong>(first_log_block_no),
-        static_cast<ulong>(first_log_block_checksum));
+    xb::info() << "xtrabackup: Redo Log Archive " << archive.filename.c_str()
+               << " found. First log block is " << first_log_block_no
+               << ", checksum is " << first_log_block_checksum;
     reader.set_fd(file);
   }
 
@@ -892,7 +888,7 @@ static dberr_t open_or_create_log_file(bool *log_file_created, ulint i,
   pfs_os_file_t file = os_file_create(0, name, OS_FILE_OPEN, OS_FILE_NORMAL,
                                       OS_LOG_FILE, true, &ret);
   if (!ret) {
-    msg("xtrabackup: error in opening %s\n", name);
+    xb::error() << "error in opening " << name;
 
     return (DB_ERROR);
   }
@@ -900,9 +896,9 @@ static dberr_t open_or_create_log_file(bool *log_file_created, ulint i,
   size = os_file_get_size(file);
 
   if (size != srv_log_file_size) {
-    msg("xtrabackup: Error: log file %s is of different size " UINT64PF
-        " bytes than specified in the .cnf file %llu bytes!\n",
-        name, size, srv_log_file_size * UNIV_PAGE_SIZE);
+    xb::error() << "log file " << name << " is of different size " << size
+                << " bytes than specified in the .cnf file "
+                << srv_log_file_size * UNIV_PAGE_SIZE << " bytes!";
 
     return (DB_ERROR);
   }
@@ -961,14 +957,13 @@ bool Redo_Log_Data_Manager::init() {
       log_opened = true;
     }
     if ((log_opened && log_created)) {
-      msg("xtrabackup: Error: all log files must be created at the same time.\n"
-          "xtrabackup: All log files must be created also in database "
-          "creation.\n"
-          "xtrabackup: If you want bigger or smaller log files, shut down the\n"
-          "xtrabackup: database and make sure there were no errors in "
-          "shutdown.\n"
-          "xtrabackup: Then delete the existing log files. Edit the .cnf file\n"
-          "xtrabackup: and start the database again.\n");
+      xb::error() << "all log files must be created at the same time.";
+      xb::error() << "All log files must be created also in database "
+                     "creation.";
+      xb::error() << "If you want bigger or smaller log files, shut down the"
+                     "database and make sure there were no errors in shutdown.";
+      xb::error() << "Then delete the existing log files. Edit the .cnf file"
+                     "and start the database again.";
 
       return (false);
     }
@@ -976,7 +971,7 @@ bool Redo_Log_Data_Manager::init() {
 
   /* log_file_created must not be TRUE, if online */
   if (log_file_created) {
-    msg("xtrabackup: Something wrong with source files...\n");
+    xb::error() << "Something wrong with source files...";
     exit(EXIT_FAILURE);
   }
 
@@ -1060,9 +1055,8 @@ void Redo_Log_Data_Manager::track_archived_log(lsn_t start_lsn, const byte *buf,
       auto checksum = log_block_get_checksum(ptr);
       if (no == archived_log_monitor.get_first_log_block_no() &&
           checksum == archived_log_monitor.get_first_log_block_checksum()) {
-        msg("xtrabackup: Switched to archived redo log starting with "
-            "LSN: " LSN_PF "\n",
-            start_lsn);
+        xb::info() << "Switched to archived redo log starting with LSN: "
+                   << start_lsn;
         archived_log_monitor.get_reader().set_start_lsn(start_lsn);
         archived_log_state = ARCHIVED_LOG_MATCHED;
       }
@@ -1210,9 +1204,9 @@ bool Redo_Log_Data_Manager::stop_at(lsn_t lsn, lsn_t checkpoint_lsn) {
   scanned_lsn = reader.get_scanned_lsn();
 
   if (last_checkpoint_lsn > scanned_lsn) {
-    msg("xtrabackup: error: last checkpoint LSN (" LSN_PF
-        ") is larger than last copied LSN (" LSN_PF ").\n",
-        last_checkpoint_lsn, scanned_lsn);
+    xb::error() << "last checkpoint LSN (" << last_checkpoint_lsn
+                << ") is larger than last copied LSN (" << scanned_lsn << ").";
+
     return (false);
   }
 
