@@ -198,16 +198,16 @@ lsn_t Redo_Log_Reader::read_log_seg_pre8030(log_t &log, byte *buf,
 
     ut_ad(len != 0);
 
-    if ((source_offset % file_size) + len > file_size) {
+    source_offset %= file->m_size_in_bytes;
+
+    if (source_offset + len > file_size) {
       /* If the above condition is true then len
       (which is ulint) is > the expression below,
       so the typecast is ok */
-      len = (ulint)(file_size - (source_offset % file_size));
+      len = (ulint)(file_size - source_offset);
     }
 
     ++log.n_log_ios;
-
-    ut_a(source_offset / UNIV_PAGE_SIZE <= PAGE_NO_MAX);
 
     const dberr_t err =
         log_data_blocks_read(file_handle, source_offset, len, buf);
