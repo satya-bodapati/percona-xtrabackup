@@ -163,18 +163,6 @@ void Log_files_dict::set_size(Log_file_id file_id, os_offset_t new_size) {
   ut_a(success);
 }
 
-#ifdef XTRABACKUP
-void Log_files_dict::set_start_end_lsn(Log_file_id file_id, lsn_t start_lsn,
-                                       lsn_t end_lsn) {
-  const auto it = m_files_by_id.find(file_id);
-  ut_a(it != m_files_by_id.end());
-  auto &meta_info = it->second;
-
-  meta_info.m_start_lsn = start_lsn;
-  meta_info.m_end_lsn = end_lsn;
-}
-#endif  // XTRABACKUP
-
 bool Log_files_dict::empty() const { return m_files_by_id.empty(); }
 
 const Log_file &Log_files_dict::front() const {

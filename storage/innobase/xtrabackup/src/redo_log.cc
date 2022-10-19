@@ -123,10 +123,6 @@ lsn_t Redo_Log_Reader::get_start_checkpoint_lsn() const {
   return (checkpoint_lsn_start);
 }
 
-os_offset_t Redo_Log_Reader::get_start_checkpoint_offset() const {
-  return (checkpoint_offset_start);
-}
-
 bool Redo_Log_Reader::is_error() const { return (m_error); }
 
 /** scan redo log files form server directory and update log.m_files.
@@ -182,10 +178,6 @@ lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
       m_error = true;
       return 0;
     }
-    if (log.m_files.ctx().m_files_ruleset == Log_files_ruleset::PRE_8_0_30) {
-      find_start_checkpoint_lsn();
-      recalibrate_log_lsn();
-    }
   }
 
   auto file = log.m_files.find(start_lsn);
@@ -204,7 +196,20 @@ lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
   }
 
   do {
-    os_offset_t source_offset = file->offset(start_lsn);
+    os_offset_t source_offset;
+    if (log.m_files.ctx().m_files_ruleset == Log_files_ruleset::CURRENT) {
+      source_offset = file->offset(start_lsn);
+    } else {
+      const size_t n_files = log_files_number_of_existing_files(log.m_files);
+      const auto logfile0 = log.m_files.file(0);
+      const os_offset_t file_size = logfile0->m_size_in_bytes;
+      source_offset = log_pre_8_0_30::compute_real_offset_for_lsn(
+          n_files, file_size, checkpoint_lsn_start, checkpoint_offset_start,
+          start_lsn);
+      source_offset %= file->m_size_in_bytes;
+      source_offset =
+          ut_uint64_align_down(source_offset, OS_FILE_LOG_BLOCK_SIZE);
+    }
 
     ut_a(end_lsn - start_lsn <= ULINT_MAX);
 
@@ -1014,58 +1019,11 @@ bool Redo_Log_Data_Manager::init() {
   return (true);
 }
 
-void Redo_Log_Reader::recalibrate_log_lsn() {
-  os_offset_t current_offset = get_start_checkpoint_offset();
-  lsn_t current_lsn = get_start_checkpoint_lsn();
-  const auto logfile0 [[maybe_unused]] = log_sys->m_files.file(0);
-  const os_offset_t file_size = logfile0->m_size_in_bytes;
-  Log_file_id file_id = current_offset / file_size;
-  size_t number_of_files = log_files_number_of_existing_files(log_sys->m_files);
-  bool checkpoint_in_last_file = (size_t)file_id == number_of_files;
-  os_offset_t current_file_offset = current_offset - (file_id * file_size);
-  bool finished = false;
-  while (!finished) {
-    auto current_file = log_sys->m_files.file(file_id);
-    os_offset_t bytes_to_the_eof = file_size - current_file_offset;
-    lsn_t end_lsn = current_lsn + bytes_to_the_eof;
-    lsn_t start_lsn = end_lsn - file_size + LOG_FILE_HDR_SIZE;
-    current_lsn = start_lsn;
-    current_file_offset = file_size;
-
-    if (current_file->m_start_lsn != start_lsn) {
-      log_sys->m_files.set_start_end_lsn(file_id, start_lsn, end_lsn);
-    }
-    finished = file_id ? 0 : true;
-    if (!finished) file_id--;
-  }
-
-  if (!checkpoint_in_last_file) {
-    /* now we are at lowest redo, recalibrate until the last one */
-    while ((size_t)file_id != number_of_files) {
-      auto current_file = log_sys->m_files.file(file_id);
-      os_offset_t bytes_to_the_eof = file_size - LOG_FILE_HDR_SIZE;
-      lsn_t start_lsn = current_lsn;
-      lsn_t end_lsn = current_lsn + bytes_to_the_eof;
-      current_lsn = end_lsn;
-
-      if (current_file->m_start_lsn != start_lsn) {
-        log_sys->m_files.set_start_end_lsn(file_id, start_lsn, end_lsn);
-      }
-      file_id++;
-    }
-  }
-}
-
 bool Redo_Log_Data_Manager::start() {
   error = true;
 
   if (!reader.find_start_checkpoint_lsn()) {
     return (false);
-  }
-
-  // re-calibrate LSNs on pre 8.0.30
-  if (log_sys->m_files.ctx().m_files_ruleset == Log_files_ruleset::PRE_8_0_30) {
-    reader.recalibrate_log_lsn();
   }
 
   if (!writer.create_logfile(XB_LOG_FILENAME)) {
@@ -1298,10 +1256,6 @@ bool Redo_Log_Data_Manager::stop_at(lsn_t lsn, lsn_t checkpoint_lsn) {
   if (!reopen_log_files(lsn)) {
     xb::error() << "Cannot find file with LSN " << lsn;
     return (false);
-  }
-  if (log_sys->m_files.ctx().m_files_ruleset == Log_files_ruleset::PRE_8_0_30) {
-    reader.find_start_checkpoint_lsn();
-    reader.recalibrate_log_lsn();
   }
   log_crash_safe_validate(*log_sys);
 

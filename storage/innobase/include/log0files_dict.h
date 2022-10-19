@@ -149,14 +149,6 @@ class Log_files_dict {
   @param[in]  new_size        new size (expressed in bytes) */
   void set_size(Log_file_id file_id, os_offset_t new_size);
 
-#ifdef XTRABACKUP
-  /** Changes m_start_lsn and m_end_lsn of the file.
-  @param[in]  file_id         id of the log file
-  @param[in]  start_lsn       start_lsn of the file
-  @param[in]  endt_lsn        end_lsn of the file */
-  void set_start_end_lsn(Log_file_id file_id, lsn_t start_lsn, lsn_t end_lsn);
-#endif
-
   /** @return iterator to the first log file (with the smallest id) */
   Const_iterator begin() const;
 
