@@ -102,6 +102,12 @@ class Redo_Log_Reader {
   static lsn_t read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
                             const lsn_t end_lsn);
 
+  static lsn_t read_log_seg_pre8030(log_t &log, byte *buf, lsn_t start_lsn,
+                                    const lsn_t end_lsn);
+
+  static lsn_t read_log_seg_8030(log_t &log, byte *buf, lsn_t start_lsn,
+                                 const lsn_t end_lsn);
+
   /** checkpoint LSN at the backup start. */
   static lsn_t checkpoint_lsn_start;
 

@@ -167,7 +167,62 @@ static bool reopen_log_files(lsn_t desired_lsn) {
   return true;
 }
 
-lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
+lsn_t Redo_Log_Reader::read_log_seg_pre8030(log_t &log, byte *buf,
+                                            lsn_t start_lsn, lsn_t end_lsn) {
+  const size_t n_files = log_files_number_of_existing_files(log.m_files);
+  const auto logfile0 = log.m_files.file(0);
+  const os_offset_t file_size = logfile0->m_size_in_bytes;
+
+  do {
+    lsn_t source_offset = log_pre_8_0_30::compute_real_offset_for_lsn(
+        n_files, file_size, checkpoint_lsn_start, checkpoint_offset_start,
+        start_lsn);
+
+    Log_file_id file_id = source_offset / file_size;
+
+    auto file = log.m_files.file(file_id);
+
+    auto file_handle = file->open(Log_file_access_mode::READ_ONLY);
+
+    if (!file_handle.is_open()) {
+      // file not found
+      m_error = true;
+      return 0;
+    }
+
+    ut_a(end_lsn - start_lsn <= ULINT_MAX);
+
+    ulint len;
+
+    len = (ulint)(end_lsn - start_lsn);
+
+    ut_ad(len != 0);
+
+    if ((source_offset % file_size) + len > file_size) {
+      /* If the above condition is true then len
+      (which is ulint) is > the expression below,
+      so the typecast is ok */
+      len = (ulint)(file_size - (source_offset % file_size));
+    }
+
+    ++log.n_log_ios;
+
+    ut_a(source_offset / UNIV_PAGE_SIZE <= PAGE_NO_MAX);
+
+    const dberr_t err =
+        log_data_blocks_read(file_handle, source_offset, len, buf);
+    ut_a(err == DB_SUCCESS);
+
+    start_lsn += len;
+    buf += len;
+
+  } while (start_lsn != end_lsn);
+  ut_a(start_lsn == end_lsn);
+
+  return end_lsn;
+}
+
+lsn_t Redo_Log_Reader::read_log_seg_8030(log_t &log, byte *buf, lsn_t start_lsn,
                                     lsn_t end_lsn) {
   ut_a(start_lsn < end_lsn);
 
@@ -196,21 +251,7 @@ lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
   }
 
   do {
-    os_offset_t source_offset;
-    if (log.m_files.ctx().m_files_ruleset == Log_files_ruleset::CURRENT) {
-      source_offset = file->offset(start_lsn);
-    } else {
-      const size_t n_files = log_files_number_of_existing_files(log.m_files);
-      const auto logfile0 = log.m_files.file(0);
-      const os_offset_t file_size = logfile0->m_size_in_bytes;
-      source_offset = log_pre_8_0_30::compute_real_offset_for_lsn(
-          n_files, file_size, checkpoint_lsn_start, checkpoint_offset_start,
-          start_lsn);
-      source_offset %= file->m_size_in_bytes;
-      source_offset =
-          ut_uint64_align_down(source_offset, OS_FILE_LOG_BLOCK_SIZE);
-    }
-
+    os_offset_t source_offset = file->offset(start_lsn);
     ut_a(end_lsn - start_lsn <= ULINT_MAX);
 
     os_offset_t len = end_lsn - start_lsn;
@@ -259,6 +300,15 @@ lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
   ut_a(start_lsn == end_lsn);
 
   return end_lsn;
+}
+
+lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
+                                    lsn_t end_lsn) {
+  if (log.m_files.ctx().m_files_ruleset == Log_files_ruleset::CURRENT) {
+        return(read_log_seg_8030(log, buf, start_lsn, end_lsn));
+  } else {
+        return(read_log_seg_pre8030(log, buf, start_lsn, end_lsn));
+  }
 }
 
 ssize_t Redo_Log_Reader::read_logfile(bool is_last, bool *finished) {
