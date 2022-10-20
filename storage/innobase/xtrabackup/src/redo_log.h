@@ -92,6 +92,15 @@ class Redo_Log_Reader {
                         lsn_t *read_upto_lsn, lsn_t checkpoint_lsn,
                         bool *finished);
 
+  ssize_t scan_log_recs_pre8030(byte *buf, bool is_last, lsn_t start_lsn,
+                        lsn_t *read_upto_lsn, lsn_t checkpoint_lsn,
+                        bool *finished);
+
+  ssize_t scan_log_recs_8030(byte *buf, bool is_last, lsn_t start_lsn,
+                        lsn_t *read_upto_lsn, lsn_t checkpoint_lsn,
+                        bool *finished);
+
+
   /** Read specified log segment into a buffer.
   @param[in,out] log            redo log
   @param[in,out] buf            buffer where to read

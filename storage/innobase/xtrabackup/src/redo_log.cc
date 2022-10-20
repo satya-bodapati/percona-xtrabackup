@@ -347,9 +347,130 @@ ssize_t Redo_Log_Reader::read_logfile(bool is_last, bool *finished) {
   return (len);
 }
 
-ssize_t Redo_Log_Reader::scan_log_recs(byte *buf, bool is_last, lsn_t start_lsn,
-                                       lsn_t *read_upto_lsn,
-                                       lsn_t checkpoint_lsn, bool *finished) {
+ssize_t Redo_Log_Reader::scan_log_recs_pre8030(byte *buf, bool is_last,
+                                               lsn_t start_lsn,
+                                               lsn_t *read_upto_lsn,
+                                               lsn_t checkpoint_lsn,
+                                               bool *finished) {
+  lsn_t scanned_lsn{start_lsn};
+  lsn_t contiguous_lsn =
+      ut_uint64_align_down(start_lsn, OS_FILE_LOG_BLOCK_SIZE);
+  const size_t n_files = log_files_number_of_existing_files(log_sys->m_files);
+  const auto logfile0 = log_sys->m_files.file(0);
+  const os_offset_t file_size = logfile0->m_size_in_bytes;
+  const lsn_t lsn_real_capacity = n_files * (file_size - LOG_FILE_HDR_SIZE);
+  const byte *log_block{buf};
+
+  *finished = false;
+
+  ulint scanned_checkpoint_no{0};
+
+  while (log_block < buf + RECV_SCAN_SIZE && !*finished) {
+    auto no = log_block_get_hdr_no(log_block);
+    auto scanned_no = log_block_convert_lsn_to_hdr_no(scanned_lsn);
+    auto checksum_is_ok = log_block_checksum_is_ok(log_block);
+
+    if (no != scanned_no && checksum_is_ok) {
+      auto blocks_in_group =
+          log_block_convert_lsn_to_hdr_no(lsn_real_capacity) - 1;
+
+      if ((no < scanned_no && ((scanned_no - no) % blocks_in_group) == 0) ||
+          no == 0 ||
+          /* Log block numbers wrap around at 0x3FFFFFFF */
+          ((scanned_no | 0x40000000UL) - no) % blocks_in_group == 0) {
+        /* old log block, do nothing */
+        *finished = true;
+        break;
+      }
+
+      xb::error() << "log block numbers mismatch:";
+      xb::error() << "expected log block no. " << scanned_no << ", but got no. "
+                  << no << " from the log file.";
+
+      if ((no - scanned_no) % blocks_in_group == 0) {
+        xb::error() << " it looks like InnoDB log has wrapped"
+                       " around before xtrabackup could"
+                       " process all records due to either"
+                       " log copying being too slow, or "
+                       " log files being too small.";
+      }
+
+      return (-1);
+
+    } else if (!checksum_is_ok) {
+      /* Garbage or an incompletely written log block */
+      xb::warn() << "Log block checksum mismatch (block no " << no << " at lsn "
+                 << scanned_lsn << "): expected "
+                 << log_block_get_checksum(log_block)
+                 << ", calculated checksum "
+                 << log_block_calc_checksum(log_block);
+      xb::warn() << "this is possible when the "
+                    "log block has not been fully written by the "
+                    "server, will retry later.";
+      *finished = true;
+      break;
+    }
+
+    if (log_block_get_flush_bit(log_block)) {
+      /* This block was a start of a log flush operation:
+      we know that the previous flush operation must have
+      been completed for all log groups before this block
+      can have been flushed to any of the groups. Therefore,
+      we know that log data is contiguous up to scanned_lsn
+      in all non-corrupt log groups. */
+
+      if (scanned_lsn > contiguous_lsn) {
+        contiguous_lsn = scanned_lsn;
+      }
+    }
+
+    auto data_len = log_block_get_data_len(log_block);
+
+    if ((scanned_checkpoint_no > 0) &&
+        (log_block_get_checkpoint_no(log_block) < scanned_checkpoint_no) &&
+        (scanned_checkpoint_no - log_block_get_checkpoint_no(log_block) >
+         0x80000000UL)) {
+      /* Garbage from a log buffer flush which was made
+      before the most recent database recovery */
+
+      *finished = true;
+      break;
+    }
+
+    scanned_lsn = scanned_lsn + data_len;
+    scanned_checkpoint_no = log_block_get_checkpoint_no(log_block);
+
+    if (data_len < OS_FILE_LOG_BLOCK_SIZE) {
+      /* Log data for this group ends here */
+
+      *finished = true;
+    } else {
+      log_block += OS_FILE_LOG_BLOCK_SIZE;
+    }
+  }
+
+  *read_upto_lsn = scanned_lsn;
+
+  ssize_t write_size;
+
+  if (!*finished) {
+    write_size = RECV_SCAN_SIZE;
+  } else {
+    write_size =
+        ut_uint64_align_up(scanned_lsn, OS_FILE_LOG_BLOCK_SIZE) - start_lsn;
+    if (!is_last && scanned_lsn % OS_FILE_LOG_BLOCK_SIZE) {
+      write_size -= OS_FILE_LOG_BLOCK_SIZE;
+    }
+  }
+
+  return (write_size);
+}
+
+ssize_t Redo_Log_Reader::scan_log_recs_8030(byte *buf, bool is_last,
+                                            lsn_t start_lsn,
+                                            lsn_t *read_upto_lsn,
+                                            lsn_t checkpoint_lsn,
+                                            bool *finished) {
   lsn_t scanned_lsn{start_lsn};
   const byte *log_block{buf};
 
@@ -432,6 +553,18 @@ ssize_t Redo_Log_Reader::scan_log_recs(byte *buf, bool is_last, lsn_t start_lsn,
   }
 
   return (write_size);
+}
+
+ssize_t Redo_Log_Reader::scan_log_recs(byte *buf, bool is_last, lsn_t start_lsn,
+                                       lsn_t *read_upto_lsn,
+                                       lsn_t checkpoint_lsn, bool *finished) {
+  if (log_sys->m_files.ctx().m_files_ruleset == Log_files_ruleset::CURRENT) {
+    return (scan_log_recs_8030(buf, is_last, start_lsn, read_upto_lsn,
+                               checkpoint_lsn, finished));
+  } else {
+    return (scan_log_recs_pre8030(buf, is_last, start_lsn, read_upto_lsn,
+                                  checkpoint_lsn, finished));
+  }
 }
 
 void Redo_Log_Reader::seek_logfile(lsn_t lsn) { log_scanned_lsn = lsn; }
