@@ -199,6 +199,7 @@ lsn_t Redo_Log_Reader::read_log_seg_pre8030(log_t &log, byte *buf,
     ut_ad(len != 0);
 
     source_offset %= file->m_size_in_bytes;
+    source_offset = ut_uint64_align_down(source_offset, OS_FILE_LOG_BLOCK_SIZE);
 
     if (source_offset + len > file_size) {
       /* If the above condition is true then len
@@ -1106,6 +1107,10 @@ bool Redo_Log_Data_Manager::start() {
    * in any situation (with or without --lock-ddl-per-table).
    */
   redo_catchup_completed = true;
+
+  if (opt_lock_ddl) {
+    ut_ad(reader.get_scanned_lsn() >= backup_redo_log_flushed_lsn);
+  }
 
   debug_sync_point("xtrabackup_pause_after_redo_catchup");
 
