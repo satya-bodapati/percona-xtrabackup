@@ -28,10 +28,23 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "include/dict0sdi-decompress.h"
 #include "sql/current_thd.h"
 #include "sql/dd/dd.h"
+#include "sql/dd/dd_schema.h"  // dd::Schema_MDL_locker
+#include "sql/dd/dd_table.h"   // is_encrypted
 #include "sql/dd/impl/sdi.h"
+#include "sql/dd/impl/tables/dd_properties.h"  // dd::tables:.DD_properties
 #include "sql/dd/impl/types/column_impl.h"
 #include "sql/dd/impl/types/table_impl.h"
+#include "sql/dd/properties.h"  // dd::Properties
+#include "sql/dd/string_type.h"
+#include "sql/dd/types/column.h"  // dd::Column
 #include "sql/dd/types/column_type_element.h"
+#include "sql/dd/types/foreign_key.h"          // dd::Foreign_key
+#include "sql/dd/types/foreign_key_element.h"  // dd::Foreign_key_element
+#include "sql/dd/types/partition.h"
+#include "sql/dd/types/partition_index.h"
+#include "sql/dd/types/schema.h"
+#include "sql/dd/types/table.h"
+#include "sql/dd/types/table.h"  // dd::Table
 #include "storage/innobase/include/btr0pcur.h"
 #include "storage/innobase/include/dict0dd.h"
 #include "xb0xb.h"
@@ -441,6 +454,161 @@ static dberr_t dict_load_tables_from_space_id_low(
     if (res) {
       return DB_ERROR;
     }
+
+    std::ostringstream ss;
+    // Here we have dd::Table, can we deserialize to schema just using
+    // dd::Table?
+    xb::error() << "------------------------------------------";
+    dd::Table &tbl = *(dd_table.get());
+    ss << "CREATE TABLE " << tbl.name().c_str() << '(' << std::endl;
+
+    // xb::error() << "Table character set is: " <<
+    // dd_get_mysql_charset(tbl.collation_id())->csname;
+    // xb::error() << "Table options are " << tbl.options().raw_string();
+
+    for (const auto col : *tbl.columns()) {
+      if (col->is_se_hidden()) continue;
+      ss << "\t" << col->name().c_str() << " " << col->column_type_utf8();
+      if (col->is_explicit_collation()) {
+        const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
+        ss << " CHARACTER SET " << cs->csname;
+        ss << " COLLATE " << cs->m_coll_name;
+      }
+
+      if (col->is_nullable()) {
+        ss << " NULL";
+      } else {
+        ss << " NOT NULL";
+      }
+
+      //		   xb::error() << "~~~~~~~~~~~~~~~~~~";
+      //			 xb::error() << "col options: " <<
+      //col->options().raw_string();
+
+      //			 xb::error() << "col engine attribute: " <<
+      //col->engine_attribute().str;
+      if (col->generation_expression() != "") {
+        //			 xb::error() << "col is_generated: " <<
+        //col->generation_expression();
+        if (col->is_virtual()) {
+          //					 xb::error() << "col is
+          //VIRTUAL";
+        } else {
+          //					 xb::error() << "col is STORED";
+        }
+      }
+      // xb::error() << "col get_srid: " << col->srs_id();
+      //			 xb::error() << "column default value: " <<
+      //col->default_value_utf8(); 			 xb::error() << "column default value null?: "
+      //<< col->is_default_value_utf8_null(); 	 xb::error() << "col
+      //is_auto_increment: " << col->is_auto_increment();
+      //			 if (col->is_auto_increment()) xb::error() <<
+      //"column is AUTO_INCREMENT"; 			 xb::error() << "column ON_UPDATE CLAUSE: "
+      //<< col->update_option(); 			xb::error() << "column hidden status: " <<
+      //static_cast<std::underlying_type<dd::Column::enum_hidden_type>::type>(col->hidden());
+      //			xb::error() << "column comment: " <<
+      //col->comment(); 			xb::error() << "column engine attribute: " <<
+      //col->engine_attribute().str; 			xb::error() << "col secondary engine
+      //attribute: " << col->secondary_engine_attribute().str;
+
+      ss << ",\n" << std::endl;
+    }
+#if 0
+		xb::error() << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$";
+		for (const auto key : *tbl.indexes()) {
+		  xb::error() << "~~~~~~~~~~~~~~~~~~";
+			xb::error() << "KEY name: " << key->name();
+			xb::error() << "KEY attributes: "  << key->type();
+			for (const auto key_elem : key->elements()) {
+				xb::error() << "Key elem: " << key_elem->column().name();
+				xb::error() <<"key elem is_asc/dsc?: " << key_elem->order();
+			}
+			//parser is in the key options.
+		}
+#endif
+
+    for (const dd::Foreign_key *fk : *tbl.foreign_keys()) {
+      ss << "CONSTRAINT ";
+      ss << fk->name() << " FOREIGN KEY (";
+
+      bool first = true;
+      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
+        if (!first)
+          ss << ", ";
+        else
+          first = false;
+        ss << fk_el->column().name();
+      }
+
+      ss << ") REFERENCES ";
+
+      ss << fk->referenced_table_schema_name() << '.'
+         << fk->referenced_table_name() << " (";
+
+      first = true;
+      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
+        if (!first)
+          ss << ", ";
+        else
+          first = false;
+        ss << fk_el->referenced_column_name();
+      }
+      ss << ")";
+
+      switch (fk->delete_rule()) {
+        case dd::Foreign_key::RULE_NO_ACTION:
+          // Don't print clause when default is used.
+          break;
+        case dd::Foreign_key::RULE_RESTRICT:
+          ss << " ON DELETE RESTRICT";
+          break;
+        case dd::Foreign_key::RULE_CASCADE:
+          ss << " ON DELETE CASCADE";
+          break;
+        case dd::Foreign_key::RULE_SET_NULL:
+          ss << " ON DELETE SET NULL";
+          break;
+        case dd::Foreign_key::RULE_SET_DEFAULT:
+          // Future-proofing, we don't support this now.
+          ss << " ON DELETE SET DEFAULT";
+          break;
+        default:
+          assert(0);
+          break;
+      }
+      switch (fk->update_rule()) {
+        case dd::Foreign_key::RULE_NO_ACTION:
+          // Don't print clause when default is used.
+          break;
+        case dd::Foreign_key::RULE_RESTRICT:
+          ss << " ON UPDATE RESTRICT";
+          break;
+        case dd::Foreign_key::RULE_CASCADE:
+          ss << " ON UPDATE CASCADE";
+          break;
+        case dd::Foreign_key::RULE_SET_NULL:
+          ss << " ON UPDATE SET NULL";
+          break;
+        case dd::Foreign_key::RULE_SET_DEFAULT:
+          // Future-proofing, we don't support this now.
+          ss << " ON UPDATE SET DEFAULT";
+          break;
+        default:
+          assert(0);
+          break;
+      }
+    }
+
+    for (auto &cc : *tbl.check_constraints()) {
+      ss << ", CONSTRAINT";
+      ss << cc->name() << " CHECK (" << cc->check_clause() << ")";
+      if (cc->constraint_state() == dd::Check_constraint::CS_NOT_ENFORCED) {
+        ss << " /*!80016 NOT ENFORCED */";
+      }
+    }
+    std::cout << "\nCREATE TABLE is: \n" << ss.str();
+
+    xb::error() << "------------------------------------------";
 
     bool is_part = dd_table_is_partitioned(*dd_table.get());
 
