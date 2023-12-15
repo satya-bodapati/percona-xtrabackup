@@ -337,6 +337,221 @@ xb_dict_tuple dict_load_tables_using_table_id(table_id_t table_id) {
   return {DB_ERROR, {}};
 }
 
+static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
+  if (space_id == dict_sys_t::s_dict_space_id) {
+    // mysql.ibd, skip
+    return;
+  }
+
+  std::ostringstream ss;
+
+  // Here we have dd::Table, can we deserialize to schema just using
+  // dd::Table?
+  xb::error() << "------------------------------------------";
+  dd::Table &tbl = *dd_table;
+  ss << "CREATE TABLE " << tbl.name().c_str() << " (" << std::endl;
+
+  // xb::error() << "Table character set is: " <<
+  // dd_get_mysql_charset(tbl.collation_id())->csname;
+  xb::error() << "Table options are " << tbl.options().raw_string();
+
+  for (const auto col : *tbl.columns()) {
+    if (col->is_se_hidden()) continue;
+
+    if (col != (*tbl.columns()).front()) ss << ",\n";
+
+    ss << "  " << col->name().c_str() << " " << col->column_type_utf8();
+    if (col->is_explicit_collation()) {
+      const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
+      ss << " CHARACTER SET " << cs->csname;
+      ss << " COLLATE " << cs->m_coll_name;
+    }
+
+    if (col->is_nullable()) {
+      ss << " NULL";
+    } else {
+      ss << " NOT NULL";
+    }
+
+    if (col->is_auto_increment()) {
+      ss << " AUTO_INCREMENT";
+    }
+
+    if (col->hidden() == dd::Column::enum_hidden_type::HT_HIDDEN_USER) {
+      ss << " /*!80023 INVISIBLE */";
+    }
+
+    //		   xb::error() << "~~~~~~~~~~~~~~~~~~";
+    //			 xb::error() << "col options: " <<
+    // col->options().raw_string();
+
+    //			 xb::error() << "col engine attribute: " <<
+    // col->engine_attribute().str;
+    if (col->generation_expression() != "") {
+      //			 xb::error() << "col is_generated: " <<
+      // col->generation_expression();
+      if (col->is_virtual()) {
+        //					 xb::error() << "col is
+        // VIRTUAL";
+      } else {
+        //					 xb::error() << "col is STORED";
+      }
+    }
+    // xb::error() << "col get_srid: " << col->srs_id();
+    //			 xb::error() << "column default value: " <<
+    // col->default_value_utf8(); 			 xb::error() << "column default
+    // value null?: "
+    //<< col->is_default_value_utf8_null(); 	 xb::error() << "col
+    // is_auto_increment: " << col->is_auto_increment();
+    //			 if (col->is_auto_increment()) xb::error() <<
+    //"column is AUTO_INCREMENT"; 			 xb::error() << "column
+    //ON_UPDATE CLAUSE: "
+    //<< col->update_option(); 			xb::error() << "column hidden status:
+    //"
+    //<<
+    // static_cast<std::underlying_type<dd::Column::enum_hidden_type>::type>(col->hidden());
+    //			xb::error() << "column comment: " <<
+    // col->comment(); 			xb::error() << "column engine attribute:
+    // "
+    // << col->engine_attribute().str; 			xb::error() << "col
+    // secondary engine attribute: " << col->secondary_engine_attribute().str;
+  }
+
+  for (const auto key : *tbl.indexes()) {
+    // xb::error() << "KEY name: " << key->name();
+    // xb::error() << "KEY attributes: "  << key->type();
+
+    bool found_primary = false;
+    ss << ",\n  ";
+    if (key->type() == dd::Index::IT_PRIMARY) {
+      found_primary = true;
+      ss << "PRIMARY KEY";
+    } else if (key->type() == dd::Index::IT_UNIQUE) {
+      ss << "UNIQUE KEY ";
+    } else if (key->type() == dd::Index::IT_FULLTEXT) {
+      ss << "FULLTEXT KEY ";
+    } else if (key->type() == dd::Index::IT_SPATIAL) {
+      ss << "SPATIAL KEY ";
+    } else if (key->type() == dd::Index::IT_MULTIPLE) {
+      ss << "KEY ";
+    }
+
+    if (!found_primary) {
+      ss << key->name();
+    }
+
+    ss << " (";
+
+    for (const auto key_elem : key->elements()) {
+      if (!key_elem->is_hidden()) {
+        // TODO: functional indexes
+        ss << key_elem->column().name();
+
+        if (key_elem != key->elements().front()) ss << ",";
+      }
+      // xb::error() << "key elem is_asc/dsc?: " << key_elem->order();
+    }
+
+    ss << ")";
+
+    ss << "\n";
+    // parser is in the key options.
+  }
+
+#if 0
+    for (const dd::Foreign_key *fk : *tbl.foreign_keys()) {
+			ss << "blah.. ";
+      ss << "CONSTRAINT ";
+      ss << fk->name() << " FOREIGN KEY (";
+
+      bool first = true;
+      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
+        if (!first)
+          ss << ", ";
+        else
+          first = false;
+        ss << fk_el->column().name();
+      }
+
+      ss << ") REFERENCES ";
+
+      ss << fk->referenced_table_schema_name() << '.'
+         << fk->referenced_table_name() << " (";
+
+      first = true;
+      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
+        if (!first)
+          ss << ", ";
+        else
+          first = false;
+        ss << fk_el->referenced_column_name();
+      }
+      ss << ")";
+
+      switch (fk->delete_rule()) {
+        case dd::Foreign_key::RULE_NO_ACTION:
+          // Don't print clause when default is used.
+          break;
+        case dd::Foreign_key::RULE_RESTRICT:
+          ss << " ON DELETE RESTRICT";
+          break;
+        case dd::Foreign_key::RULE_CASCADE:
+          ss << " ON DELETE CASCADE";
+          break;
+        case dd::Foreign_key::RULE_SET_NULL:
+          ss << " ON DELETE SET NULL";
+          break;
+        case dd::Foreign_key::RULE_SET_DEFAULT:
+          // Future-proofing, we don't support this now.
+          ss << " ON DELETE SET DEFAULT";
+          break;
+        default:
+          assert(0);
+          break;
+      }
+      switch (fk->update_rule()) {
+        case dd::Foreign_key::RULE_NO_ACTION:
+          // Don't print clause when default is used.
+          break;
+        case dd::Foreign_key::RULE_RESTRICT:
+          ss << " ON UPDATE RESTRICT";
+          break;
+        case dd::Foreign_key::RULE_CASCADE:
+          ss << " ON UPDATE CASCADE";
+          break;
+        case dd::Foreign_key::RULE_SET_NULL:
+          ss << " ON UPDATE SET NULL";
+          break;
+        case dd::Foreign_key::RULE_SET_DEFAULT:
+          // Future-proofing, we don't support this now.
+          ss << " ON UPDATE SET DEFAULT";
+          break;
+        default:
+          assert(0);
+          break;
+      }
+    }
+
+    for (auto &cc : *tbl.check_constraints()) {
+      ss << ", CONSTRAINT";
+      ss << cc->name() << " CHECK (" << cc->check_clause() << ")";
+      if (cc->constraint_state() == dd::Check_constraint::CS_NOT_ENFORCED) {
+        ss << " /*!80016 NOT ENFORCED */";
+      }
+    }
+#endif
+  ss << ") ENGINE=" << tbl.engine().c_str();
+  const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
+  ss << " DEFAULT CHARACTER=" << cs->csname;
+  ss << " COLLATE=" << cs->m_coll_name;
+
+  ss << "\n";
+  ss.flush();
+  std::cout << "\nCREATE TABLE is: \n" << ss.str().c_str();
+
+  xb::error() << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%";
+}
+
 /** Load all InnoDB tables from space_id. There could be multiple tables
 in a tablespace (general tablespace like mysql.ibd or a partition IBD (p0
 contains all tables SDI). This function uses SDI to deserialize to dd::Table and
@@ -455,160 +670,7 @@ static dberr_t dict_load_tables_from_space_id_low(
       return DB_ERROR;
     }
 
-    std::ostringstream ss;
-    // Here we have dd::Table, can we deserialize to schema just using
-    // dd::Table?
-    xb::error() << "------------------------------------------";
-    dd::Table &tbl = *(dd_table.get());
-    ss << "CREATE TABLE " << tbl.name().c_str() << '(' << std::endl;
-
-    // xb::error() << "Table character set is: " <<
-    // dd_get_mysql_charset(tbl.collation_id())->csname;
-    // xb::error() << "Table options are " << tbl.options().raw_string();
-
-    for (const auto col : *tbl.columns()) {
-      if (col->is_se_hidden()) continue;
-      ss << "\t" << col->name().c_str() << " " << col->column_type_utf8();
-      if (col->is_explicit_collation()) {
-        const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
-        ss << " CHARACTER SET " << cs->csname;
-        ss << " COLLATE " << cs->m_coll_name;
-      }
-
-      if (col->is_nullable()) {
-        ss << " NULL";
-      } else {
-        ss << " NOT NULL";
-      }
-
-      //		   xb::error() << "~~~~~~~~~~~~~~~~~~";
-      //			 xb::error() << "col options: " <<
-      //col->options().raw_string();
-
-      //			 xb::error() << "col engine attribute: " <<
-      //col->engine_attribute().str;
-      if (col->generation_expression() != "") {
-        //			 xb::error() << "col is_generated: " <<
-        //col->generation_expression();
-        if (col->is_virtual()) {
-          //					 xb::error() << "col is
-          //VIRTUAL";
-        } else {
-          //					 xb::error() << "col is STORED";
-        }
-      }
-      // xb::error() << "col get_srid: " << col->srs_id();
-      //			 xb::error() << "column default value: " <<
-      //col->default_value_utf8(); 			 xb::error() << "column default value null?: "
-      //<< col->is_default_value_utf8_null(); 	 xb::error() << "col
-      //is_auto_increment: " << col->is_auto_increment();
-      //			 if (col->is_auto_increment()) xb::error() <<
-      //"column is AUTO_INCREMENT"; 			 xb::error() << "column ON_UPDATE CLAUSE: "
-      //<< col->update_option(); 			xb::error() << "column hidden status: " <<
-      //static_cast<std::underlying_type<dd::Column::enum_hidden_type>::type>(col->hidden());
-      //			xb::error() << "column comment: " <<
-      //col->comment(); 			xb::error() << "column engine attribute: " <<
-      //col->engine_attribute().str; 			xb::error() << "col secondary engine
-      //attribute: " << col->secondary_engine_attribute().str;
-
-      ss << ",\n" << std::endl;
-    }
-#if 0
-		xb::error() << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$";
-		for (const auto key : *tbl.indexes()) {
-		  xb::error() << "~~~~~~~~~~~~~~~~~~";
-			xb::error() << "KEY name: " << key->name();
-			xb::error() << "KEY attributes: "  << key->type();
-			for (const auto key_elem : key->elements()) {
-				xb::error() << "Key elem: " << key_elem->column().name();
-				xb::error() <<"key elem is_asc/dsc?: " << key_elem->order();
-			}
-			//parser is in the key options.
-		}
-#endif
-
-    for (const dd::Foreign_key *fk : *tbl.foreign_keys()) {
-      ss << "CONSTRAINT ";
-      ss << fk->name() << " FOREIGN KEY (";
-
-      bool first = true;
-      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
-        if (!first)
-          ss << ", ";
-        else
-          first = false;
-        ss << fk_el->column().name();
-      }
-
-      ss << ") REFERENCES ";
-
-      ss << fk->referenced_table_schema_name() << '.'
-         << fk->referenced_table_name() << " (";
-
-      first = true;
-      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
-        if (!first)
-          ss << ", ";
-        else
-          first = false;
-        ss << fk_el->referenced_column_name();
-      }
-      ss << ")";
-
-      switch (fk->delete_rule()) {
-        case dd::Foreign_key::RULE_NO_ACTION:
-          // Don't print clause when default is used.
-          break;
-        case dd::Foreign_key::RULE_RESTRICT:
-          ss << " ON DELETE RESTRICT";
-          break;
-        case dd::Foreign_key::RULE_CASCADE:
-          ss << " ON DELETE CASCADE";
-          break;
-        case dd::Foreign_key::RULE_SET_NULL:
-          ss << " ON DELETE SET NULL";
-          break;
-        case dd::Foreign_key::RULE_SET_DEFAULT:
-          // Future-proofing, we don't support this now.
-          ss << " ON DELETE SET DEFAULT";
-          break;
-        default:
-          assert(0);
-          break;
-      }
-      switch (fk->update_rule()) {
-        case dd::Foreign_key::RULE_NO_ACTION:
-          // Don't print clause when default is used.
-          break;
-        case dd::Foreign_key::RULE_RESTRICT:
-          ss << " ON UPDATE RESTRICT";
-          break;
-        case dd::Foreign_key::RULE_CASCADE:
-          ss << " ON UPDATE CASCADE";
-          break;
-        case dd::Foreign_key::RULE_SET_NULL:
-          ss << " ON UPDATE SET NULL";
-          break;
-        case dd::Foreign_key::RULE_SET_DEFAULT:
-          // Future-proofing, we don't support this now.
-          ss << " ON UPDATE SET DEFAULT";
-          break;
-        default:
-          assert(0);
-          break;
-      }
-    }
-
-    for (auto &cc : *tbl.check_constraints()) {
-      ss << ", CONSTRAINT";
-      ss << cc->name() << " CHECK (" << cc->check_clause() << ")";
-      if (cc->constraint_state() == dd::Check_constraint::CS_NOT_ENFORCED) {
-        ss << " /*!80016 NOT ENFORCED */";
-      }
-    }
-    std::cout << "\nCREATE TABLE is: \n" << ss.str();
-
-    xb::error() << "------------------------------------------";
+    show_create_table(space_id, dd_table.get());
 
     bool is_part = dd_table_is_partitioned(*dd_table.get());
 
