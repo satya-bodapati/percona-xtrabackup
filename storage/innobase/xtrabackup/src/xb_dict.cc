@@ -337,6 +337,10 @@ xb_dict_tuple dict_load_tables_using_table_id(table_id_t table_id) {
   return {DB_ERROR, {}};
 }
 
+static bool has_default(dd::Column *dd_col) {
+  return !dd_col->has_no_default() && !dd_col->is_auto_increment();
+}
+
 static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
   if (space_id == dict_sys_t::s_dict_space_id) {
     // mysql.ibd, skip
@@ -363,8 +367,12 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
     ss << "  " << col->name().c_str() << " " << col->column_type_utf8();
     if (col->is_explicit_collation()) {
       const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
-      ss << " CHARACTER SET " << cs->csname;
+      ss << " CHARSET " << cs->csname;
       ss << " COLLATE " << cs->m_coll_name;
+    }
+
+    if (has_default(col)) {
+      ss << " DEFAULT";
     }
 
     if (col->is_nullable()) {
@@ -399,14 +407,15 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
     }
     // xb::error() << "col get_srid: " << col->srs_id();
     //			 xb::error() << "column default value: " <<
-    // col->default_value_utf8(); 			 xb::error() << "column default
-    // value null?: "
+    // col->default_value_utf8(); 			 xb::error() << "column
+    // default value null?: "
     //<< col->is_default_value_utf8_null(); 	 xb::error() << "col
     // is_auto_increment: " << col->is_auto_increment();
     //			 if (col->is_auto_increment()) xb::error() <<
     //"column is AUTO_INCREMENT"; 			 xb::error() << "column
-    //ON_UPDATE CLAUSE: "
-    //<< col->update_option(); 			xb::error() << "column hidden status:
+    // ON_UPDATE CLAUSE: "
+    //<< col->update_option(); 			xb::error() << "column hidden
+    // status:
     //"
     //<<
     // static_cast<std::underlying_type<dd::Column::enum_hidden_type>::type>(col->hidden());
@@ -420,6 +429,8 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
   for (const auto key : *tbl.indexes()) {
     // xb::error() << "KEY name: " << key->name();
     // xb::error() << "KEY attributes: "  << key->type();
+
+    if (key->is_hidden()) continue;
 
     bool found_primary = false;
     ss << ",\n  ";
@@ -454,10 +465,10 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
 
     ss << ")";
 
-    ss << "\n";
     // parser is in the key options.
   }
 
+  ss << "\n";
 #if 0
     for (const dd::Foreign_key *fk : *tbl.foreign_keys()) {
 			ss << "blah.. ";
@@ -542,7 +553,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
 #endif
   ss << ") ENGINE=" << tbl.engine().c_str();
   const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
-  ss << " DEFAULT CHARACTER=" << cs->csname;
+  ss << " DEFAULT CHARSET=" << cs->csname;
   ss << " COLLATE=" << cs->m_coll_name;
 
   ss << "\n";
