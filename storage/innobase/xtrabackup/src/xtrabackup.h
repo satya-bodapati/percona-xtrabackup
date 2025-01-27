@@ -172,6 +172,7 @@ extern char *opt_rocksdb_datadir;
 extern char *opt_rocksdb_wal_dir;
 extern int opt_rocksdb_checkpoint_max_age;
 extern int opt_rocksdb_checkpoint_max_count;
+extern bool opt_rocksdb_sst_meta_only;
 
 extern const char *query_type_names[];
 

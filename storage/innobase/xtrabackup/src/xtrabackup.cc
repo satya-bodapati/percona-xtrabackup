@@ -152,6 +152,7 @@ bool xtrabackup_backup = false;
 bool xtrabackup_stats = false;
 bool xtrabackup_prepare = false;
 bool xtrabackup_copy_back = false;
+bool opt_stream_from_backup = false;
 bool xtrabackup_move_back = false;
 bool xtrabackup_decrypt_decompress = false;
 bool xtrabackup_print_param = false;
@@ -236,6 +237,7 @@ bool xtrabackup_fifo_streams_set = false;
 uint xtrabackup_fifo_timeout = 60;
 char *xtrabackup_fifo_dir = NULL;
 bool opt_strict = true;
+bool opt_rocksdb_sst_meta_only = false;
 
 char *xtrabackup_stream_str = NULL;
 xb_stream_fmt_t xtrabackup_stream_fmt = XB_STREAM_FMT_NONE;
@@ -700,6 +702,7 @@ enum options_xtrabackup {
   OPT_ROCKSDB_WAL_DIR,
   OPT_ROCKSDB_CHECKPOINT_MAX_AGE,
   OPT_ROCKSDB_CHECKPOINT_MAX_COUNT,
+  OPT_ROCKSDB_SST_META_ONLY,
 
   OPT_COPY_BACK,
   OPT_MOVE_BACK,
@@ -1405,6 +1408,14 @@ struct my_option xb_client_options[] = {
      "Maximum count of ROCKSB checkpoints.", &opt_rocksdb_checkpoint_max_count,
      &opt_rocksdb_checkpoint_max_count, 0, GET_INT, REQUIRED_ARG, 0, 0, INT_MAX,
      0, 0, 0},
+
+    {"rocksdb-sst-meta-only", OPT_ROCKSDB_SST_META_ONLY,
+     "Skips copying SST files, instead creates .sst.rdbmeta for each SST file"
+     " The metafile has the location to the actual SST file. This uses rocksdb"
+     " non-temporary checkpoint and files in checkpoint directory on the"
+     " server is not removed. User should delete it",
+     (G_PTR *)&opt_rocksdb_sst_meta_only, (G_PTR *)&opt_rocksdb_sst_meta_only,
+     0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
 
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
@@ -8041,6 +8052,8 @@ int main(int argc, char **argv) {
   }
 
   if (xtrabackup_copy_back || xtrabackup_move_back) {
+    read_metadata();
+#if 0
     if (!check_if_param_set("datadir")) {
       xb::error() << "datadir must be specified.";
       exit(EXIT_FAILURE);
@@ -8053,8 +8066,11 @@ int main(int argc, char **argv) {
                      "without option --apply-log-only";
       exit(EXIT_FAILURE);
     }
+#endif
 
     init_mysql_environment();
+    xtrabackup_init_datasinks();
+
     if (!copy_back(server_argc, server_defaults)) {
       exit(EXIT_FAILURE);
     }

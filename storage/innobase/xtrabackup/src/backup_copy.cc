@@ -244,6 +244,7 @@ bool directory_exists(const char *dir, bool create) {
   return (true);
 }
 
+#if 0
 /************************************************************************
 Check that directory exists and it is empty. */
 static bool directory_exists_and_empty(const char *dir, const char *comment) {
@@ -280,6 +281,7 @@ static bool directory_exists_and_empty(const char *dir, const char *comment) {
 
   return (empty);
 }
+#endif
 
 /************************************************************************
 Check if file name ends with given set of suffixes.
@@ -1223,8 +1225,15 @@ void Myrocks_checkpoint::create(MYSQL *con, bool disable_file_deletions) {
                    system_clock::now().time_since_epoch())
                    .count();
   std::stringstream query;
-  query << "SET SESSION rocksdb_create_temporary_checkpoint = '"
-        << dirname_s.str() << "'";
+  if (opt_rocksdb_sst_meta_only) {
+    query << "SET GLOBAL rocksdb_create_checkpoint = '" << dirname_s.str()
+          << "'";
+  } else {
+    query << "SET SESSION rocksdb_create_temporary_checkpoint = '"
+          << dirname_s.str() << "'";
+  }
+
+  xb::info() << "Creating RocksDB checkpoint directory " << dirname_s.str();
 
   xb_mysql_query(con, query.str().c_str(), false);
 
@@ -1311,16 +1320,32 @@ static void par_copy_rocksdb_files(const Myrocks_datadir::const_iterator &start,
   }
 }
 
+static bool ends_with(std::string_view str, std::string_view suffix) {
+  return str.size() >= suffix.size() &&
+         str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+static bool rocksdb_is_sst(std::string_view fullString) {
+  return (ends_with(fullString, ".sst"));
+}
+
 static void backup_rocksdb_files(const Myrocks_datadir::const_iterator &start,
                                  const Myrocks_datadir::const_iterator &end,
                                  size_t thread_n, bool *result) {
   for (auto it = start; it != end; it++) {
-    if (!copy_file(ds_uncompressed_data, it->path.c_str(), it->rel_path.c_str(),
-                   thread_n, FILE_PURPOSE_OTHER, it->file_size)) {
-      *result = false;
-    }
-    if (!*result) {
-      break;
+    if (opt_rocksdb_sst_meta_only && rocksdb_is_sst(it->path)) {
+      string dest = it->rel_path + ".rdbmeta";
+      backup_file_printf(dest.c_str(), "%s%s", mysql_real_data_home,
+                         it->path.c_str());
+    } else {
+      if (!copy_file(ds_uncompressed_data, it->path.c_str(),
+                     it->rel_path.c_str(), thread_n, FILE_PURPOSE_OTHER,
+                     it->file_size)) {
+        *result = false;
+      }
+      if (!*result) {
+        break;
+      }
     }
   }
 }
@@ -2004,6 +2029,22 @@ bool should_skip_file_on_copy_back(const char *filepath) {
   return false;
 }
 
+// Function to check if a string ends with a specific suffix
+bool hasExtension(const std::string &path, const std::string &extension) {
+  return path.size() >= extension.size() &&
+         path.compare(path.size() - extension.size(), extension.size(),
+                      extension) == 0;
+}
+
+// Function to remove the specified extension if present
+std::string removeExtension(const std::string &path,
+                            const std::string &extension) {
+  if (hasExtension(path, extension)) {
+    return path.substr(0, path.size() - extension.size());
+  }
+  return path;  // Return the original path if the extension does not match
+}
+
 static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
   bool ret = true;
   datadir_entry_t entry;
@@ -2036,9 +2077,11 @@ static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
       continue;
     }
 
+#if 0
     if (should_skip_file_on_copy_back(entry.path.c_str())) {
       continue;
     }
+#endif
 
     file_purpose_t file_purpose;
     if (Fil_path::has_suffix(IBD, entry.path)) {
@@ -2069,10 +2112,39 @@ static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
       }
     }
 
-    if (!(ret = copy_or_move_file(entry.path.c_str(), dst_path.c_str(),
-                                  mysql_data_home, ctx->n_thread,
-                                  file_purpose))) {
-      goto cleanup;
+    if (ends_with(entry.path.c_str(), ".rdbmeta")) {
+      // Open the file for reading
+      std::ifstream file(entry.path);
+
+      if (!file.is_open()) {
+        std::cerr << "Failed to open the file." << std::endl;
+        goto cleanup;
+      }
+
+      // Read the entire content of the file into a string
+      std::string filePath((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+
+      // Close the file
+      file.close();
+
+      // Now `filePath` contains the file path as a string
+      xb::info() << "Read file path: " << filePath
+                 << " from file: " << entry.path;
+      std::string dest = removeExtension(dst_path, ".rdbmeta");
+      xb::info() << "copying to: " << dest;
+
+      if (!(ret = copy_or_move_file(filePath.c_str(), dest.c_str(),
+                                    mysql_data_home, ctx->n_thread,
+                                    file_purpose))) {
+        goto cleanup;
+      }
+    } else {
+      if (!(ret = copy_or_move_file(entry.path.c_str(), dst_path.c_str(),
+                                    mysql_data_home, ctx->n_thread,
+                                    file_purpose))) {
+        goto cleanup;
+      }
     }
   }
 
@@ -2088,13 +2160,11 @@ cleanup:
 }
 
 bool copy_back(int argc, char **argv) {
-  char *innobase_data_file_path_copy;
-  bool ret = true, err;
-  char *dst_dir;
-  binlog_file_location binlog;
+  bool ret = true;
 
   ut_crc32_init();
 
+#if 0
   if (!opt_force_non_empty_dirs) {
     if (!directory_exists_and_empty(mysql_data_home, "Original data")) {
       return (false);
@@ -2104,6 +2174,7 @@ bool copy_back(int argc, char **argv) {
       return (false);
     }
   }
+
   if (srv_undo_dir && *srv_undo_dir && !directory_exists(srv_undo_dir, true)) {
     return (false);
   }
@@ -2115,6 +2186,7 @@ bool copy_back(int argc, char **argv) {
       !directory_exists(srv_log_group_home_dir, true)) {
     return (false);
   }
+#endif
 
   /* cd to backup directory */
   if (my_setwd(xtrabackup_target_dir, MYF(MY_WME))) {
@@ -2134,6 +2206,7 @@ bool copy_back(int argc, char **argv) {
     return (false);
   }
 
+#if 0
   if (!Tablespace_map::instance().deserialize("./")) {
     xb::error() << "failed to load tablespaces list.";
     xb::error()
@@ -2142,6 +2215,7 @@ bool copy_back(int argc, char **argv) {
            "version. Please use the same XtraBackup version to restore.";
     return (false);
   }
+#endif
 
   if (opt_generate_new_master_key && !xb_tablespace_keys_exist()) {
     xb::error() << "option --generate_new_master_key "
@@ -2188,18 +2262,6 @@ bool copy_back(int argc, char **argv) {
 
   /* parse data file path */
 
-  if (!innobase_data_file_path) {
-    innobase_data_file_path = (char *)"ibdata1:10M:autoextend";
-  }
-  innobase_data_file_path_copy = strdup(innobase_data_file_path);
-
-  srv_sys_space.set_path(".");
-
-  if (!srv_sys_space.parse_params(innobase_data_file_path, true, false)) {
-    xb::error() << "syntax error in innodb_data_file_path";
-    return (false);
-  }
-
   /* temporally dummy value to avoid crash */
   srv_page_size_shift = 14;
   srv_page_size = (1 << srv_page_size_shift);
@@ -2208,114 +2270,10 @@ bool copy_back(int argc, char **argv) {
   sync_check_init(srv_max_n_threads);
   ut_crc32_init();
 
-  /* copy undo tablespaces */
-  if (srv_undo_tablespaces > 0) {
-    dst_dir = (srv_undo_dir && *srv_undo_dir) ? srv_undo_dir : mysql_data_home;
 
-    ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
-
-    for (ulong i = 1; i <= srv_undo_tablespaces; i++) {
-      char filename[20];
-      sprintf(filename, "undo_%03lu", i);
-      if (Fil_path::get_file_type(filename) != OS_FILE_TYPE_FILE) continue;
-      if (!(ret = copy_or_move_file(filename, filename, dst_dir, 1,
-                                    FILE_PURPOSE_UNDO_LOG))) {
-        goto cleanup;
-      }
-    }
-
-    ds_destroy(ds_data);
-    ds_data = NULL;
-  }
-
-  /* create #innodb_redo */
-
-  dst_dir = (srv_log_group_home_dir && *srv_log_group_home_dir)
-                ? srv_log_group_home_dir
-                : mysql_data_home;
-
-  ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
-
-  if (directory_exists(LOG_DIRECTORY_NAME, false)) {
-    char errbuf[MYSYS_STRERROR_SIZE];
-    dst_dir = (srv_log_group_home_dir && *srv_log_group_home_dir)
-                  ? srv_log_group_home_dir
-                  : mysql_data_home;
-    std::string dest_redo_dir =
-        std::string(dst_dir) + FN_DIRSEP + LOG_DIRECTORY_NAME;
-    if (mkdirp(dest_redo_dir.c_str(), 0777, MYF(0)) < 0) {
-      xb::error() << "Can not create directory " << dest_redo_dir << ": "
-                  << my_strerror(errbuf, sizeof(errbuf), my_errno());
-
-      goto cleanup;
-    }
-  }
-
-  ds_destroy(ds_data);
-  ds_data = NULL;
-
-  /* copy innodb system tablespace(s) */
-
-  dst_dir = (innobase_data_home_dir && *innobase_data_home_dir)
-                ? innobase_data_home_dir
-                : mysql_data_home;
-
-  ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
-
-  for (auto iter(srv_sys_space.files_begin()), end(srv_sys_space.files_end());
-       iter != end; ++iter) {
-    const char *filename = base_name(iter->name());
-
-    if (!(ret = copy_or_move_file(filename, iter->name(), dst_dir, 1,
-                                  FILE_PURPOSE_DATAFILE))) {
-      goto cleanup;
-    }
-  }
-
-  ds_destroy(ds_data);
-  ds_data = NULL;
 
   /* copy the rest of tablespaces */
-  ds_data = ds_create(mysql_data_home, DS_TYPE_LOCAL);
 
-  /* copy binary log and .index files */
-  if (binlog_file_location::find_binlog(".", binlog, err)) {
-    const auto target = binlog.target_location(mysql_data_home);
-
-    if (!target.name.empty()) {
-      if (!(ret = copy_or_move_file(binlog.name.c_str(), target.path.c_str(),
-                                    mysql_data_home, 1, FILE_PURPOSE_BINLOG))) {
-        goto cleanup;
-      }
-      ret = xb_binlog_password_reencrypt(target.path.c_str());
-      if (!ret) {
-        xb::error() << "failed to reencrypt binary log file "
-                       "header.";
-        goto cleanup;
-      }
-      /* make sure we don't copy binary log and .index files twice */
-      skip_copy_back_list.insert(binlog.name.c_str());
-    }
-    if (!target.index_name.empty()) {
-      if (!(ret = copy_or_move_file(binlog.index_name.c_str(),
-                                    target.index_path.c_str(), mysql_data_home,
-                                    1, FILE_PURPOSE_BINLOG))) {
-        goto cleanup;
-      }
-      /* make sure we don't copy binary log and .index files twice */
-      skip_copy_back_list.insert(binlog.index_name.c_str());
-      /* fixup binlog index */
-      if (Fil_path(mysql_data_home).is_ancestor(target.path)) {
-        std::ofstream f_index(target.index_path.c_str());
-        f_index << target.name.c_str() << std::endl;
-      } else {
-        std::ofstream f_index(target.index_path.c_str());
-        f_index << target.path.c_str() << std::endl;
-      }
-    }
-  }
-
-  if (err || !ret) goto cleanup;
 
   ut_a(xtrabackup_parallel >= 0);
   if (xtrabackup_parallel > 1) {
@@ -2325,102 +2283,6 @@ bool copy_back(int argc, char **argv) {
 
   ret = run_data_threads(".", copy_back_thread_func, xtrabackup_parallel,
                          "copy-back");
-  if (!ret) goto cleanup;
-
-  /* copy buffer pool dump */
-  if (innobase_buffer_pool_filename) {
-    const char *src_name;
-    char path[FN_REFLEN];
-
-    src_name = trim_dotslash(innobase_buffer_pool_filename);
-
-    snprintf(path, sizeof(path), "%s/%s", mysql_data_home, src_name);
-
-    /* could be already copied with other files from data directory */
-    if (file_exists(src_name) && !file_exists(innobase_buffer_pool_filename)) {
-      ret = copy_or_move_file(src_name, innobase_buffer_pool_filename,
-                              mysql_data_home, 0, FILE_PURPOSE_OTHER);
-      if (!ret) goto cleanup;
-    }
-  }
-
-  ds_destroy(ds_data);
-  ds_data = NULL;
-
-  /* copy rocksdb datadir */
-  if (directory_exists(ROCKSDB_SUBDIR, false)) {
-    Myrocks_datadir rocksdb(ROCKSDB_SUBDIR);
-
-    std::string rocksdb_datadir =
-        (opt_rocksdb_datadir != nullptr && *opt_rocksdb_datadir != 0)
-            ? opt_rocksdb_datadir
-            : std::string(mysql_data_home) + FN_DIRSEP ROCKSDB_SUBDIR;
-
-    std::string rocksdb_wal_dir =
-        (opt_rocksdb_wal_dir != nullptr && *opt_rocksdb_wal_dir != 0)
-            ? opt_rocksdb_wal_dir
-            : "";
-
-    if (!directory_exists(rocksdb_datadir.c_str(), true)) {
-      return (false);
-    }
-
-    ds_data = ds_create(rocksdb_datadir.c_str(), DS_TYPE_LOCAL);
-
-    using std::placeholders::_1;
-    using std::placeholders::_2;
-    using std::placeholders::_3;
-    std::function<void(const Myrocks_datadir::const_iterator &,
-                       const Myrocks_datadir::const_iterator &, size_t)>
-        copy = std::bind(&par_copy_rocksdb_files, _1, _2, _3, ds_data, &ret);
-
-    if (rocksdb_wal_dir.empty()) {
-      par_for(PFS_NOT_INSTRUMENTED, rocksdb.files("", ""), xtrabackup_parallel,
-              copy);
-    } else {
-      par_for(PFS_NOT_INSTRUMENTED, rocksdb.data_files(""), xtrabackup_parallel,
-              copy);
-      par_for(PFS_NOT_INSTRUMENTED, rocksdb.meta_files(""), xtrabackup_parallel,
-              copy);
-    }
-
-    if (!ret) goto cleanup;
-
-    ds_destroy(ds_data);
-    ds_data = nullptr;
-
-    if (!rocksdb_wal_dir.empty()) {
-      if (!Fil_path::is_absolute_path(rocksdb_wal_dir)) {
-        rocksdb_wal_dir =
-            std::string(mysql_data_home) + FN_DIRSEP + rocksdb_wal_dir;
-      }
-
-      if (!directory_exists(rocksdb_wal_dir.c_str(), true)) {
-        return (false);
-      }
-
-      ds_data = ds_create(rocksdb_wal_dir.c_str(), DS_TYPE_LOCAL);
-
-      using std::placeholders::_1;
-      using std::placeholders::_2;
-      using std::placeholders::_3;
-      std::function<void(const Myrocks_datadir::const_iterator &,
-                         const Myrocks_datadir::const_iterator &, size_t)>
-          copy = std::bind(&par_copy_rocksdb_files, _1, _2, _3, ds_data, &ret);
-
-      par_for(PFS_NOT_INSTRUMENTED, rocksdb.wal_files(""), xtrabackup_parallel,
-              copy);
-
-      if (!ret) goto cleanup;
-
-      ds_destroy(ds_data);
-      ds_data = nullptr;
-    }
-  }
-
-cleanup:
-
-  free(innobase_data_file_path_copy);
 
   if (ds_data != NULL) {
     ds_destroy(ds_data);
