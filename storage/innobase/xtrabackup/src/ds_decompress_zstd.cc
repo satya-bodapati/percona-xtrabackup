@@ -81,8 +81,9 @@ typedef struct {
 } ds_decompress_zstd_file_t;
 
 static ds_ctxt_t *decompress_init(const char *root);
-static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
-                                  MY_STAT *mystat);
+static ds_file_t *decompress_open(
+    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
+    std::unique_ptr<checksum_callback_t> cb = nullptr);
 static int decompress_write(ds_file_t *file, const void *buf, size_t len);
 static int decompress_close(ds_file_t *file);
 static void decompress_deinit(ds_ctxt_t *ctxt);
@@ -99,7 +100,8 @@ static ds_ctxt_t *decompress_init(const char *root) {
 }
 
 static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
-                                  MY_STAT *mystat) {
+                                  MY_STAT *mystat,
+                                  std::unique_ptr<checksum_callback_t> cb) {
   char new_name[FN_REFLEN];
   const char *zstd_ext_pos;
 

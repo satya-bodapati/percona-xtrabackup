@@ -96,6 +96,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   ds_stdout.cc
   ds_tmpfile.cc
   ds_xbstream.cc
+  ds_checksum_sha256.cc
   fil_cur.cc
   file_utils.cc
   quicklz/quicklz.c
@@ -179,6 +180,7 @@ MYSQL_ADD_EXECUTABLE(xbstream
   ds_decrypt.cc
   ds_decompress_lz4.cc
   ds_decompress_zstd.cc
+  ds_checksum_sha256.cc
   datasink.cc
   file_utils.cc
   quicklz/quicklz.c
@@ -228,6 +230,7 @@ MYSQL_ADD_EXECUTABLE(xbcrypt
   ds_decrypt.cc
   ds_local.cc
   ds_stdout.cc
+  ds_checksum_sha256.cc
   )
 
 SET_TARGET_PROPERTIES(xbcrypt

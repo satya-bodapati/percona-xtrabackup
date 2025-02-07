@@ -20,6 +20,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define FILE_UTILS_H
 #include <my_dir.h>
 #include <my_io.h>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
 #include <cstring>
 #include <string>
 #include "datasink.h"

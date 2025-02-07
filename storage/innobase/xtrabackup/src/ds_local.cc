@@ -41,8 +41,8 @@ typedef struct {
 } ds_local_file_t;
 
 static ds_ctxt_t *local_init(const char *root);
-static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
-                             MY_STAT *mystat);
+static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
+                             std::unique_ptr<checksum_callback_t> cb = nullptr);
 static int local_write(ds_file_t *file, const void *buf, size_t len);
 static int local_write_sparse(ds_file_t *file, const void *buf, size_t len,
                               size_t sparse_map_size,
@@ -104,8 +104,8 @@ static ds_ctxt_t *local_init(const char *root) {
   return ctxt;
 }
 
-static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
-                             MY_STAT *mystat __attribute__((unused))) {
+static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
+                             std::unique_ptr<checksum_callback_t> cb) {
   char fullpath[FN_REFLEN];
   char dirpath[FN_REFLEN];
   size_t dirpath_len;

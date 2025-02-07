@@ -3039,6 +3039,15 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
   bool is_system = !fsp_is_ibd_tablespace(node->space->id);
 
+  std::string checksum_file;  // Local variable to store the checksum
+  std::string final_path;
+
+  // Define the lambda that captures checksum_file by reference
+  auto checksum_cb = std::make_unique<checksum_callback_t>(
+      [&checksum_file](const std::string &checksum) {
+        checksum_file = checksum;
+      });
+
   if (!is_system && check_if_skip_table(node_name)) {
     xb::info() << " Skipping " << node_name;
     return (false);
@@ -3076,9 +3085,11 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
   /* do not compress encrypted tablespaces */
   if (cursor.is_encrypted) {
-    dstfile = ds_open(ds_uncompressed_data, dst_name, &cursor.statinfo);
+    dstfile = ds_open(ds_uncompressed_data, dst_name, &cursor.statinfo,
+                      std::move(checksum_cb));
   } else {
-    dstfile = ds_open(ds_data, dst_name, &cursor.statinfo);
+    dstfile =
+        ds_open(ds_data, dst_name, &cursor.statinfo, std::move(checksum_cb));
   }
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
@@ -3118,9 +3129,13 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   }
 
   xb_fil_cur_close(&cursor);
+  final_path = dstfile->path;
   if (ds_close(dstfile)) {
     rc = true;
   }
+
+  xb::info() << "SHA256 Checksum for " << final_path << ": " << checksum_file;
+
   if (write_filter && write_filter->deinit) {
     write_filter->deinit(&write_filt_ctxt);
   }
@@ -3298,6 +3313,13 @@ static void xtrabackup_init_datasinks(void) {
       ds_redo = ds_meta = ds_data;
     }
   }
+
+  /** SHA256 Checksum calculator */
+  ds_ctxt_t *ds_checksum =
+      ds_create(xtrabackup_target_dir, DS_TYPE_CHECKSUM_SHA256);
+  xtrabackup_add_datasink(ds_checksum);
+  ds_set_pipe(ds_checksum, ds_data);
+  ds_redo = ds_meta = ds_data = ds_checksum;
 
   /* Encryption */
   if (xtrabackup_encrypt) {

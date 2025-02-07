@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <my_base.h>
 #include "common.h"
 #include "ds_buffer.h"
+#include "ds_checksum_sha256.h"
 #include "ds_compress.h"
 #include "ds_compress_lz4.h"
 #include "ds_compress_zstd.h"
@@ -86,6 +87,9 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
     case DS_TYPE_BUFFER:
       ds = &datasink_buffer;
       break;
+    case DS_TYPE_CHECKSUM_SHA256:
+      ds = &datasink_checksum_sha256;
+      break;
     default:
       msg("Unknown datasink type: %d\n", type);
       xb_ad(0);
@@ -105,10 +109,20 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
 
 /************************************************************************
 Open a datasink file */
-ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
+ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                   std::unique_ptr<checksum_callback_t> cb) {
   ds_file_t *file;
 
-  file = ctxt->datasink->open(ctxt, path, stat);
+  if (ctxt->datasink == &datasink_checksum_sha256) {
+    // Move ownership to the checksum sink
+    file = ctxt->datasink->open(ctxt, path, stat, std::move(cb));
+  } else {
+    // Forward without moving (other sinks might still need to pass it down)
+    file = ctxt->datasink->open(
+        ctxt, path, stat,
+        cb ? std::make_unique<checksum_callback_t>(*cb) : nullptr);
+  }
+
   if (file != NULL) {
     file->datasink = ctxt->datasink;
   }

@@ -22,6 +22,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define XB_DATASINK_H
 
 #include <my_dir.h>
+#include <functional>
+#include <memory>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,9 +51,12 @@ typedef struct {
   size_t len;
 } ds_sparse_chunk_t;
 
+typedef std::function<void(const std::string &)> checksum_callback_t;
+
 struct datasink_struct {
   ds_ctxt_t *(*init)(const char *root);
-  ds_file_t *(*open)(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
+  ds_file_t *(*open)(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                     std::unique_ptr<checksum_callback_t> cb);
   int (*write)(ds_file_t *file, const void *buf, size_t len);
   int (*write_sparse)(ds_file_t *file, const void *buf, size_t len,
                       size_t sparse_map_size,
@@ -76,7 +81,8 @@ typedef enum {
   DS_TYPE_ENCRYPT,
   DS_TYPE_DECRYPT,
   DS_TYPE_TMPFILE,
-  DS_TYPE_BUFFER
+  DS_TYPE_BUFFER,
+  DS_TYPE_CHECKSUM_SHA256
 } ds_type_t;
 
 /************************************************************************
@@ -85,7 +91,8 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type);
 
 /************************************************************************
 Open a datasink file */
-ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
+ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                   std::unique_ptr<checksum_callback_t> cb = nullptr);
 
 /************************************************************************
 Write to a datasink file.

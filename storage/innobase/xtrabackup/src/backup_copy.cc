@@ -555,6 +555,14 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   xb_fil_cur_result_t res;
   const char *action;
   page_size_t page_size{0, 0, false};
+  std::string checksum_file;  // Local variable to store the checksum
+  std::string final_path;
+
+  // Define the lambda that captures checksum_file by reference
+  auto checksum_cb = std::make_unique<checksum_callback_t>(
+      [&checksum_file](const std::string &checksum) {
+        checksum_file = checksum;
+      });
 
   if (!datafile_open(src_file_path, &cursor, true, opt_read_buffer_size)) {
     goto error;
@@ -571,7 +579,9 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
 
   strncpy(dst_name, cursor.rel_path, sizeof(dst_name));
 
-  dstfile = ds_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo);
+  dstfile = ds_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo,
+                    std::move(checksum_cb));
+
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
     goto error;
@@ -614,10 +624,15 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   /* close */
   xb::info() << "Done: " << action << " " << src_file_path << " to "
              << dstfile->path;
+  final_path = dstfile->path;
   datafile_close(&cursor);
+
   if (ds_close(dstfile)) {
     goto error_close;
   }
+
+  xb::info() << "SHA256 Checksum for " << final_path << ": " << checksum_file;
+
   return (true);
 
 error:

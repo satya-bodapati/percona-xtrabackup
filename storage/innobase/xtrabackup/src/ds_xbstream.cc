@@ -50,8 +50,9 @@ extern uint xtrabackup_fifo_streams;
 General streaming interface */
 
 static ds_ctxt_t *xbstream_init(const char *root);
-static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat);
+static ds_file_t *xbstream_open(
+    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
+    std::unique_ptr<checksum_callback_t> cb = nullptr);
 static int xbstream_write(ds_file_t *file, const void *buf, size_t len);
 static int xbstream_write_sparse(ds_file_t *file, const void *buf, size_t len,
                                  size_t sparse_map_size,
@@ -115,7 +116,8 @@ err:
 }
 
 static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat) {
+                                MY_STAT *mystat,
+                                std::unique_ptr<checksum_callback_t> cb) {
   ds_file_t *file;
   ds_parallel_stream_ctxt_t *parallel_stream_ctxt;
   ds_stream_file_t *stream_file;
@@ -136,7 +138,7 @@ static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
 
   stream_ctxt->mutex.lock();
   if (stream_ctxt->dest_file == NULL) {
-    stream_ctxt->dest_file = ds_open(dest_ctxt, path, mystat);
+    stream_ctxt->dest_file = ds_open(dest_ctxt, path, mystat, std::move(cb));
     if (stream_ctxt->dest_file == NULL) {
       return NULL;
     }
