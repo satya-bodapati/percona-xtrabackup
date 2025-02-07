@@ -29,6 +29,7 @@ typedef struct ds_checksum_file {
 static ds_ctxt_t *ds_checksum_sha256_init(const char *root) {
   ds_checksum_ctxt_t *checksum_ctxt = new ds_checksum_ctxt_t;
   checksum_ctxt->hash_algorithm = EVP_sha256();
+  checksum_ctxt->checksum_operations = 0;
   ds_ctxt_t *ctxt = new ds_ctxt_t;
   ctxt->ptr = checksum_ctxt;
   ctxt->root = my_strdup(PSI_NOT_INSTRUMENTED, root, MYF(MY_FAE));
@@ -101,11 +102,15 @@ static int ds_checksum_sha256_close(ds_file_t *file) {
   }
 
   int ret = ds_close(chk_file->dest_file);
+  delete file;
   delete chk_file;
+
   return ret;
 }
 
 static void ds_checksum_sha256_deinit(ds_ctxt_t *ctxt) {
+  if (!ctxt || !ctxt->ptr) return;
+
   ds_checksum_ctxt_t *checksum_ctxt = (ds_checksum_ctxt_t *)ctxt->ptr;
   std::cerr << "Total checksum operations performed: "
             << checksum_ctxt->checksum_operations << std::endl;
