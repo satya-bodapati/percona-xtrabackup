@@ -110,18 +110,10 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
 /************************************************************************
 Open a datasink file */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
-                   std::unique_ptr<checksum_callback_t> cb) {
-  ds_file_t *file;
+                   FileProperties *prop) {
+  ds_file_t *file = nullptr;
 
-  if (ctxt->datasink == &datasink_checksum_sha256) {
-    // Move ownership to the checksum sink
-    file = ctxt->datasink->open(ctxt, path, stat, std::move(cb));
-  } else {
-    // Forward without moving (other sinks might still need to pass it down)
-    file = ctxt->datasink->open(
-        ctxt, path, stat,
-        cb ? std::make_unique<checksum_callback_t>(*cb) : nullptr);
-  }
+  file = ctxt->datasink->open(ctxt, path, stat, prop);
 
   if (file != NULL) {
     file->datasink = ctxt->datasink;

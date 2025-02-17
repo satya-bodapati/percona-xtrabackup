@@ -80,6 +80,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "xtrabackup_version.h"
 #ifdef HAVE_VERSION_CHECK
 #include <version_check_pl.h>
+#include "manifest_writer.h"
 #endif
 
 
@@ -555,14 +556,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   xb_fil_cur_result_t res;
   const char *action;
   page_size_t page_size{0, 0, false};
-  std::string checksum_file;  // Local variable to store the checksum
   std::string final_path;
-
-  // Define the lambda that captures checksum_file by reference
-  auto checksum_cb = std::make_unique<checksum_callback_t>(
-      [&checksum_file](const std::string &checksum) {
-        checksum_file = checksum;
-      });
+  FileProperties prop;
 
   if (!datafile_open(src_file_path, &cursor, true, opt_read_buffer_size)) {
     goto error;
@@ -579,8 +574,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
 
   strncpy(dst_name, cursor.rel_path, sizeof(dst_name));
 
-  dstfile = ds_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo,
-                    std::move(checksum_cb));
+  dstfile =
+      ds_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo, &prop);
 
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
@@ -625,13 +620,23 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   xb::info() << "Done: " << action << " " << src_file_path << " to "
              << dstfile->path;
   final_path = dstfile->path;
+  xb::info() << "relative path is" << cursor.rel_path;
   datafile_close(&cursor);
 
   if (ds_close(dstfile)) {
     goto error_close;
   }
 
-  xb::info() << "SHA256 Checksum for " << final_path << ": " << checksum_file;
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    manifest_writer->addFileEntry(final_path, prop);
+  }
+
+  xb::info() << "SHA256 Checksum for " << final_path << ": ";
+  for (const auto &[key, value] : prop) {
+    std::cout << key << ": ";
+    std::visit([](const auto &v) { std::cout << v; }, value);
+    std::cout << std::endl;
+  }
 
   return (true);
 

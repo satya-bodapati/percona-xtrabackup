@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <my_dir.h>
 #include <functional>
 #include <memory>
+#include "manifest_writer.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,8 @@ typedef struct {
   void *ptr;
   char *path;
   datasink_t *datasink;
+  // This is shared across datasinks. This is a per file struct
+  FileProperties *prop;
 } ds_file_t;
 
 typedef struct {
@@ -51,12 +54,11 @@ typedef struct {
   size_t len;
 } ds_sparse_chunk_t;
 
-typedef std::function<void(const std::string &)> checksum_callback_t;
-
 struct datasink_struct {
   ds_ctxt_t *(*init)(const char *root);
   ds_file_t *(*open)(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
-                     std::unique_ptr<checksum_callback_t> cb);
+                     FileProperties *prop);
+
   int (*write)(ds_file_t *file, const void *buf, size_t len);
   int (*write_sparse)(ds_file_t *file, const void *buf, size_t len,
                       size_t sparse_map_size,
@@ -92,7 +94,7 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type);
 /************************************************************************
 Open a datasink file */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
-                   std::unique_ptr<checksum_callback_t> cb = nullptr);
+                   FileProperties *prop = nullptr);
 
 /************************************************************************
 Write to a datasink file.

@@ -80,6 +80,7 @@ typedef struct {
   size_t iv_buf_size;
   std::vector<std::future<void>> tasks;
   std::vector<encrypt_thread_ctxt_t> contexts;
+  FileProperties *prop;
 } ds_encrypt_file_t;
 
 /* Encryption options */
@@ -88,9 +89,8 @@ ulonglong ds_encrypt_encrypt_chunk_size;
 bool ds_encrypt_modify_file_extension = true;
 
 static ds_ctxt_t *encrypt_init(const char *root);
-static ds_file_t *encrypt_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
+                               MY_STAT *mystat, FileProperties *prop);
 static int encrypt_write(ds_file_t *file, const void *buf, size_t len);
 static int encrypt_close(ds_file_t *file);
 static void encrypt_deinit(ds_ctxt_t *ctxt);
@@ -132,8 +132,7 @@ static ds_ctxt_t *encrypt_init(const char *root) {
 }
 
 static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat,
-                               std::unique_ptr<checksum_callback_t> cb) {
+                               MY_STAT *mystat, FileProperties *prop) {
   char new_name[FN_REFLEN];
   const char *used_name;
 
@@ -162,7 +161,7 @@ static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
     used_name = path;
   }
 
-  crypt_file->dest_file = ds_open(dest_ctxt, used_name, mystat, std::move(cb));
+  crypt_file->dest_file = ds_open(dest_ctxt, used_name, mystat, prop);
   if (crypt_file->dest_file == NULL) {
     msg("encrypt: ds_open(\"%s\") failed.\n", used_name);
     goto err;
@@ -175,6 +174,7 @@ static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
   crypt_file->crypt_ctxt = crypt_ctxt;
   crypt_file->xbcrypt_file =
       xb_crypt_write_open(crypt_file, my_xb_crypt_write_callback);
+  crypt_file->prop = prop;
 
   if (crypt_file->xbcrypt_file == NULL) {
     msg("encrypt: xb_crypt_write_open() failed.\n");

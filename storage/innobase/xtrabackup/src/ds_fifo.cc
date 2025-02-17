@@ -73,13 +73,14 @@ typedef struct {
   File fd;
   char *path;
   ds_fifo_ctxt_t *fifo_context;
+  FileProperties *prop;
 } ds_fifo_file_t;
 
 extern uint xtrabackup_fifo_streams;
 extern uint xtrabackup_fifo_timeout;
 static ds_ctxt_t *fifo_init(const char *root);
 static ds_file_t *fifo_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-                            std::unique_ptr<checksum_callback_t> cb = nullptr);
+                            FileProperties *prop);
 static int fifo_write(ds_file_t *file, const void *buf, size_t len);
 static int fifo_close(ds_file_t *file);
 static void fifo_deinit(ds_ctxt_t *ctxt);
@@ -156,8 +157,7 @@ static ds_ctxt_t *fifo_init(const char *root) {
 
 static ds_file_t *fifo_open(ds_ctxt_t *ctxt,
                             const char *path __attribute__((unused)),
-                            MY_STAT *mystat,
-                            std::unique_ptr<checksum_callback_t> cb) {
+                            MY_STAT *mystat, FileProperties *prop) {
   ds_fifo_ctxt_t *fifo_context = (ds_fifo_ctxt_t *)ctxt->ptr;
   std::string fifo_path;
   File fd;
@@ -174,6 +174,7 @@ static ds_file_t *fifo_open(ds_ctxt_t *ctxt,
   fifo_file->fifo_context = fifo_context;
   fifo_file->path = (char *)fifo_path.c_str();
   file->path = (char *)fifo_file + sizeof(ds_fifo_file_t);
+  fifo_file->prop = prop;
   memcpy(file->path, fifo_path.c_str(), path_len);
 
   file->ptr = fifo_file;

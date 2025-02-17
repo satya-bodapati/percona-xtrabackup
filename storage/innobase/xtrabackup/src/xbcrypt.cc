@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
   datasink = crypto_ds;
 
   memset(&mystat, 0, sizeof(mystat));
-  fileout = ds_open(datasink, output_file, &mystat);
+  fileout = ds_open(datasink, output_file, &mystat, nullptr);
   if (!fileout) {
     msg("%s failed to create output file: %s\n", my_progname, output_file);
     goto cleanup;

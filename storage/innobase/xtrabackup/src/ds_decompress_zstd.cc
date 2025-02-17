@@ -78,12 +78,12 @@ typedef struct {
   size_t decomp_buf_size;
   ZSTD_stream stream;
   ZSTD_DCtx *dctx;
+  FileProperties *prop;
 } ds_decompress_zstd_file_t;
 
 static ds_ctxt_t *decompress_init(const char *root);
-static ds_file_t *decompress_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
+                                  MY_STAT *mystat, FileProperties *prop);
 static int decompress_write(ds_file_t *file, const void *buf, size_t len);
 static int decompress_close(ds_file_t *file);
 static void decompress_deinit(ds_ctxt_t *ctxt);
@@ -100,8 +100,7 @@ static ds_ctxt_t *decompress_init(const char *root) {
 }
 
 static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
-                                  MY_STAT *mystat,
-                                  std::unique_ptr<checksum_callback_t> cb) {
+                                  MY_STAT *mystat, FileProperties *prop) {
   char new_name[FN_REFLEN];
   const char *zstd_ext_pos;
 
@@ -121,7 +120,7 @@ static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
     return NULL;
   }
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat);
+  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat, prop);
   if (dest_file == NULL) {
     return NULL;
   }
@@ -133,6 +132,7 @@ static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
   decomp_file->decomp_buf_size = 8 * 1024 * 1024;
   decomp_file->decomp_buf = (char *)my_malloc(
       PSI_NOT_INSTRUMENTED, decomp_file->decomp_buf_size, MYF(MY_FAE));
+  decomp_file->prop = prop;
 
   file->ptr = decomp_file;
   file->path = dest_file->path;

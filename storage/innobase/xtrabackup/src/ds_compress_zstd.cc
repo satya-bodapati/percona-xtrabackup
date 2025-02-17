@@ -38,6 +38,7 @@ typedef struct {
   size_t raw_bytes;
   size_t comp_bytes;
   ZSTD_CCtx *cctx;
+  FileProperties *prop;
 } ds_compress_file_t;
 
 /* Compression options */
@@ -46,9 +47,8 @@ extern uint xtrabackup_compress_threads;
 extern uint xtrabackup_compress_zstd_level;
 
 static ds_ctxt_t *compress_init(const char *root);
-static ds_file_t *compress_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
+                                MY_STAT *mystat, FileProperties *prop);
 static int compress_write(ds_file_t *file, const void *buf, size_t len);
 static int compress_close(ds_file_t *file);
 static void compress_deinit(ds_ctxt_t *ctxt);
@@ -70,8 +70,7 @@ static ds_ctxt_t *compress_init(const char *root) {
 }
 
 static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat,
-                                std::unique_ptr<checksum_callback_t> cb) {
+                                MY_STAT *mystat, FileProperties *prop) {
   char new_name[FN_REFLEN];
 
   xb_ad(ctxt->pipe_ctxt != nullptr);
@@ -82,7 +81,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   /* Append the .zst extension to the filename */
   fn_format(new_name, path, "", ".zst", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat, std::move(cb));
+  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat, prop);
   if (dest_file == nullptr) {
     return nullptr;
   }
@@ -101,6 +100,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
 
   comp_file->cctx = cctx;
+  comp_file->prop = prop;
 
   ds_file_t *file = new ds_file_t;
   file->ptr = comp_file;

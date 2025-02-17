@@ -55,6 +55,7 @@ typedef struct {
   size_t comp_buf_size;
   std::vector<std::future<void>> tasks;
   std::vector<comp_thread_ctxt_t> contexts;
+  FileProperties *prop;
 } ds_compress_file_t;
 
 /* Compression options */
@@ -63,9 +64,8 @@ extern uint xtrabackup_compress_threads;
 extern ulonglong xtrabackup_compress_chunk_size;
 
 static ds_ctxt_t *compress_init(const char *root);
-static ds_file_t *compress_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
+                                MY_STAT *mystat, FileProperties *prop);
 static int compress_write(ds_file_t *file, const void *buf, size_t len);
 static int compress_close(ds_file_t *file);
 static void compress_deinit(ds_ctxt_t *ctxt);
@@ -89,8 +89,7 @@ static ds_ctxt_t *compress_init(const char *root) {
 }
 
 static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat,
-                                std::unique_ptr<checksum_callback_t> cb) {
+                                MY_STAT *mystat, FileProperties *prop) {
   xb_ad(ctxt->pipe_ctxt != nullptr);
   ds_ctxt_t *dest_ctxt = ctxt->pipe_ctxt;
 
@@ -100,7 +99,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   char new_name[FN_REFLEN];
   fn_format(new_name, path, "", ".qp", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat, std::move(cb));
+  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat, prop);
   if (dest_file == nullptr) {
     return nullptr;
   }
@@ -111,6 +110,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   comp_file->bytes_processed = 0;
   comp_file->comp_buf = nullptr;
   comp_file->comp_buf_size = 0;
+  comp_file->prop = prop;
 
   /* Write the qpress archive header */
   if (ds_write(dest_file, "qpress10", 8) ||

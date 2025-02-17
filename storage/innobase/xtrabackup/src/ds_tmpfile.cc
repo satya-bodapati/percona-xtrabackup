@@ -43,12 +43,12 @@ typedef struct {
   char *orig_path;
   MY_STAT mystat;
   ds_file_t *file;
+  FileProperties *prop;
 } ds_tmp_file_t;
 
 static ds_ctxt_t *tmpfile_init(const char *root);
-static ds_file_t *tmpfile_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *tmpfile_open(ds_ctxt_t *ctxt, const char *path,
+                               MY_STAT *mystat, FileProperties *prop);
 static int tmpfile_write(ds_file_t *file, const void *buf, size_t len);
 static int tmpfile_close(ds_file_t *file);
 static void tmpfile_deinit(ds_ctxt_t *ctxt);
@@ -74,8 +74,7 @@ static ds_ctxt_t *tmpfile_init(const char *root) {
 }
 
 static ds_file_t *tmpfile_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat,
-                               std::unique_ptr<checksum_callback_t> cb) {
+                               MY_STAT *mystat, FileProperties *prop) {
   ds_tmpfile_ctxt_t *tmpfile_ctxt;
   char tmp_path[FN_REFLEN];
   ds_tmp_file_t *tmp_file;
@@ -119,6 +118,7 @@ static ds_file_t *tmpfile_open(ds_ctxt_t *ctxt, const char *path,
   tmp_file->orig_path = (char *)tmp_file + sizeof(ds_tmp_file_t);
 
   tmp_file->fd = fd;
+  tmp_file->prop = prop;
   memcpy(tmp_file->orig_path, path, path_len);
 
   /* Store the real temporary file name in file->path */
@@ -190,7 +190,8 @@ static void tmpfile_deinit(ds_ctxt_t *ctxt) {
     tmp_file->mystat.st_size = mystat.st_size;
     tmp_file->mystat.st_mtime = mystat.st_mtime;
 
-    dst_file = ds_open(pipe_ctxt, tmp_file->orig_path, &tmp_file->mystat);
+    dst_file =
+        ds_open(pipe_ctxt, tmp_file->orig_path, &tmp_file->mystat, nullptr);
     if (dst_file == NULL) {
       msg("error: could not stream a temporary file to "
           "'%s'\n",

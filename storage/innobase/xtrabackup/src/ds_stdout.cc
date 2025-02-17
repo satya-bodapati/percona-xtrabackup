@@ -26,12 +26,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 typedef struct {
   File fd;
+  FileProperties *prop;
 } ds_stdout_file_t;
 
 static ds_ctxt_t *stdout_init(const char *root);
-static ds_file_t *stdout_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *stdout_open(ds_ctxt_t *ctxt, const char *path,
+                              MY_STAT *mystat, FileProperties *prop);
 static int stdout_write(ds_file_t *file, const void *buf, size_t len);
 static int stdout_close(ds_file_t *file);
 static void stdout_deinit(ds_ctxt_t *ctxt);
@@ -52,8 +52,7 @@ static ds_ctxt_t *stdout_init(const char *root) {
 
 static ds_file_t *stdout_open(ds_ctxt_t *ctxt __attribute__((unused)),
                               const char *path __attribute__((unused)),
-                              MY_STAT *mystat,
-                              std::unique_ptr<checksum_callback_t> cb) {
+                              MY_STAT *mystat, FileProperties *prop) {
   ds_stdout_file_t *stdout_file;
   ds_file_t *file;
   size_t pathlen;
@@ -71,6 +70,7 @@ static ds_file_t *stdout_open(ds_ctxt_t *ctxt __attribute__((unused)),
 #endif
 
   stdout_file->fd = fileno(stdout);
+  stdout_file->prop = prop;
 
   file->path = (char *)stdout_file + sizeof(ds_stdout_file_t);
   memcpy(file->path, fullpath, pathlen);

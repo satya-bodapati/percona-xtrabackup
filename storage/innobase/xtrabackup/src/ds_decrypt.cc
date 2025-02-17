@@ -109,15 +109,15 @@ typedef struct {
   Xbcrypt_stream stream;
   std::vector<std::future<void>> tasks;
   std::vector<decrypt_thread_ctxt_t> contexts;
+  FileProperties *prop;
 } ds_decrypt_file_t;
 
 uint ds_decrypt_encrypt_threads = 1;
 bool ds_decrypt_modify_file_extension = true;
 
 static ds_ctxt_t *decrypt_init(const char *root);
-static ds_file_t *decrypt_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
+                               MY_STAT *mystat, FileProperties *prop);
 static int decrypt_write(ds_file_t *file, const void *buf, size_t len);
 static int decrypt_close(ds_file_t *file);
 static void decrypt_deinit(ds_ctxt_t *ctxt);
@@ -141,8 +141,7 @@ static ds_ctxt_t *decrypt_init(const char *root) {
 }
 
 static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat,
-                               std::unique_ptr<checksum_callback_t> cb) {
+                               MY_STAT *mystat, FileProperties *prop) {
   char new_name[FN_REFLEN];
   const char *used_name = path;
   const char *xbcrypt_ext_pos;
@@ -170,7 +169,7 @@ static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
     }
   }
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, used_name, mystat, std::move(cb));
+  ds_file_t *dest_file = ds_open(dest_ctxt, used_name, mystat, prop);
   if (dest_file == NULL) {
     msg("decrypt: ds_open(\"%s\") failed.\n", used_name);
     return nullptr;
@@ -182,6 +181,7 @@ static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
   const size_t max_tasks = ds_decrypt_encrypt_threads * 8;
   crypt_file->tasks.resize(max_tasks);
   crypt_file->contexts.reserve(max_tasks);
+  crypt_file->prop = prop;
   for (size_t i = 0; i < max_tasks; i++) {
     crypt_file->contexts.emplace_back();
   }

@@ -170,6 +170,8 @@ class Redo_Log_Writer {
   /** Log file. */
   ds_file_t *log_file;
 
+  FileProperties prop;
+
   /** Temporary buffer used for encryption. */
   ut::aligned_array_pointer<byte, UNIV_PAGE_SIZE_MAX> scratch_buf;
 };

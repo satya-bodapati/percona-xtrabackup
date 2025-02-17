@@ -43,6 +43,7 @@ typedef struct {
 typedef struct {
   xb_wstream_file_t *xbstream_file;
   ds_stream_ctxt_t *stream_ctxt;
+  FileProperties *prop;
 } ds_stream_file_t;
 
 extern uint xtrabackup_fifo_streams;
@@ -50,9 +51,8 @@ extern uint xtrabackup_fifo_streams;
 General streaming interface */
 
 static ds_ctxt_t *xbstream_init(const char *root);
-static ds_file_t *xbstream_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
+                                MY_STAT *mystat, FileProperties *prop);
 static int xbstream_write(ds_file_t *file, const void *buf, size_t len);
 static int xbstream_write_sparse(ds_file_t *file, const void *buf, size_t len,
                                  size_t sparse_map_size,
@@ -116,8 +116,7 @@ err:
 }
 
 static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat,
-                                std::unique_ptr<checksum_callback_t> cb) {
+                                MY_STAT *mystat, FileProperties *prop) {
   ds_file_t *file;
   ds_parallel_stream_ctxt_t *parallel_stream_ctxt;
   ds_stream_file_t *stream_file;
@@ -138,7 +137,7 @@ static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
 
   stream_ctxt->mutex.lock();
   if (stream_ctxt->dest_file == NULL) {
-    stream_ctxt->dest_file = ds_open(dest_ctxt, path, mystat, std::move(cb));
+    stream_ctxt->dest_file = ds_open(dest_ctxt, path, mystat, prop);
     if (stream_ctxt->dest_file == NULL) {
       return NULL;
     }
@@ -162,6 +161,7 @@ static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
 
   stream_file->xbstream_file = xbstream_file;
   stream_file->stream_ctxt = stream_ctxt;
+  stream_file->prop = prop;
   file->ptr = stream_file;
   file->path = stream_ctxt->dest_file->path;
 

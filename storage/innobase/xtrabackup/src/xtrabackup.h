@@ -334,4 +334,6 @@ bool xb_process_datadir(const char *path,   /*!<in: datadir path */
 @param[in,out]	buf		log header buffer
 @param[in]	lsn		lsn to update */
 void update_log_temp_checkpoint(byte *buf, lsn_t lsn);
+
+const char *get_compression_str();
 #endif /* XB_XTRABACKUP_H */

@@ -108,6 +108,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "fil_cur.h"
 #include "keyring_components.h"
 #include "keyring_plugins.h"
+#include "manifest_writer.h"
 #include "read_filt.h"
 #include "redo_log.h"
 #include "space_map.h"
@@ -534,6 +535,21 @@ static inline void xtrabackup_add_datasink(ds_ctxt_t *ds) {
   actual_datasinks++;
 }
 
+const char *get_compression_str() {
+  switch (xtrabackup_compress) {
+    case XTRABACKUP_COMPRESS_NONE:
+      return ("none");
+    case XTRABACKUP_COMPRESS_QUICKLZ:
+      return ("quicklz");
+    case XTRABACKUP_COMPRESS_LZ4:
+      return ("lz4");
+    case XTRABACKUP_COMPRESS_ZSTD:
+      return ("zstd");
+    default:
+      return ("invalid");
+  }
+}
+
 /* ======== Datafiles iterator ======== */
 datafiles_iter_t *datafiles_iter_new(
     const std::shared_ptr<const xb::backup::dd_space_ids> dd_spaces) {
@@ -750,6 +766,7 @@ enum options_xtrabackup {
   OPT_XTRA_PLUGIN_LOAD,
   OPT_GENERATE_NEW_MASTER_KEY,
   OPT_REGISTER_REDO_LOG_CONSUMER,
+  OPT_BACKUP_MANIFEST,
 
   OPT_SSL_SSL,
   OPT_SSL_KEY,
@@ -1416,6 +1433,10 @@ struct my_option xb_client_options[] = {
      " server is not removed. User should delete it",
      (G_PTR *)&opt_rocksdb_sst_meta_only, (G_PTR *)&opt_rocksdb_sst_meta_only,
      0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"manifest", OPT_BACKUP_MANIFEST, "Create manifest file",
+     (G_PTR *)&opt_backup_manifest, (G_PTR *)&opt_backup_manifest, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
 
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
@@ -2624,7 +2645,7 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  stream = ds_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat);
+  stream = ds_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat, nullptr);
   if (stream == NULL) {
     xb::error() << "cannot open output stream for "
                 << XTRABACKUP_METADATA_FILENAME;
@@ -2742,7 +2763,7 @@ bool xb_write_delta_metadata(const char *filename,
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  f = ds_open(ds_meta, filename, &mystat);
+  f = ds_open(ds_meta, filename, &mystat, nullptr);
   if (f == NULL) {
     xb::error() << "cannot open output stream for " << filename;
     return (false);
@@ -3039,14 +3060,10 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
   bool is_system = !fsp_is_ibd_tablespace(node->space->id);
 
-  std::string checksum_file;  // Local variable to store the checksum
   std::string final_path;
 
   // Define the lambda that captures checksum_file by reference
-  auto checksum_cb = std::make_unique<checksum_callback_t>(
-      [&checksum_file](const std::string &checksum) {
-        checksum_file = checksum;
-      });
+  FileProperties prop;
 
   if (!is_system && check_if_skip_table(node_name)) {
     xb::info() << " Skipping " << node_name;
@@ -3085,11 +3102,9 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
   /* do not compress encrypted tablespaces */
   if (cursor.is_encrypted) {
-    dstfile = ds_open(ds_uncompressed_data, dst_name, &cursor.statinfo,
-                      std::move(checksum_cb));
+    dstfile = ds_open(ds_uncompressed_data, dst_name, &cursor.statinfo, &prop);
   } else {
-    dstfile =
-        ds_open(ds_data, dst_name, &cursor.statinfo, std::move(checksum_cb));
+    dstfile = ds_open(ds_data, dst_name, &cursor.statinfo, &prop);
   }
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
@@ -3128,13 +3143,23 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
                << dstfile->path;
   }
 
+  xb::info() << "rel path is " << cursor.rel_path;
   xb_fil_cur_close(&cursor);
   final_path = dstfile->path;
   if (ds_close(dstfile)) {
     rc = true;
   }
 
-  xb::info() << "SHA256 Checksum for " << final_path << ": " << checksum_file;
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    manifest_writer->addFileEntry(final_path, prop);
+  }
+  xb::info() << "SHA256 Checksum for " << final_path << ": ";
+
+  for (const auto &[key, value] : prop) {
+    xb::info() << key << ": ";
+    std::visit([](const auto &v) { xb::info() << v; }, value);
+    std::cout << std::endl;
+  }
 
   if (write_filter && write_filter->deinit) {
     write_filter->deinit(&write_filt_ctxt);
@@ -4204,6 +4229,12 @@ void xtrabackup_backup_func(void) {
 
   xtrabackup_init_datasinks();
 
+  if (opt_backup_manifest) {
+    std::string dest =
+        std::string(xtrabackup_target_dir) + "/" + "backup_manifest.json";
+    manifest_writer = new ManifestWriter(dest);
+  }
+
   if (!select_history()) {
     exit(EXIT_FAILURE);
   }
@@ -4391,6 +4422,10 @@ void xtrabackup_backup_func(void) {
       xb::error() << "failed to dump tablespace keys.";
       exit(EXIT_FAILURE);
     }
+  }
+
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    manifest_writer->close();
   }
 
   xtrabackup_destroy_datasinks();

@@ -705,7 +705,7 @@ bool Redo_Log_Writer::create_logfile(const char *name) {
   MY_STAT stat_info;
 
   memset(&stat_info, 0, sizeof(MY_STAT));
-  log_file = ds_open(ds_redo, XB_LOG_FILENAME, &stat_info);
+  log_file = ds_open(ds_redo, XB_LOG_FILENAME, &stat_info, &prop);
 
   if (log_file == NULL) {
     xb::error() << "failed to open the target stream for "
@@ -733,13 +733,25 @@ bool Redo_Log_Writer::write_header(byte *hdr) {
 }
 
 bool Redo_Log_Writer::close_logfile() {
-  if (ds_close(log_file) != 0) {
+  int ret = ds_close(log_file);
+
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    manifest_writer->addFileEntry(XB_LOG_FILENAME, prop);
+  }
+
+  xb::info() << "SHA256 Checksum for " << XB_LOG_FILENAME << ": ";
+  for (const auto &[key, value] : prop) {
+    xb::info() << key << ": ";
+    std::visit([](const auto &v) { xb::info() << v; }, value);
+    std::cout << std::endl;
+  }
+
+  if (ret != 0) {
     xb::error() << "failed to close logfile";
     return (false);
   }
   return (true);
 }
-
 
 bool Redo_Log_Writer::write_buffer(byte *buf, size_t len) {
   byte *write_buf = buf;

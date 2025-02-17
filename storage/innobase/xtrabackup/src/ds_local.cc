@@ -38,11 +38,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 typedef struct {
   File fd;
   size_t last_seek;  // to track last page sparse_file
+  FileProperties *prop;
 } ds_local_file_t;
 
 static ds_ctxt_t *local_init(const char *root);
 static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-                             std::unique_ptr<checksum_callback_t> cb = nullptr);
+                             FileProperties *prop);
 static int local_write(ds_file_t *file, const void *buf, size_t len);
 static int local_write_sparse(ds_file_t *file, const void *buf, size_t len,
                               size_t sparse_map_size,
@@ -105,7 +106,7 @@ static ds_ctxt_t *local_init(const char *root) {
 }
 
 static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-                             std::unique_ptr<checksum_callback_t> cb) {
+                             FileProperties *prop) {
   char fullpath[FN_REFLEN];
   char dirpath[FN_REFLEN];
   size_t dirpath_len;
@@ -139,6 +140,7 @@ static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
 
   local_file->fd = fd;
   local_file->last_seek = 0;
+  local_file->prop = prop;
 
   file->path = (char *)local_file + sizeof(ds_local_file_t);
   memcpy(file->path, fullpath, path_len);

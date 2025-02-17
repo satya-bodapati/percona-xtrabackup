@@ -38,6 +38,7 @@ typedef struct {
   char *buf;
   size_t pos;
   size_t size;
+  FileProperties *prop;
 } ds_buffer_file_t;
 
 typedef struct {
@@ -45,9 +46,8 @@ typedef struct {
 } ds_buffer_ctxt_t;
 
 static ds_ctxt_t *buffer_init(const char *root);
-static ds_file_t *buffer_open(
-    ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
-    std::unique_ptr<checksum_callback_t> cb = nullptr);
+static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
+                              MY_STAT *mystat, FileProperties *prop);
 static int buffer_write(ds_file_t *file, const void *buf, size_t len);
 static int buffer_close(ds_file_t *file);
 static void buffer_deinit(ds_ctxt_t *ctxt);
@@ -79,8 +79,7 @@ static ds_ctxt_t *buffer_init(const char *root) {
 }
 
 static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
-                              MY_STAT *mystat,
-                              std::unique_ptr<checksum_callback_t> cb) {
+                              MY_STAT *mystat, FileProperties *prop) {
   ds_buffer_ctxt_t *buffer_ctxt;
   ds_ctxt_t *pipe_ctxt;
   ds_file_t *dst_file;
@@ -90,7 +89,7 @@ static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
   pipe_ctxt = ctxt->pipe_ctxt;
   xb_a(pipe_ctxt != NULL);
 
-  dst_file = ds_open(pipe_ctxt, path, mystat, std::move(cb));
+  dst_file = ds_open(pipe_ctxt, path, mystat, prop);
   if (dst_file == NULL) {
     exit(EXIT_FAILURE);
   }
@@ -107,6 +106,7 @@ static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
   buffer_file->buf = (char *)(buffer_file + 1);
   buffer_file->size = buffer_ctxt->buffer_size;
   buffer_file->pos = 0;
+  buffer_file->prop = prop;
 
   file->path = dst_file->path;
   file->ptr = buffer_file;
