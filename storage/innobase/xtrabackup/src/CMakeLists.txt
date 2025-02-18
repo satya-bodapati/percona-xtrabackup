@@ -173,6 +173,13 @@ ENDIF(WITH_VERSION_CHECK)
 ########################################################################
 # xbstream binary
 ########################################################################
+
+INCLUDE_DIRECTORIES(
+  ${CMAKE_SOURCE_DIR}/extra/rapidjson/include/
+)
+
+ADD_DEFINITIONS("-DRAPIDJSON_NO_SIZETYPEDEFINE=1")
+
 MYSQL_ADD_EXECUTABLE(xbstream
   ds_buffer.cc
   ds_local.cc
@@ -190,6 +197,7 @@ MYSQL_ADD_EXECUTABLE(xbstream
   xbstream_write.cc
   xbcrypt_common.cc
   xbcrypt_write.cc
+  manifest_writer.cc
   ${BUNDLED_LZ4_PATH}/xxhash.c
   )
 
@@ -220,6 +228,13 @@ TARGET_LINK_LIBRARIES(xbstream
 ########################################################################
 # xbcrypt binary
 ########################################################################
+
+INCLUDE_DIRECTORIES(
+  ${CMAKE_SOURCE_DIR}/extra/rapidjson/include/
+  )
+
+ADD_DEFINITIONS("-DRAPIDJSON_NO_SIZETYPEDEFINE=1")
+
 MYSQL_ADD_EXECUTABLE(xbcrypt
   file_utils.cc
   xbcrypt.cc
@@ -232,6 +247,7 @@ MYSQL_ADD_EXECUTABLE(xbcrypt
   ds_local.cc
   ds_stdout.cc
   ds_checksum_sha256.cc
+  manifest_writer.cc
   )
 
 SET_TARGET_PROPERTIES(xbcrypt

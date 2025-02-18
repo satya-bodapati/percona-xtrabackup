@@ -10,6 +10,7 @@
 #include <sstream>
 #include "common.h"
 #include "datasink.h"
+#include "manifest_writer.h"
 
 /* Global context struct for all file operations */
 typedef struct {
@@ -24,6 +25,7 @@ typedef struct ds_checksum_file {
   EVP_MD_CTX *sha256_ctx;  // Per-file SHA-256 context
   size_t length;
   FileProperties *prop;
+  std::string input_file_name;
 } ds_checksum_file_t;
 
 static ds_ctxt_t *ds_checksum_sha256_init(const char *root) {
@@ -66,6 +68,7 @@ static ds_file_t *ds_checksum_sha256_open(ds_ctxt_t *ctxt, const char *filename,
   chk_file->checksum_ctxt = checksum_ctxt;
   chk_file->length = 0;
   chk_file->prop = prop;
+  chk_file->input_file_name = filename;
 
   ds_file_t *file = new ds_file_t;
   file->ptr = chk_file;
@@ -103,6 +106,11 @@ static int ds_checksum_sha256_close(ds_file_t *file) {
 
     chk_file->prop->emplace_back("SHA256Checksum", oss.str());
     chk_file->prop->emplace_back("Total_len_bytes", chk_file->length);
+  }
+
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    // std::string path(chk_file->dest_file->path);
+    manifest_writer->addFileEntry(chk_file->input_file_name, *chk_file->prop);
   }
 
   int ret = ds_close(chk_file->dest_file);

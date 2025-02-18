@@ -380,12 +380,13 @@ error:
 bool backup_file_print(const char *filename, const char *message, int len) {
   ds_file_t *dstfile = NULL;
   MY_STAT stat;
+  FileProperties prop;
 
   memset(&stat, 0, sizeof(stat));
   stat.st_mtime = time(nullptr);
   stat.st_size = len;
 
-  dstfile = ds_open(ds_data, filename, &stat);
+  dstfile = ds_open(ds_data, filename, &stat, &prop);
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << filename;
     goto error;
@@ -556,7 +557,6 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   xb_fil_cur_result_t res;
   const char *action;
   page_size_t page_size{0, 0, false};
-  std::string final_path;
   FileProperties prop;
 
   if (!datafile_open(src_file_path, &cursor, true, opt_read_buffer_size)) {
@@ -619,23 +619,10 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   /* close */
   xb::info() << "Done: " << action << " " << src_file_path << " to "
              << dstfile->path;
-  final_path = dstfile->path;
-  xb::info() << "relative path is" << cursor.rel_path;
   datafile_close(&cursor);
 
   if (ds_close(dstfile)) {
     goto error_close;
-  }
-
-  if (opt_backup_manifest && manifest_writer != nullptr) {
-    manifest_writer->addFileEntry(final_path, prop);
-  }
-
-  xb::info() << "SHA256 Checksum for " << final_path << ": ";
-  for (const auto &[key, value] : prop) {
-    std::cout << key << ": ";
-    std::visit([](const auto &v) { std::cout << v; }, value);
-    std::cout << std::endl;
   }
 
   return (true);

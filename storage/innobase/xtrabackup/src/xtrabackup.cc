@@ -2636,6 +2636,7 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
   size_t len;
   ds_file_t *stream;
   MY_STAT mystat;
+  FileProperties prop;
   bool rc = true;
 
   xtrabackup_print_metadata(buf, sizeof(buf));
@@ -2645,7 +2646,7 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  stream = ds_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat, nullptr);
+  stream = ds_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat, &prop);
   if (stream == NULL) {
     xb::error() << "cannot open output stream for "
                 << XTRABACKUP_METADATA_FILENAME;
@@ -3148,17 +3149,6 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   final_path = dstfile->path;
   if (ds_close(dstfile)) {
     rc = true;
-  }
-
-  if (opt_backup_manifest && manifest_writer != nullptr) {
-    manifest_writer->addFileEntry(final_path, prop);
-  }
-  xb::info() << "SHA256 Checksum for " << final_path << ": ";
-
-  for (const auto &[key, value] : prop) {
-    xb::info() << key << ": ";
-    std::visit([](const auto &v) { xb::info() << v; }, value);
-    std::cout << std::endl;
   }
 
   if (write_filter && write_filter->deinit) {
