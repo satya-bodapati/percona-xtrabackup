@@ -80,9 +80,21 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "xtrabackup_version.h"
 #ifdef HAVE_VERSION_CHECK
 #include <version_check_pl.h>
-#include "manifest_writer.h"
 #endif
 
+#include <openssl/evp.h>
+#include <rapidjson/document.h>
+#include <rapidjson/ostreamwrapper.h>
+#include <rapidjson/prettywriter.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <sys/stat.h>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <vector>
+#include "manifest_writer.h"
+#include "my_rapidjson_size_t.h"
 
 /** Possible values for system variable "innodb_checksum_algorithm". */
 extern const char *innodb_checksum_algorithm_names[];
@@ -1336,14 +1348,97 @@ static bool rocksdb_is_sst(std::string_view fullString) {
   return (ends_with(fullString, ".sst"));
 }
 
+static std::string calculate_sha256(const std::string &file_path) {
+  std::ifstream file(file_path, std::ios::binary);
+  if (!file) return "";
+
+  EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+  if (!mdctx) return "";
+
+  const EVP_MD *md = EVP_sha256();
+  if (EVP_DigestInit_ex(mdctx, md, nullptr) != 1) {
+    EVP_MD_CTX_free(mdctx);
+    return "";
+  }
+
+  std::vector<unsigned char> buffer(opt_read_buffer_size);
+  while (file) {
+    file.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
+    if (EVP_DigestUpdate(mdctx, buffer.data(), file.gcount()) != 1) {
+      EVP_MD_CTX_free(mdctx);
+      return "";
+    }
+  }
+
+  unsigned char hash[EVP_MAX_MD_SIZE];
+  unsigned int hash_len;
+  if (EVP_DigestFinal_ex(mdctx, hash, &hash_len) != 1) {
+    EVP_MD_CTX_free(mdctx);
+    return "";
+  }
+
+  EVP_MD_CTX_free(mdctx);
+
+  std::ostringstream oss;
+  for (unsigned int i = 0; i < hash_len; ++i) {
+    oss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+  }
+
+  return oss.str();
+}
+
+static size_t get_file_size(const std::string &file_path) {
+  struct stat st;
+  return (stat(file_path.c_str(), &st) == 0) ? st.st_size : 0;
+}
+
+static void create_json_rocksdb_meta_file(const std::string &dest_path,
+                                          const std::string &input_file_name) {
+  if (opt_rocksdb_sst_meta_only && rocksdb_is_sst(input_file_name)) {
+    std::string full_path = mysql_real_data_home + input_file_name;
+    std::string sha256_checksum = calculate_sha256(full_path);
+    size_t file_size = get_file_size(full_path);
+
+    rapidjson::Document meta;
+    meta.SetObject();
+    auto &allocator = meta.GetAllocator();
+
+    meta.AddMember("version", 1, allocator);
+    meta.AddMember("file_path", rapidjson::Value(full_path.c_str(), allocator),
+                   allocator);
+    meta.AddMember("SHA256checksum",
+                   rapidjson::Value(sha256_checksum.c_str(), allocator),
+                   allocator);
+    meta.AddMember("file_size_bytes", static_cast<uint64_t>(file_size),
+                   allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    meta.Accept(writer);
+
+    std::string json_buffer = buffer.GetString();
+    std::string dest = dest_path + ".rdbmeta";
+    backup_file_printf(dest.c_str(), "%s", json_buffer.c_str());
+  }
+}
+#if 0
+static void create_json_rocksdb_meta_file(const std::string &dest_path,
+                                          const std::string &input_file_name) {
+  if (opt_rocksdb_sst_meta_only && rocksdb_is_sst(input_file_name)) {
+    string dest = dest_path + ".rdbmeta";
+    backup_file_printf(dest.c_str(), "%s%s", mysql_real_data_home,
+                       input_file_name.c_str());
+  }
+}
+#endif
+
 static void backup_rocksdb_files(const Myrocks_datadir::const_iterator &start,
                                  const Myrocks_datadir::const_iterator &end,
                                  size_t thread_n, bool *result) {
   for (auto it = start; it != end; it++) {
     if (opt_rocksdb_sst_meta_only && rocksdb_is_sst(it->path)) {
-      string dest = it->rel_path + ".rdbmeta";
-      backup_file_printf(dest.c_str(), "%s%s", mysql_real_data_home,
-                         it->path.c_str());
+      create_json_rocksdb_meta_file(it->rel_path, it->path);
+
     } else {
       if (!copy_file(ds_uncompressed_data, it->path.c_str(),
                      it->rel_path.c_str(), thread_n, FILE_PURPOSE_OTHER,
