@@ -1706,18 +1706,15 @@ bool write_binlog_info(MYSQL *connection) {
 
   mysql_binlog_position = s.str();
 
-  if (opt_backup_manifest && manifest_writer != nullptr) {
-    manifest_writer->addInfoEntry("binlog_file_name",
-                                  std::string(log_status.filename));
-    manifest_writer->addInfoEntry("binlog_file_position", log_status.position);
-  }
+  addInfoEntryifEnabled("binlog_file_name", std::string(log_status.filename));
+  addInfoEntryifEnabled("binlog_file_position", log_status.position);
 
   if (!log_status.gtid_executed.empty() && gtid) {
     result =
         backup_file_printf(XTRABACKUP_BINLOG_INFO, "%s\t" UINT64PF "\t%s\n",
                            log_status.filename.c_str(), log_status.position,
                            log_status.gtid_executed.c_str());
-    manifest_writer->addInfoEntry("gtid", log_status.gtid_executed.c_str());
+    addInfoEntryifEnabled("gtid", log_status.gtid_executed.c_str());
   } else {
     result =
         backup_file_printf(XTRABACKUP_BINLOG_INFO, "%s\t" UINT64PF "\n",
@@ -1801,22 +1798,17 @@ char *get_xtrabackup_info(MYSQL *connection) {
 
   ut_a(ret != 0);
 
-  if (opt_backup_manifest && manifest_writer != nullptr) {
-    manifest_writer->addInfoEntry("uuid", uuid);
-    manifest_writer->addInfoEntry("command-line", tool_args);
-    manifest_writer->addInfoEntry("xtrabackup_version", XTRABACKUP_VERSION);
-    manifest_writer->addInfoEntry("server_version", server_version);
-    manifest_writer->addInfoEntry("start_time", buf_start_time);
-    manifest_writer->addInfoEntry("end_time", buf_end_time);
-    manifest_writer->addInfoEntry("binlog_pos", mysql_binlog_position.c_str());
-    manifest_writer->addInfoEntry("incremental",
-                                  xtrabackup_incremental ? "Y" : "N");
-    manifest_writer->addInfoEntry("compressed",
-                                  xtrabackup_compress ? "Y" : "N");
-    manifest_writer->addInfoEntry("compression_algorithm",
-                                  get_compression_str());
-    manifest_writer->addInfoEntry("encrypted", xtrabackup_encrypt ? "Y" : "N");
-  }
+  addInfoEntryifEnabled("uuid", uuid);
+  addInfoEntryifEnabled("command-line", tool_args);
+  addInfoEntryifEnabled("xtrabackup_version", XTRABACKUP_VERSION);
+  addInfoEntryifEnabled("server_version", server_version);
+  addInfoEntryifEnabled("start_time", buf_start_time);
+  addInfoEntryifEnabled("end_time", buf_end_time);
+  addInfoEntryifEnabled("binlog_pos", mysql_binlog_position.c_str());
+  addInfoEntryifEnabled("incremental", xtrabackup_incremental ? "Y" : "N");
+  addInfoEntryifEnabled("compressed", xtrabackup_compress ? "Y" : "N");
+  addInfoEntryifEnabled("compression_algorithm", get_compression_str());
+  addInfoEntryifEnabled("encrypted", xtrabackup_encrypt ? "Y" : "N");
 
   free(server_version);
   return result;

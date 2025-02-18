@@ -39,4 +39,21 @@ class ManifestWriter {
 extern bool opt_backup_manifest;
 extern ManifestWriter *manifest_writer;
 
+inline bool addFileEntryifEnabled(const std::string &filePath,
+                                  FileProperties &prop) {
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    return (manifest_writer->addFileEntry(filePath, prop));
+  }
+
+  return false;
+}
+
+template <typename T>
+inline bool addInfoEntryifEnabled(const std::string &key, T value) {
+  if (opt_backup_manifest && manifest_writer != nullptr) {
+    return (manifest_writer->addInfoEntry(key, value));
+  }
+
+  return false;
+}
 #endif  // MANIFEST_WRITER_H

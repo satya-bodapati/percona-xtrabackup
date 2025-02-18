@@ -108,10 +108,7 @@ static int ds_checksum_sha256_close(ds_file_t *file) {
     chk_file->prop->emplace_back("Total_len_bytes", chk_file->length);
   }
 
-  if (opt_backup_manifest && manifest_writer != nullptr) {
-    // std::string path(chk_file->dest_file->path);
-    manifest_writer->addFileEntry(chk_file->input_file_name, *chk_file->prop);
-  }
+  addFileEntryifEnabled(chk_file->input_file_name, *chk_file->prop);
 
   int ret = ds_close(chk_file->dest_file);
   delete file;
