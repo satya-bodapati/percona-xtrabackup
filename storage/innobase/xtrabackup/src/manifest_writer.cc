@@ -1,3 +1,4 @@
+#include "my_rapidjson_size_t.h"
 #include "manifest_writer.h"
 #include <rapidjson/document.h>
 #include <rapidjson/ostreamwrapper.h>
@@ -11,7 +12,6 @@
 #include <mutex>
 #include <unordered_map>
 #include <vector>
-#include "my_rapidjson_size_t.h"
 
 bool opt_backup_manifest = false;
 ManifestWriter *manifest_writer = nullptr;

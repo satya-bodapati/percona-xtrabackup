@@ -3066,6 +3066,13 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
   // Define the lambda that captures checksum_file by reference
   FileProperties prop;
 
+  prop.emplace_back("space_id", node->space->id);
+  std::stringstream ss;
+  ss << page_size_t(node->space->flags);
+  prop.emplace_back("page_size", ss.str());
+  bool is_encrypted = FSP_FLAGS_GET_ENCRYPTION(node->space->flags);
+  prop.emplace_back("is_encrypted", is_encrypted);
+
   if (!is_system && check_if_skip_table(node_name)) {
     xb::info() << " Skipping " << node_name;
     return (false);
