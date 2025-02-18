@@ -82,6 +82,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <version_check_pl.h>
 #endif
 
+#include "my_rapidjson_size_t.h"
 #include <openssl/evp.h>
 #include <rapidjson/document.h>
 #include <rapidjson/ostreamwrapper.h>
@@ -94,7 +95,6 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <sstream>
 #include <vector>
 #include "manifest_writer.h"
-#include "my_rapidjson_size_t.h"
 
 /** Possible values for system variable "innodb_checksum_algorithm". */
 extern const char *innodb_checksum_algorithm_names[];
