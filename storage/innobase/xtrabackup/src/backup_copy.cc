@@ -389,16 +389,16 @@ error:
   return false;
 }
 
-bool backup_file_print(const char *filename, const char *message, int len) {
+bool backup_file_print(const char *filename, const char *message, int len,
+                       FileProperties *prop) {
   ds_file_t *dstfile = NULL;
   MY_STAT stat;
-  FileProperties prop;
 
   memset(&stat, 0, sizeof(stat));
   stat.st_mtime = time(nullptr);
   stat.st_size = len;
 
-  dstfile = ds_open(ds_data, filename, &stat, &prop);
+  dstfile = ds_open(ds_data, filename, &stat, prop);
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << filename;
     goto error;
@@ -438,6 +438,27 @@ bool backup_file_printf(const char *filename, const char *fmt, ...) {
   }
 
   result = backup_file_print(filename, buf, buf_len);
+
+  free(buf);
+  return (result);
+}
+
+bool backup_file_prop_printf(const char *filename, FileProperties *prop,
+                             const char *fmt, ...) {
+  bool result = false;
+  char *buf = 0;
+  int buf_len = 0;
+  va_list ap;
+
+  va_start(ap, fmt);
+  buf_len = vasprintf(&buf, fmt, ap);
+  va_end(ap);
+
+  if (buf_len == -1) {
+    return false;
+  }
+
+  result = backup_file_print(filename, buf, buf_len, prop);
 
   free(buf);
   return (result);
@@ -1418,7 +1439,12 @@ static void create_json_rocksdb_meta_file(const std::string &dest_path,
 
     std::string json_buffer = buffer.GetString();
     std::string dest = dest_path + ".rdbmeta";
-    backup_file_printf(dest.c_str(), "%s", json_buffer.c_str());
+    FileProperties prop;
+    prop.emplace_back("SST_file_path", full_path);
+    prop.emplace_back("SST_SHA256checksum", sha256_checksum);
+    prop.emplace_back("SST_file_len_bytes", file_size);
+
+    backup_file_prop_printf(dest.c_str(), &prop, "%s", json_buffer.c_str());
   }
 }
 #if 0

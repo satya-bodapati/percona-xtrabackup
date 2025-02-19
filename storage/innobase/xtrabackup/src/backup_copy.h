@@ -30,10 +30,15 @@ struct Backup_context;
 #define XTRABACKUP_BINLOG_INFO "xtrabackup_binlog_info"
 #define XTRABACKUP_INFO "xtrabackup_info"
 
-bool backup_file_print(const char *filename, const char *message, int len);
+bool backup_file_print(const char *filename, const char *message, int len,
+                       FileProperties *prop = nullptr);
 
 bool backup_file_printf(const char *filename, const char *fmt, ...)
     __attribute__((format(printf, 2, 0)));
+
+bool backup_file_prop_printf(const char *filename, FileProperties *prop,
+                             const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
 
 /************************************************************************
 Return true if first and second arguments are the same path. */
