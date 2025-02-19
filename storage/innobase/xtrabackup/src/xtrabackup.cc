@@ -390,6 +390,7 @@ bool xb_close_files = false;
 ds_ctxt_t *ds_data = nullptr;
 ds_ctxt_t *ds_meta = nullptr;
 ds_ctxt_t *ds_redo = nullptr;
+ds_ctxt_t *ds_stream = nullptr;
 ds_ctxt_t *ds_uncompressed_data = nullptr;
 
 static long innobase_log_files_in_group_save;
@@ -3061,9 +3062,6 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
 
   bool is_system = !fsp_is_ibd_tablespace(node->space->id);
 
-  std::string final_path;
-
-  // Define the lambda that captures checksum_file by reference
   FileProperties prop;
 
   prop.emplace_back("space_id", node->space->id);
@@ -3151,13 +3149,10 @@ static bool xtrabackup_copy_datafile(fil_node_t *node, uint thread_n) {
                << dstfile->path;
   }
 
-  xb::info() << "rel path is " << cursor.rel_path;
   xb_fil_cur_close(&cursor);
-  final_path = dstfile->path;
   if (ds_close(dstfile)) {
     rc = true;
   }
-
   if (write_filter && write_filter->deinit) {
     write_filter->deinit(&write_filt_ctxt);
   }
@@ -3325,6 +3320,8 @@ static void xtrabackup_init_datasinks(void) {
 
     ds_set_pipe(ds, ds_data);
     ds_data = ds;
+
+    ds_stream = ds_data;
 
     if (xtrabackup_stream_fmt != XB_STREAM_FMT_XBSTREAM) {
       /* 'tar' does not allow parallel streams */
@@ -8068,6 +8065,7 @@ int main(int argc, char **argv) {
     if (xtrabackup_copy_back) num++;
     if (xtrabackup_move_back) num++;
     if (xtrabackup_decrypt_decompress) num++;
+    if (xtrabackup_stream) num++;
     if (num != 1) { /* !XOR (for now) */
       usage();
       exit(EXIT_FAILURE);
@@ -8106,8 +8104,6 @@ int main(int argc, char **argv) {
   }
 
   if (xtrabackup_copy_back || xtrabackup_move_back) {
-    read_metadata();
-#if 0
     if (!check_if_param_set("datadir")) {
       xb::error() << "datadir must be specified.";
       exit(EXIT_FAILURE);
@@ -8120,12 +8116,22 @@ int main(int argc, char **argv) {
                      "without option --apply-log-only";
       exit(EXIT_FAILURE);
     }
-#endif
+
+    init_mysql_environment();
+    if (!copy_back(server_argc, server_defaults)) {
+      exit(EXIT_FAILURE);
+    }
+    cleanup_mysql_environment();
+  }
+
+  if (xtrabackup_stream && !xtrabackup_backup && !xtrabackup_prepare &&
+      !xtrabackup_copy_back && !xtrabackup_move_back) {
+    read_metadata();
 
     init_mysql_environment();
     xtrabackup_init_datasinks();
 
-    if (!copy_back(server_argc, server_defaults)) {
+    if (!backup_stream(server_argc, server_defaults)) {
       exit(EXIT_FAILURE);
     }
     cleanup_mysql_environment();

@@ -82,7 +82,6 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <version_check_pl.h>
 #endif
 
-#include "my_rapidjson_size_t.h"
 #include <openssl/evp.h>
 #include <rapidjson/document.h>
 #include <rapidjson/ostreamwrapper.h>
@@ -92,9 +91,13 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <sys/stat.h>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <vector>
 #include "manifest_writer.h"
+#include "my_rapidjson_size_t.h"
+
+extern ds_ctxt_t *ds_stream;
 
 /** Possible values for system variable "innodb_checksum_algorithm". */
 extern const char *innodb_checksum_algorithm_names[];
@@ -257,7 +260,6 @@ bool directory_exists(const char *dir, bool create) {
   return (true);
 }
 
-#if 0
 /************************************************************************
 Check that directory exists and it is empty. */
 static bool directory_exists_and_empty(const char *dir, const char *comment) {
@@ -294,7 +296,6 @@ static bool directory_exists_and_empty(const char *dir, const char *comment) {
 
   return (empty);
 }
-#endif
 
 /************************************************************************
 Check if file name ends with given set of suffixes.
@@ -653,11 +654,9 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   xb::info() << "Done: " << action << " " << src_file_path << " to "
              << dstfile->path;
   datafile_close(&cursor);
-
   if (ds_close(dstfile)) {
     goto error_close;
   }
-
   return (true);
 
 error:
@@ -2205,8 +2204,159 @@ static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
       continue;
     }
 
-#if 0
     if (should_skip_file_on_copy_back(entry.path.c_str())) {
+      continue;
+    }
+
+    file_purpose_t file_purpose;
+    if (Fil_path::has_suffix(IBD, entry.path)) {
+      file_purpose = FILE_PURPOSE_DATAFILE;
+    } else if (Fil_path::has_suffix(IBU, entry.path)) {
+      file_purpose = FILE_PURPOSE_UNDO_LOG;
+    } else {
+      file_purpose = FILE_PURPOSE_OTHER;
+    }
+
+    std::string dst_path = entry.rel_path;
+
+    if (file_purpose == FILE_PURPOSE_UNDO_LOG) {
+      /* undo tablespace can only be in undo_dir or data dir */
+      std::string dst_dir =
+          (srv_undo_dir && *srv_undo_dir) ? srv_undo_dir : mysql_data_home;
+      dst_path = dst_dir + "/" + dst_path;
+    } else if (file_purpose == FILE_PURPOSE_DATAFILE) {
+      std::string tablespace_name = entry.path;
+      /* Remove starting ./ and trailing .ibd/.ibu from tablespace name */
+      tablespace_name = tablespace_name.substr(2, tablespace_name.length() - 6);
+      std::string external_file_name =
+          Tablespace_map::instance().external_file_name(tablespace_name);
+      if (!external_file_name.empty()) {
+        /* This is external tablespace. Copy it to it's original
+        location */
+        dst_path = external_file_name;
+      }
+    }
+
+    if (!(ret = copy_or_move_file(entry.path.c_str(), dst_path.c_str(),
+                                  mysql_data_home, ctx->n_thread,
+                                  file_purpose))) {
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  my_thread_end();
+  destroy_thd(thd);
+
+  mutex_enter(ctx->count_mutex);
+  --(*ctx->count);
+  mutex_exit(ctx->count_mutex);
+
+  ctx->ret = ret;
+}
+
+struct RocksDBMetaInfo {
+  int version;
+  std::string file_path;
+  std::string sha256_checksum;
+  uint64_t file_size_bytes;
+};
+
+// Function to read JSON metadata and verify the actual file
+static bool read_and_verify_json_rocksdb_meta_file(const std::string &file_path,
+                                                   RocksDBMetaInfo &meta_info) {
+  std::ifstream file(file_path);
+  if (!file) {
+    xb::error() << "Failed to open metadata file: " << file_path;
+    return false;
+  }
+
+  std::string json_content((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+  rapidjson::Document doc;
+  if (doc.Parse(json_content.c_str()).HasParseError()) {
+    xb::error() << "Failed to parse JSON in: " << file_path;
+    return false;
+  }
+
+  if (!doc.HasMember("version") || !doc["version"].IsInt() ||
+      !doc.HasMember("file_path") || !doc["file_path"].IsString() ||
+      !doc.HasMember("SHA256checksum") || !doc["SHA256checksum"].IsString() ||
+      !doc.HasMember("file_size_bytes") || !doc["file_size_bytes"].IsUint64()) {
+    xb::error() << "Invalid JSON format in: " << file_path;
+    return false;
+  }
+
+  // Store extracted values in the meta_info struct
+  meta_info.version = doc["version"].GetInt();
+  meta_info.file_path = doc["file_path"].GetString();
+  meta_info.sha256_checksum = doc["SHA256checksum"].GetString();
+  meta_info.file_size_bytes = doc["file_size_bytes"].GetUint64();
+
+  // Verify actual file exists
+  size_t actual_file_size = get_file_size(meta_info.file_path);
+  if (actual_file_size == 0) {
+    xb::error() << "Error: File not found or size is 0: "
+                << meta_info.file_path;
+    return false;
+  }
+
+  // Calculate actual SHA256 checksum
+  std::string actual_sha256 = calculate_sha256(meta_info.file_path);
+
+  // Compare recorded and actual values
+  bool size_matches = (actual_file_size == meta_info.file_size_bytes);
+  bool checksum_matches = (actual_sha256 == meta_info.sha256_checksum);
+
+  xb::info() << "Metadata File: " << file_path;
+  xb::info() << "Version: " << meta_info.version;
+  xb::info() << "Recorded File Path: " << meta_info.file_path;
+  xb::info() << "Recorded File Size: " << meta_info.file_size_bytes << " bytes";
+  xb::info() << "Actual File Size: " << actual_file_size << " bytes";
+  xb::info() << "Recorded SHA256: " << meta_info.sha256_checksum;
+  xb::info() << "Actual SHA256: " << actual_sha256;
+
+  if (size_matches && checksum_matches) {
+    xb::info() << "Verification SUCCESS: File size and SHA256 match.";
+    return true;
+  } else {
+    xb::error() << "Verification FAILED!";
+    if (!size_matches) xb::error() << "Mismatch in file size!";
+    if (!checksum_matches) xb::error() << "Mismatch in SHA256 checksum!";
+    return false;
+  }
+}
+
+static void stream_thread_func(datadir_thread_ctxt_t *ctx) {
+  bool ret = true;
+  datadir_entry_t entry;
+  THD *thd = nullptr;
+
+  if (my_thread_init()) {
+    ret = false;
+    goto cleanup;
+  }
+
+  /* create THD to get thread number in the error log */
+  thd = create_thd(false, false, true, 0, 0);
+
+  while (ctx->queue->pop(entry)) {
+    /* create empty directories */
+#if 0
+    if (entry.is_empty_dir) {
+      xb::info() << "Creating directory " << entry.path.c_str();
+
+      if (mkdirp(entry.path.c_str(), 0777, MYF(0)) < 0) {
+        char errbuf[MYSYS_STRERROR_SIZE];
+
+        xb::error() << "Can not create directory " << entry.path.c_str() << ": "
+                    << my_strerror(errbuf, sizeof(errbuf), my_errno());
+        ret = false;
+
+        goto cleanup;
+      }
+
+      xb::info() << "Done: creating directory " << entry.path;
       continue;
     }
 #endif
@@ -2242,35 +2392,24 @@ static void copy_back_thread_func(datadir_thread_ctxt_t *ctx) {
 
     if (ends_with(entry.path.c_str(), ".rdbmeta")) {
       // Open the file for reading
-      std::ifstream file(entry.path);
-
-      if (!file.is_open()) {
-        std::cerr << "Failed to open the file." << std::endl;
+      RocksDBMetaInfo meta_info;
+      if (!read_and_verify_json_rocksdb_meta_file(entry.path, meta_info)) {
         goto cleanup;
       }
 
-      // Read the entire content of the file into a string
-      std::string filePath((std::istreambuf_iterator<char>(file)),
-                           std::istreambuf_iterator<char>());
-
-      // Close the file
-      file.close();
-
       // Now `filePath` contains the file path as a string
-      xb::info() << "Read file path: " << filePath
+      xb::info() << "Read file path: " << meta_info.file_path
                  << " from file: " << entry.path;
       std::string dest = removeExtension(dst_path, ".rdbmeta");
       xb::info() << "copying to: " << dest;
 
-      if (!(ret = copy_or_move_file(filePath.c_str(), dest.c_str(),
-                                    mysql_data_home, ctx->n_thread,
-                                    file_purpose))) {
+      if (!(ret = copy_file(ds_stream, meta_info.file_path.c_str(),
+                            dest.c_str(), ctx->n_thread, file_purpose))) {
         goto cleanup;
       }
     } else {
-      if (!(ret = copy_or_move_file(entry.path.c_str(), dst_path.c_str(),
-                                    mysql_data_home, ctx->n_thread,
-                                    file_purpose))) {
+      if (!(ret = copy_file(ds_stream, entry.path.c_str(), entry.path.c_str(),
+                            ctx->n_thread, file_purpose))) {
         goto cleanup;
       }
     }
@@ -2288,11 +2427,13 @@ cleanup:
 }
 
 bool copy_back(int argc, char **argv) {
-  bool ret = true;
+  char *innobase_data_file_path_copy;
+  bool ret = true, err;
+  char *dst_dir;
+  binlog_file_location binlog;
 
   ut_crc32_init();
 
-#if 0
   if (!opt_force_non_empty_dirs) {
     if (!directory_exists_and_empty(mysql_data_home, "Original data")) {
       return (false);
@@ -2302,7 +2443,6 @@ bool copy_back(int argc, char **argv) {
       return (false);
     }
   }
-
   if (srv_undo_dir && *srv_undo_dir && !directory_exists(srv_undo_dir, true)) {
     return (false);
   }
@@ -2314,7 +2454,6 @@ bool copy_back(int argc, char **argv) {
       !directory_exists(srv_log_group_home_dir, true)) {
     return (false);
   }
-#endif
 
   /* cd to backup directory */
   if (my_setwd(xtrabackup_target_dir, MYF(MY_WME))) {
@@ -2334,7 +2473,6 @@ bool copy_back(int argc, char **argv) {
     return (false);
   }
 
-#if 0
   if (!Tablespace_map::instance().deserialize("./")) {
     xb::error() << "failed to load tablespaces list.";
     xb::error()
@@ -2343,7 +2481,322 @@ bool copy_back(int argc, char **argv) {
            "version. Please use the same XtraBackup version to restore.";
     return (false);
   }
-#endif
+
+  if (opt_generate_new_master_key && !xb_tablespace_keys_exist()) {
+    xb::error() << "option --generate_new_master_key "
+                << "is specified but xtrabackup_keys is absent";
+    return (false);
+  }
+
+  if (xb_tablespace_keys_exist() && opt_generate_new_master_key) {
+    if (!xb_keyring_init_for_copy_back(argc, argv)) {
+      xb::error() << "failed to init keyring plugin";
+      return (false);
+    }
+    if (!xb_tablespace_keys_load(
+            "./", opt_transition_key,
+            opt_transition_key != NULL ? strlen(opt_transition_key) : 0)) {
+      xb::error() << "failed to load tablespace keys";
+      return (false);
+    }
+
+    /* Generate new random uuid to compound new MK */
+    std::string new_uuid = xtrabackup::utils::generate_uuid();
+    memset(server_uuid, 0, Encryption::SERVER_UUID_LEN + 1);
+    strncpy(server_uuid, new_uuid.c_str(), Encryption::SERVER_UUID_LEN);
+
+    byte *master_key = NULL;
+
+    Encryption::create_master_key(&master_key);
+
+    if (master_key == NULL) {
+      xb::error() << "can't generate new master "
+                     "key. Please check keyring plugin settings.";
+      return (false);
+    }
+
+    my_free(master_key);
+
+    uint32_t master_key_id;
+    Encryption::get_master_key(&master_key_id, &master_key);
+
+    xb::info() << "Generated new master key";
+
+    my_free(master_key);
+  }
+
+  /* parse data file path */
+
+  if (!innobase_data_file_path) {
+    innobase_data_file_path = (char *)"ibdata1:10M:autoextend";
+  }
+  innobase_data_file_path_copy = strdup(innobase_data_file_path);
+
+  srv_sys_space.set_path(".");
+
+  if (!srv_sys_space.parse_params(innobase_data_file_path, true, false)) {
+    xb::error() << "syntax error in innodb_data_file_path";
+    return (false);
+  }
+
+  /* temporally dummy value to avoid crash */
+  srv_page_size_shift = 14;
+  srv_page_size = (1 << srv_page_size_shift);
+  srv_max_n_threads = 1000;
+  os_event_global_init();
+  sync_check_init(srv_max_n_threads);
+  ut_crc32_init();
+
+  /* copy undo tablespaces */
+  if (srv_undo_tablespaces > 0) {
+    dst_dir = (srv_undo_dir && *srv_undo_dir) ? srv_undo_dir : mysql_data_home;
+
+    ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
+
+    for (ulong i = 1; i <= srv_undo_tablespaces; i++) {
+      char filename[20];
+      sprintf(filename, "undo_%03lu", i);
+      if (Fil_path::get_file_type(filename) != OS_FILE_TYPE_FILE) continue;
+      if (!(ret = copy_or_move_file(filename, filename, dst_dir, 1,
+                                    FILE_PURPOSE_UNDO_LOG))) {
+        goto cleanup;
+      }
+    }
+
+    ds_destroy(ds_data);
+    ds_data = NULL;
+  }
+
+  /* create #innodb_redo */
+
+  dst_dir = (srv_log_group_home_dir && *srv_log_group_home_dir)
+                ? srv_log_group_home_dir
+                : mysql_data_home;
+
+  ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
+
+  if (directory_exists(LOG_DIRECTORY_NAME, false)) {
+    char errbuf[MYSYS_STRERROR_SIZE];
+    dst_dir = (srv_log_group_home_dir && *srv_log_group_home_dir)
+                  ? srv_log_group_home_dir
+                  : mysql_data_home;
+    std::string dest_redo_dir =
+        std::string(dst_dir) + FN_DIRSEP + LOG_DIRECTORY_NAME;
+    if (mkdirp(dest_redo_dir.c_str(), 0777, MYF(0)) < 0) {
+      xb::error() << "Can not create directory " << dest_redo_dir << ": "
+                  << my_strerror(errbuf, sizeof(errbuf), my_errno());
+
+      goto cleanup;
+    }
+  }
+
+  ds_destroy(ds_data);
+  ds_data = NULL;
+
+  /* copy innodb system tablespace(s) */
+
+  dst_dir = (innobase_data_home_dir && *innobase_data_home_dir)
+                ? innobase_data_home_dir
+                : mysql_data_home;
+
+  ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
+
+  for (auto iter(srv_sys_space.files_begin()), end(srv_sys_space.files_end());
+       iter != end; ++iter) {
+    const char *filename = base_name(iter->name());
+
+    if (!(ret = copy_or_move_file(filename, iter->name(), dst_dir, 1,
+                                  FILE_PURPOSE_DATAFILE))) {
+      goto cleanup;
+    }
+  }
+
+  ds_destroy(ds_data);
+  ds_data = NULL;
+
+  /* copy the rest of tablespaces */
+  ds_data = ds_create(mysql_data_home, DS_TYPE_LOCAL);
+
+  /* copy binary log and .index files */
+  if (binlog_file_location::find_binlog(".", binlog, err)) {
+    const auto target = binlog.target_location(mysql_data_home);
+
+    if (!target.name.empty()) {
+      if (!(ret = copy_or_move_file(binlog.name.c_str(), target.path.c_str(),
+                                    mysql_data_home, 1, FILE_PURPOSE_BINLOG))) {
+        goto cleanup;
+      }
+      ret = xb_binlog_password_reencrypt(target.path.c_str());
+      if (!ret) {
+        xb::error() << "failed to reencrypt binary log file "
+                       "header.";
+        goto cleanup;
+      }
+      /* make sure we don't copy binary log and .index files twice */
+      skip_copy_back_list.insert(binlog.name.c_str());
+    }
+    if (!target.index_name.empty()) {
+      if (!(ret = copy_or_move_file(binlog.index_name.c_str(),
+                                    target.index_path.c_str(), mysql_data_home,
+                                    1, FILE_PURPOSE_BINLOG))) {
+        goto cleanup;
+      }
+      /* make sure we don't copy binary log and .index files twice */
+      skip_copy_back_list.insert(binlog.index_name.c_str());
+      /* fixup binlog index */
+      if (Fil_path(mysql_data_home).is_ancestor(target.path)) {
+        std::ofstream f_index(target.index_path.c_str());
+        f_index << target.name.c_str() << std::endl;
+      } else {
+        std::ofstream f_index(target.index_path.c_str());
+        f_index << target.path.c_str() << std::endl;
+      }
+    }
+  }
+
+  if (err || !ret) goto cleanup;
+
+  ut_a(xtrabackup_parallel >= 0);
+  if (xtrabackup_parallel > 1) {
+    xb::info() << "Starting " << xtrabackup_parallel
+               << " threads for parallel data files transfer";
+  }
+
+  ret = run_data_threads(".", copy_back_thread_func, xtrabackup_parallel,
+                         "copy-back");
+  if (!ret) goto cleanup;
+
+  /* copy buffer pool dump */
+  if (innobase_buffer_pool_filename) {
+    const char *src_name;
+    char path[FN_REFLEN];
+
+    src_name = trim_dotslash(innobase_buffer_pool_filename);
+
+    snprintf(path, sizeof(path), "%s/%s", mysql_data_home, src_name);
+
+    /* could be already copied with other files from data directory */
+    if (file_exists(src_name) && !file_exists(innobase_buffer_pool_filename)) {
+      ret = copy_or_move_file(src_name, innobase_buffer_pool_filename,
+                              mysql_data_home, 0, FILE_PURPOSE_OTHER);
+      if (!ret) goto cleanup;
+    }
+  }
+
+  ds_destroy(ds_data);
+  ds_data = NULL;
+
+  /* copy rocksdb datadir */
+  if (directory_exists(ROCKSDB_SUBDIR, false)) {
+    Myrocks_datadir rocksdb(ROCKSDB_SUBDIR);
+
+    std::string rocksdb_datadir =
+        (opt_rocksdb_datadir != nullptr && *opt_rocksdb_datadir != 0)
+            ? opt_rocksdb_datadir
+            : std::string(mysql_data_home) + FN_DIRSEP ROCKSDB_SUBDIR;
+
+    std::string rocksdb_wal_dir =
+        (opt_rocksdb_wal_dir != nullptr && *opt_rocksdb_wal_dir != 0)
+            ? opt_rocksdb_wal_dir
+            : "";
+
+    if (!directory_exists(rocksdb_datadir.c_str(), true)) {
+      return (false);
+    }
+
+    ds_data = ds_create(rocksdb_datadir.c_str(), DS_TYPE_LOCAL);
+
+    using std::placeholders::_1;
+    using std::placeholders::_2;
+    using std::placeholders::_3;
+    std::function<void(const Myrocks_datadir::const_iterator &,
+                       const Myrocks_datadir::const_iterator &, size_t)>
+        copy = std::bind(&par_copy_rocksdb_files, _1, _2, _3, ds_data, &ret);
+
+    if (rocksdb_wal_dir.empty()) {
+      par_for(PFS_NOT_INSTRUMENTED, rocksdb.files("", ""), xtrabackup_parallel,
+              copy);
+    } else {
+      par_for(PFS_NOT_INSTRUMENTED, rocksdb.data_files(""), xtrabackup_parallel,
+              copy);
+      par_for(PFS_NOT_INSTRUMENTED, rocksdb.meta_files(""), xtrabackup_parallel,
+              copy);
+    }
+
+    if (!ret) goto cleanup;
+
+    ds_destroy(ds_data);
+    ds_data = nullptr;
+
+    if (!rocksdb_wal_dir.empty()) {
+      if (!Fil_path::is_absolute_path(rocksdb_wal_dir)) {
+        rocksdb_wal_dir =
+            std::string(mysql_data_home) + FN_DIRSEP + rocksdb_wal_dir;
+      }
+
+      if (!directory_exists(rocksdb_wal_dir.c_str(), true)) {
+        return (false);
+      }
+
+      ds_data = ds_create(rocksdb_wal_dir.c_str(), DS_TYPE_LOCAL);
+
+      using std::placeholders::_1;
+      using std::placeholders::_2;
+      using std::placeholders::_3;
+      std::function<void(const Myrocks_datadir::const_iterator &,
+                         const Myrocks_datadir::const_iterator &, size_t)>
+          copy = std::bind(&par_copy_rocksdb_files, _1, _2, _3, ds_data, &ret);
+
+      par_for(PFS_NOT_INSTRUMENTED, rocksdb.wal_files(""), xtrabackup_parallel,
+              copy);
+
+      if (!ret) goto cleanup;
+
+      ds_destroy(ds_data);
+      ds_data = nullptr;
+    }
+  }
+
+cleanup:
+
+  free(innobase_data_file_path_copy);
+
+  if (ds_data != NULL) {
+    ds_destroy(ds_data);
+  }
+
+  ds_data = NULL;
+
+  xb_keyring_shutdown();
+
+  sync_check_close();
+  os_event_global_destroy();
+
+  return (ret);
+}
+
+bool backup_stream(int argc, char **argv) {
+  bool ret = true;
+
+  ut_crc32_init();
+
+  /* cd to backup directory */
+  if (my_setwd(xtrabackup_target_dir, MYF(MY_WME))) {
+    xb::error() << "cannot my_setwd " << xtrabackup_target_dir;
+    return (false);
+  }
+
+  my_option backup_options[] = {
+      {"innodb_checksum_algorithm", 0, "", &srv_checksum_algorithm,
+       &srv_checksum_algorithm, &innodb_checksum_algorithm_typelib, GET_ENUM,
+       REQUIRED_ARG, SRV_CHECKSUM_ALGORITHM_INNODB, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
+
+  if (!xtrabackup::utils::load_backup_my_cnf(backup_options,
+                                             xtrabackup_target_dir)) {
+    xb::error() << "failed to load backup-my.cnf";
+    return (false);
+  }
 
   if (opt_generate_new_master_key && !xb_tablespace_keys_exist()) {
     xb::error() << "option --generate_new_master_key "
@@ -2398,19 +2851,16 @@ bool copy_back(int argc, char **argv) {
   sync_check_init(srv_max_n_threads);
   ut_crc32_init();
 
-
-
   /* copy the rest of tablespaces */
-
 
   ut_a(xtrabackup_parallel >= 0);
   if (xtrabackup_parallel > 1) {
     xb::info() << "Starting " << xtrabackup_parallel
-               << " threads for parallel data files transfer";
+               << " threads for parallel streaming";
   }
 
-  ret = run_data_threads(".", copy_back_thread_func, xtrabackup_parallel,
-                         "copy-back");
+  ret = run_data_threads(".", stream_thread_func, xtrabackup_parallel,
+                         "stream-backup");
 
   if (ds_data != NULL) {
     ds_destroy(ds_data);

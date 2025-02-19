@@ -84,6 +84,7 @@ bool copy_redo_encryption_info();
 
 bool apply_log_finish();
 bool copy_back(int argc, char **argv);
+bool backup_stream(int argc, char **argv);
 bool decrypt_decompress();
 #ifdef HAVE_VERSION_CHECK
 void version_check();
