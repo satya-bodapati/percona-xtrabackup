@@ -91,4 +91,10 @@ void version_check();
 #endif
 bool directory_exists(const char *dir, bool create);
 
+template <typename F>
+bool run_data_threads(const char *dir, const char *suffix, F func, uint n,
+                      const char *thread_description);
+
+struct datadir_thread_ctxt_t;
+void xtrabackup_apply_deltas_parallel(datadir_thread_ctxt_t *ctx);
 #endif

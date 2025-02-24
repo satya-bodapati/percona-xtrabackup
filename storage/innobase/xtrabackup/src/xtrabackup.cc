@@ -5380,6 +5380,23 @@ static space_id_t get_space_id_from_page_0(const char *file_name) {
   return (space_id);
 }
 
+static void xb_delta_add_to_hash(const char *dest_space_name) {
+  static std::mutex mtx;  // Function-local static mutex
+  std::lock_guard<std::mutex> lock(mtx);
+
+  /* remember space name used by incremental prepare. This hash is later used to
+  detect the dropped tablespaces and remove them. Check rm_if_not_found() */
+  xb_filter_entry_t *table =
+      static_cast<xb_filter_entry_t *>(ut::malloc_withkey(
+          UT_NEW_THIS_FILE_PSI_KEY,
+          sizeof(xb_filter_entry_t) + strlen(dest_space_name) + 1));
+
+  table->name = ((char *)table) + sizeof(xb_filter_entry_t);
+  strcpy(table->name, dest_space_name);
+  HASH_INSERT(xb_filter_entry_t, name_hash, inc_dir_tables_hash,
+              ut::hash_string(table->name), table);
+}
+
 /***********************************************************************
 Searches for matching tablespace file for given .delta file and space_id
 in given directory. When matching tablespace found, renames it to match the
@@ -5401,7 +5418,6 @@ static pfs_os_file_t xb_delta_open_matching_space(
   char dest_space_name[FN_REFLEN * 2 + 1];
   bool ok;
   pfs_os_file_t file = XB_FILE_UNDEFINED;
-  xb_filter_entry_t *table;
   fil_space_t *fil_space;
   space_id_t f_space_id;
   os_file_create_t create_option = OS_FILE_OPEN;
@@ -5438,14 +5454,7 @@ static pfs_os_file_t xb_delta_open_matching_space(
 
   /* remember space name used by incremental prepare. This hash is later used to
   detect the dropped tablespaces and remove them. Check rm_if_not_found() */
-  table = static_cast<xb_filter_entry_t *>(ut::malloc_withkey(
-      UT_NEW_THIS_FILE_PSI_KEY,
-      sizeof(xb_filter_entry_t) + strlen(dest_space_name) + 1));
-
-  table->name = ((char *)table) + sizeof(xb_filter_entry_t);
-  strcpy(table->name, dest_space_name);
-  HASH_INSERT(xb_filter_entry_t, name_hash, inc_dir_tables_hash,
-              ut::hash_string(table->name), table);
+  xb_delta_add_to_hash(dest_space_name);
 
   if (space_id != SPACE_UNKNOWN && !fsp_is_ibd_tablespace(space_id)) {
     /* since undo tablespaces cannot be renamed, we must either open existing
@@ -5631,7 +5640,7 @@ exit:
 /************************************************************************
 Applies a given .delta file to the corresponding data file.
 @return true on success */
-static bool xtrabackup_apply_delta(
+bool xtrabackup_apply_delta(
     const datadir_entry_t &entry, /*!<in: datadir entry */
     void * /*data*/) {
   pfs_os_file_t src_file = XB_FILE_UNDEFINED;
@@ -5987,8 +5996,10 @@ bool xb_process_datadir(const char *path,   /*!<in: datadir path */
 Applies all .delta files from incremental_dir to the full backup.
 @return true on success. */
 static bool xtrabackup_apply_deltas() {
-  return xb_process_datadir(xtrabackup_incremental_dir, ".delta",
-                            xtrabackup_apply_delta, NULL);
+  bool ret = run_data_threads(xtrabackup_incremental_dir, ".delta",
+                              xtrabackup_apply_deltas_parallel,
+                              xtrabackup_parallel, "apply-delta");
+  return ret;
 }
 
 /* replace log file in redo directory to xtrabackup_log
