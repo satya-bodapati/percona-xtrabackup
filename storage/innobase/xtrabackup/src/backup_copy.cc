@@ -2439,6 +2439,7 @@ static void stream_thread_func(datadir_thread_ctxt_t *ctx) {
       // Open the file for reading
       RocksDBMetaInfo meta_info;
       if (!read_and_verify_json_rocksdb_meta_file(entry.path, meta_info)) {
+        ret = false;
         goto cleanup;
       }
 
@@ -2450,11 +2451,13 @@ static void stream_thread_func(datadir_thread_ctxt_t *ctx) {
 
       if (!(ret = copy_file(ds_stream, meta_info.file_path.c_str(),
                             dest.c_str(), ctx->n_thread, file_purpose))) {
+        ret = false;
         goto cleanup;
       }
     } else {
       if (!(ret = copy_file(ds_stream, entry.path.c_str(), entry.path.c_str(),
                             ctx->n_thread, file_purpose))) {
+        ret = false;
         goto cleanup;
       }
     }
