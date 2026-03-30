@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xb_dict.h"
 #include <dd/properties.h>
 #include <sql_class.h>
+#include <fstream>
 #include <memory>
 #include <unordered_map>
 #include "backup_mysql.h"
@@ -48,6 +49,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "storage/innobase/include/btr0pcur.h"
 #include "storage/innobase/include/dict0dd.h"
 #include "xb0xb.h"
+#include "xtrabackup.h"
 
 namespace xb {
 // Dictionary used by backup phase. Currently we query running server to know
@@ -341,44 +343,47 @@ static bool has_default(dd::Column *dd_col) {
   return !dd_col->has_no_default() && !dd_col->is_auto_increment();
 }
 
-static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
+static void show_create_table(space_id_t space_id, dd::Table *dd_table,
+                              const dd::String_type &schema_name) {
   if (space_id == dict_sys_t::s_dict_space_id) {
-    // mysql.ibd, skip
     return;
   }
 
-  std::ostringstream ss;
-
-  // Here we have dd::Table, can we deserialize to schema just using
-  // dd::Table?
-  xb::error() << "------------------------------------------";
   dd::Table &tbl = *dd_table;
-  ss << "CREATE TABLE " << tbl.name().c_str() << " (" << std::endl;
+  std::ostringstream ss;
+  bool first_col = true;
 
-  // xb::error() << "Table character set is: " <<
-  // dd_get_mysql_charset(tbl.collation_id())->csname;
-  xb::error() << "Table options are " << tbl.options().raw_string();
+  ss << "CREATE TABLE " << tbl.name().c_str() << " (\n";
 
   for (const auto col : *tbl.columns()) {
     if (col->is_se_hidden()) continue;
 
-    if (col != (*tbl.columns()).front()) ss << ",\n";
+    if (!first_col) ss << ",\n";
+    first_col = false;
 
     ss << "  " << col->name().c_str() << " " << col->column_type_utf8();
+
     if (col->is_explicit_collation()) {
       const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
-      ss << " CHARSET " << cs->csname;
+      ss << " CHARACTER SET " << cs->csname;
       ss << " COLLATE " << cs->m_coll_name;
-    }
-
-    if (has_default(col)) {
-      ss << " DEFAULT";
     }
 
     if (col->is_nullable()) {
       ss << " NULL";
     } else {
       ss << " NOT NULL";
+    }
+
+    if (has_default(col)) {
+      ss << " DEFAULT";
+      if (!col->default_option().empty()) {
+        ss << " " << col->default_option();
+      } else if (col->is_default_value_utf8_null()) {
+        ss << " NULL";
+      } else {
+        ss << " '" << col->default_value_utf8() << "'";
+      }
     }
 
     if (col->is_auto_increment()) {
@@ -388,48 +393,9 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
     if (col->hidden() == dd::Column::enum_hidden_type::HT_HIDDEN_USER) {
       ss << " /*!80023 INVISIBLE */";
     }
-
-    //		   xb::error() << "~~~~~~~~~~~~~~~~~~";
-    //			 xb::error() << "col options: " <<
-    // col->options().raw_string();
-
-    //			 xb::error() << "col engine attribute: " <<
-    // col->engine_attribute().str;
-    if (col->generation_expression() != "") {
-      //			 xb::error() << "col is_generated: " <<
-      // col->generation_expression();
-      if (col->is_virtual()) {
-        //					 xb::error() << "col is
-        // VIRTUAL";
-      } else {
-        //					 xb::error() << "col is STORED";
-      }
-    }
-    // xb::error() << "col get_srid: " << col->srs_id();
-    //			 xb::error() << "column default value: " <<
-    // col->default_value_utf8(); 			 xb::error() << "column
-    // default value null?: "
-    //<< col->is_default_value_utf8_null(); 	 xb::error() << "col
-    // is_auto_increment: " << col->is_auto_increment();
-    //			 if (col->is_auto_increment()) xb::error() <<
-    //"column is AUTO_INCREMENT"; 			 xb::error() << "column
-    // ON_UPDATE CLAUSE: "
-    //<< col->update_option(); 			xb::error() << "column hidden
-    // status:
-    //"
-    //<<
-    // static_cast<std::underlying_type<dd::Column::enum_hidden_type>::type>(col->hidden());
-    //			xb::error() << "column comment: " <<
-    // col->comment(); 			xb::error() << "column engine attribute:
-    // "
-    // << col->engine_attribute().str; 			xb::error() << "col
-    // secondary engine attribute: " << col->secondary_engine_attribute().str;
   }
 
   for (const auto key : *tbl.indexes()) {
-    // xb::error() << "KEY name: " << key->name();
-    // xb::error() << "KEY attributes: "  << key->type();
-
     if (key->is_hidden()) continue;
 
     bool found_primary = false;
@@ -453,114 +419,39 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table) {
 
     ss << " (";
 
+    bool first_elem = true;
     for (const auto key_elem : key->elements()) {
-      if (!key_elem->is_hidden()) {
-        // TODO: functional indexes
-        ss << key_elem->column().name();
+      if (key_elem->is_hidden()) continue;
 
-        if (key_elem != key->elements().front()) ss << ",";
-      }
-      // xb::error() << "key elem is_asc/dsc?: " << key_elem->order();
+      if (!first_elem) ss << ",";
+      first_elem = false;
+
+      ss << key_elem->column().name();
     }
 
     ss << ")";
-
-    // parser is in the key options.
   }
 
-  ss << "\n";
-#if 0
-    for (const dd::Foreign_key *fk : *tbl.foreign_keys()) {
-			ss << "blah.. ";
-      ss << "CONSTRAINT ";
-      ss << fk->name() << " FOREIGN KEY (";
-
-      bool first = true;
-      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
-        if (!first)
-          ss << ", ";
-        else
-          first = false;
-        ss << fk_el->column().name();
-      }
-
-      ss << ") REFERENCES ";
-
-      ss << fk->referenced_table_schema_name() << '.'
-         << fk->referenced_table_name() << " (";
-
-      first = true;
-      for (const dd::Foreign_key_element *fk_el : fk->elements()) {
-        if (!first)
-          ss << ", ";
-        else
-          first = false;
-        ss << fk_el->referenced_column_name();
-      }
-      ss << ")";
-
-      switch (fk->delete_rule()) {
-        case dd::Foreign_key::RULE_NO_ACTION:
-          // Don't print clause when default is used.
-          break;
-        case dd::Foreign_key::RULE_RESTRICT:
-          ss << " ON DELETE RESTRICT";
-          break;
-        case dd::Foreign_key::RULE_CASCADE:
-          ss << " ON DELETE CASCADE";
-          break;
-        case dd::Foreign_key::RULE_SET_NULL:
-          ss << " ON DELETE SET NULL";
-          break;
-        case dd::Foreign_key::RULE_SET_DEFAULT:
-          // Future-proofing, we don't support this now.
-          ss << " ON DELETE SET DEFAULT";
-          break;
-        default:
-          assert(0);
-          break;
-      }
-      switch (fk->update_rule()) {
-        case dd::Foreign_key::RULE_NO_ACTION:
-          // Don't print clause when default is used.
-          break;
-        case dd::Foreign_key::RULE_RESTRICT:
-          ss << " ON UPDATE RESTRICT";
-          break;
-        case dd::Foreign_key::RULE_CASCADE:
-          ss << " ON UPDATE CASCADE";
-          break;
-        case dd::Foreign_key::RULE_SET_NULL:
-          ss << " ON UPDATE SET NULL";
-          break;
-        case dd::Foreign_key::RULE_SET_DEFAULT:
-          // Future-proofing, we don't support this now.
-          ss << " ON UPDATE SET DEFAULT";
-          break;
-        default:
-          assert(0);
-          break;
-      }
-    }
-
-    for (auto &cc : *tbl.check_constraints()) {
-      ss << ", CONSTRAINT";
-      ss << cc->name() << " CHECK (" << cc->check_clause() << ")";
-      if (cc->constraint_state() == dd::Check_constraint::CS_NOT_ENFORCED) {
-        ss << " /*!80016 NOT ENFORCED */";
-      }
-    }
-#endif
-  ss << ") ENGINE=" << tbl.engine().c_str();
+  ss << "\n) ENGINE=" << tbl.engine().c_str();
   const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
   ss << " DEFAULT CHARSET=" << cs->csname;
   ss << " COLLATE=" << cs->m_coll_name;
 
-  ss << "\n";
-  ss.flush();
-  std::cout << "\nCREATE TABLE is: \n" << ss.str().c_str();
+  ss << ";\n";
 
-  xb::error() << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%";
+  if (xtrabackup_export) {
+    std::string path = std::string(xtrabackup_real_target_dir) + "/" +
+                       std::string(schema_name.c_str()) + "/" +
+                       std::string(tbl.name().c_str()) + ".sql";
+    std::ofstream sql_file(path);
+    if (sql_file.is_open()) {
+      sql_file << ss.str();
+      sql_file.close();
+      DBUG_LOG("xb_schema", "wrote " << path);
+    } else {
+      xb::error() << "cannot write schema file " << path;
+    }
+  }
 }
 
 /** Load all InnoDB tables from space_id. There could be multiple tables
@@ -681,7 +572,7 @@ static dberr_t dict_load_tables_from_space_id_low(
       return DB_ERROR;
     }
 
-    show_create_table(space_id, dd_table.get());
+    show_create_table(space_id, dd_table.get(), schema_name);
 
     bool is_part = dd_table_is_partitioned(*dd_table.get());
 
