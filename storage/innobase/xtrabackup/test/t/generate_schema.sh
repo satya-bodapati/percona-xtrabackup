@@ -148,6 +148,17 @@ mysql -e "CREATE TABLE t7 (
 ) ENGINE=InnoDB" test
 add_test_table t7
 
+# t8: check constraints (enforced and not enforced)
+mysql -e "CREATE TABLE t8 (
+  id INT NOT NULL AUTO_INCREMENT,
+  age INT NOT NULL,
+  status ENUM('active','inactive') NOT NULL DEFAULT 'active',
+  PRIMARY KEY (id),
+  CONSTRAINT chk_age CHECK (age >= 0 AND age <= 150),
+  CONSTRAINT chk_status CHECK (status IN ('active','inactive')) /*!80016 NOT ENFORCED */
+) ENGINE=InnoDB" test
+add_test_table t8
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

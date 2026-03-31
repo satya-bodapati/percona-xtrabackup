@@ -37,7 +37,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "sql/dd/impl/types/table_impl.h"
 #include "sql/dd/properties.h"  // dd::Properties
 #include "sql/dd/string_type.h"
-#include "sql/dd/types/column.h"  // dd::Column
+#include "sql/dd/types/check_constraint.h"  // dd::Check_constraint
+#include "sql/dd/types/column.h"            // dd::Column
 #include "sql/dd/types/column_type_element.h"
 #include "sql/dd/types/foreign_key.h"          // dd::Foreign_key
 #include "sql/dd/types/foreign_key_element.h"  // dd::Foreign_key_element
@@ -343,6 +344,20 @@ static bool has_default(dd::Column *dd_col) {
   return !dd_col->has_no_default() && !dd_col->is_auto_increment();
 }
 
+static std::string unescape_dd_string(const dd::String_type &s) {
+  std::string result;
+  result.reserve(s.length());
+  for (size_t i = 0; i < s.length(); i++) {
+    if (s[i] == '\\' && i + 1 < s.length()) {
+      result += s[i + 1];
+      i++;
+    } else {
+      result += s[i];
+    }
+  }
+  return result;
+}
+
 static const char *fk_rule_str(dd::Foreign_key::enum_rule rule) {
   switch (rule) {
     case dd::Foreign_key::RULE_RESTRICT:
@@ -559,6 +574,14 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     if (del_rule) ss << " ON DELETE " << del_rule;
     const char *upd_rule = fk_rule_str(fk->update_rule());
     if (upd_rule) ss << " ON UPDATE " << upd_rule;
+  }
+
+  for (const auto cc : *tbl.check_constraints()) {
+    ss << ",\n  CONSTRAINT " << cc->name() << " CHECK ("
+       << unescape_dd_string(cc->check_clause_utf8()) << ")";
+    if (cc->constraint_state() == dd::Check_constraint::CS_NOT_ENFORCED) {
+      ss << " /*!80016 NOT ENFORCED */";
+    }
   }
 
   ss << "\n) ENGINE=" << tbl.engine().c_str();
