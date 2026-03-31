@@ -369,13 +369,23 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       ss << " COLLATE " << cs->m_coll_name;
     }
 
+    bool is_gcol = !col->is_generation_expression_utf8_null();
+    if (is_gcol) {
+      ss << " GENERATED ALWAYS AS (" << col->generation_expression_utf8()
+         << ")";
+      if (col->is_virtual())
+        ss << " VIRTUAL";
+      else
+        ss << " STORED";
+    }
+
     if (col->is_nullable()) {
       ss << " NULL";
     } else {
       ss << " NOT NULL";
     }
 
-    if (has_default(col)) {
+    if (!is_gcol && has_default(col)) {
       ss << " DEFAULT";
       if (!col->default_option().empty()) {
         ss << " " << col->default_option();

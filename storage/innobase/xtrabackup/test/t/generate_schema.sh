@@ -3,24 +3,60 @@
 # from SDI (Serialized Dictionary Information) in InnoDB tablespaces.
 #
 # Verification approach:
-#   1. Create table on server
+#   1. Create tables on server
 #   2. mysqldump --no-data to capture original schema
 #   3. Backup + prepare --export (generates .sql from SDI)
-#   4. Drop table, recreate from generated .sql
+#   4. Drop tables, recreate from generated .sql
 #   5. mysqldump --no-data to capture recreated schema
-#   6. diff the two mysqldump outputs
+#   6. diff the two mysqldump outputs per table
 ########################################################################
 
 . inc/common.sh
 
+TABLES=""
+
+function add_test_table() {
+    local tbl=$1
+    TABLES="$TABLES $tbl"
+}
+
+function verify_roundtrip() {
+    # Capture original schema for all test tables
+    for tbl in $TABLES; do
+        ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
+            test $tbl > $topdir/original_${tbl}.sql
+    done
+
+    # Backup
+    xtrabackup --backup --target-dir=$topdir/backup
+
+    # Prepare with --export to generate .sql files from SDI
+    xtrabackup --prepare --export --target-dir=$topdir/backup
+
+    # For each table: verify .sql was generated, drop, recreate, diff
+    for tbl in $TABLES; do
+        if [ ! -f "$topdir/backup/test/${tbl}.sql" ]; then
+            vlog "ERROR: ${tbl}.sql was not generated in backup directory"
+            exit -1
+        fi
+
+        vlog "Generated ${tbl}.sql contents:"
+        cat $topdir/backup/test/${tbl}.sql >&2
+
+        mysql -e "DROP TABLE $tbl" test
+        mysql test < $topdir/backup/test/${tbl}.sql
+
+        ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
+            test $tbl > $topdir/recreated_${tbl}.sql
+
+        run_cmd diff -u $topdir/original_${tbl}.sql $topdir/recreated_${tbl}.sql
+        vlog "generate_schema: $tbl roundtrip passed"
+    done
+}
+
 start_server
 
-# Create test tables exercising features the current code handles:
-# - NOT NULL / NULL columns
-# - AUTO_INCREMENT
-# - PRIMARY KEY, secondary KEY
-# - Multiple column types
-
+# t1: basic columns, AUTO_INCREMENT, PRIMARY KEY, secondary KEY
 mysql -e "CREATE TABLE t1 (
   a INT NOT NULL AUTO_INCREMENT,
   b INT NOT NULL,
@@ -28,35 +64,17 @@ mysql -e "CREATE TABLE t1 (
   PRIMARY KEY (a),
   KEY idx_b (b)
 ) ENGINE=InnoDB" test
+add_test_table t1
 
-# Capture original schema
-${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
-  test t1 > $topdir/original_schema.sql
+# t2: generated columns (virtual and stored)
+mysql -e "CREATE TABLE t2 (
+  a INT NOT NULL,
+  b INT GENERATED ALWAYS AS (a * 2) VIRTUAL,
+  c INT GENERATED ALWAYS AS (a + 1) STORED,
+  PRIMARY KEY (a)
+) ENGINE=InnoDB" test
+add_test_table t2
 
-# Backup
-xtrabackup --backup --target-dir=$topdir/backup
+verify_roundtrip
 
-# Prepare with --export to generate .sql files from SDI
-xtrabackup --prepare --export --target-dir=$topdir/backup
-
-# Verify the .sql file was generated
-if [ ! -f "$topdir/backup/test/t1.sql" ]; then
-    vlog "ERROR: t1.sql was not generated in backup directory"
-    exit -1
-fi
-
-vlog "Generated t1.sql contents:"
-cat $topdir/backup/test/t1.sql >&2
-
-# Drop original table and recreate from generated .sql
-mysql -e "DROP TABLE t1" test
-mysql test < $topdir/backup/test/t1.sql
-
-# Capture schema of the recreated table
-${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
-  test t1 > $topdir/recreated_schema.sql
-
-# Compare: if generated DDL is correct, both schemas must be identical
-run_cmd diff -u $topdir/original_schema.sql $topdir/recreated_schema.sql
-
-vlog "generate_schema: schema roundtrip test passed"
+vlog "generate_schema: all tests passed"
