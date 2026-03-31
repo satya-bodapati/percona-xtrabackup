@@ -250,4 +250,13 @@ void clear_dd_cache_maps();
 }  // namespace prepare
 
 }  // namespace xb
+
+/** Read SDI from a single .ibd file and generate SQL.
+@param[in] ibd_path  path to the .ibd file */
+void xb_sdi_to_sql_single_file(const char *ibd_path);
+
+/** Read SDI from all .ibd files in a directory and generate SQL.
+@param[in] dir_path  path to the database directory */
+void xb_sdi_to_sql_database_dir(const char *dir_path);
+
 #endif

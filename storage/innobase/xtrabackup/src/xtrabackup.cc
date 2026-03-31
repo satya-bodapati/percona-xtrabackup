@@ -159,6 +159,10 @@ bool xtrabackup_print_param = false;
 bool xtrabackup_export = false;
 bool xtrabackup_apply_log_only = false;
 
+bool xtrabackup_sdi_to_sql = false;
+const char *xtrabackup_ibd_file = nullptr;
+const char *xtrabackup_database_dir = nullptr;
+
 longlong xtrabackup_use_memory = 100 * 1024 * 1024L;
 bool xtrabackup_use_memory_set = false;
 uint xtrabackup_use_free_memory_pct = 0;
@@ -770,6 +774,10 @@ enum options_xtrabackup {
   OPT_XTRA_TABLES_COMPATIBILITY_CHECK,
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
+
+  OPT_XTRA_SDI_TO_SQL,
+  OPT_XTRA_IBD_FILE,
+  OPT_XTRA_DATABASE_DIR,
 };
 
 struct my_option xb_client_options[] = {
@@ -1405,6 +1413,20 @@ struct my_option xb_client_options[] = {
      "Maximum count of ROCKSB checkpoints.", &opt_rocksdb_checkpoint_max_count,
      &opt_rocksdb_checkpoint_max_count, 0, GET_INT, REQUIRED_ARG, 0, 0, INT_MAX,
      0, 0, 0},
+
+    {"sdi-to-sql", OPT_XTRA_SDI_TO_SQL,
+     "Read SDI from .ibd files and generate CREATE TABLE SQL.",
+     (G_PTR *)&xtrabackup_sdi_to_sql, (G_PTR *)&xtrabackup_sdi_to_sql, 0,
+     GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"ibd-file", OPT_XTRA_IBD_FILE,
+     "Path to a single .ibd file (use with --sdi-to-sql).",
+     (G_PTR *)&xtrabackup_ibd_file, (G_PTR *)&xtrabackup_ibd_file, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"database-dir", OPT_XTRA_DATABASE_DIR,
+     "Path to a database directory containing .ibd files (use with "
+     "--sdi-to-sql).",
+     (G_PTR *)&xtrabackup_database_dir, (G_PTR *)&xtrabackup_database_dir, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
@@ -7843,6 +7865,30 @@ int main(int argc, char **argv) {
                  &server_defaults);
 
   print_version();
+
+  if (xtrabackup_sdi_to_sql) {
+    if (!xtrabackup_ibd_file && !xtrabackup_database_dir) {
+      xb::error() << "--sdi-to-sql requires either --ibd-file or "
+                      "--database-dir";
+      exit(EXIT_FAILURE);
+    }
+    if (xtrabackup_ibd_file && xtrabackup_database_dir) {
+      xb::error() << "--ibd-file and --database-dir are mutually exclusive";
+      exit(EXIT_FAILURE);
+    }
+
+    ut_crc32_init();
+    init_mysql_environment();
+    my_thread_init();
+    create_internal_thd();
+
+    if (xtrabackup_ibd_file) {
+      xb_sdi_to_sql_single_file(xtrabackup_ibd_file);
+    } else {
+      xb_sdi_to_sql_database_dir(xtrabackup_database_dir);
+    }
+    exit(EXIT_SUCCESS);
+  }
 
   atexit(destroy_error_log);
 

@@ -20,6 +20,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xb_dict.h"
 #include <dd/properties.h>
 #include <sql_class.h>
+#include <zlib.h>
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <unordered_map>
@@ -27,6 +30,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "include/api0api.h"
 #include "include/api0misc.h"
 #include "include/dict0sdi-decompress.h"
+#include "include/fsp0fsp.h"
+#include "include/lob0lob.h"
+#include "include/mach0data.h"
+#include "include/page0page.h"
+#include "include/page0zip.h"
 #include "sql/current_thd.h"
 #include "sql/dd/dd.h"
 #include "sql/dd/dd_schema.h"  // dd::Schema_MDL_locker
@@ -47,7 +55,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "sql/dd/types/partition_value.h"
 #include "sql/dd/types/schema.h"
 #include "sql/dd/types/table.h"
-#include "sql/dd/types/table.h"  // dd::Table
+#include "sql/dd/types/table.h"        // dd::Table
+#include "sql/dd/types/tablespace.h"   // dd::Tablespace
+#include "sql/dd/types/tablespace_file.h"
 #include "storage/innobase/include/btr0pcur.h"
 #include "storage/innobase/include/dict0dd.h"
 #include "xb0xb.h"
@@ -412,13 +422,597 @@ static const char *fk_rule_str(dd::Foreign_key::enum_rule rule) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Raw SDI reader adapted from utilities/ibd2sdi.cc.
+// Reads SDI directly from .ibd files using my_open/my_read -- no InnoDB
+// buffer pool, AIO, or fil_system required.
+// ---------------------------------------------------------------------------
+namespace sdi_reader {
+
+static const uint32_t REC_DATA_ID_LEN = 8;
+static const uint32_t REC_DATA_TYPE_LEN = 4;
+static const uint32_t REC_DATA_UNCOMP_LEN = 4;
+static const uint32_t REC_DATA_COMP_LEN = 4;
+static const uint32_t REC_ORIGIN = 0;
+static const uint32_t REC_OFF_TYPE = 3;
+static const uint32_t REC_OFF_NEXT = 2;
+static const uint32_t REC_OFF_DATA_TYPE = REC_ORIGIN;
+static const uint32_t REC_OFF_DATA_ID = REC_OFF_DATA_TYPE + REC_DATA_TYPE_LEN;
+static const uint32_t REC_OFF_DATA_TRX_ID = REC_OFF_DATA_ID + REC_DATA_ID_LEN;
+static const uint32_t REC_OFF_DATA_ROLL_PTR =
+    REC_OFF_DATA_TRX_ID + DATA_TRX_ID_LEN;
+static const uint32_t REC_OFF_DATA_UNCOMP_LEN =
+    REC_OFF_DATA_ROLL_PTR + DATA_ROLL_PTR_LEN;
+static const uint32_t REC_OFF_DATA_COMP_LEN =
+    REC_OFF_DATA_UNCOMP_LEN + REC_DATA_UNCOMP_LEN;
+static const uint32_t REC_OFF_DATA_VARCHAR =
+    REC_OFF_DATA_COMP_LEN + REC_DATA_COMP_LEN;
+
+static const uint32_t REC_MIN_HDR_SIZE = REC_N_NEW_EXTRA_BYTES;
+
+static const uint32_t SDI_REC_SIZE = 1 + REC_N_NEW_EXTRA_BYTES +
+                                     REC_DATA_TYPE_LEN + REC_DATA_ID_LEN +
+                                     DATA_ROLL_PTR_LEN + DATA_TRX_ID_LEN;
+
+static const uint64_t IB_ERROR_VAL = SIZE_T_MAX;
+static const uint32_t IB_ERROR_32 = (~((uint32_t)0));
+static const uint64_t SDI_BLOB_ALLOWED = 4;
+static const page_no_t MAX_PAGES_TO_SCAN = 60;
+
+struct SdiRecord {
+  uint64_t type;
+  uint64_t id;
+  std::string data;
+};
+
+struct ib_file_t {
+  page_no_t first_page_num;
+  page_no_t tot_num_of_pages;
+  File file_handle;
+};
+
+static bool seek_to_page(File file_in, const page_size_t &page_size,
+                         page_no_t page_num) {
+  my_off_t offset = page_num * page_size.physical();
+  if (my_seek(file_in, offset, MY_SEEK_SET, MYF(0)) == MY_FILEPOS_ERROR) {
+    xb::error() << "sdi_reader: unable to seek to offset " << offset;
+    return false;
+  }
+  return true;
+}
+
+static size_t read_page(page_no_t page_num, const page_size_t &page_size,
+                        uint32_t buf_len, byte *buf, File file_in) {
+  if (!seek_to_page(file_in, page_size, page_num)) return IB_ERROR_VAL;
+  size_t physical_page_size = static_cast<size_t>(page_size.physical());
+  ut_ad(buf_len >= physical_page_size);
+  return my_read(file_in, buf, physical_page_size, MYF(0));
+}
+
+class ib_tablespace {
+ public:
+  ib_tablespace(space_id_t space_id, const page_size_t &page_size)
+      : m_space_id(space_id),
+        m_page_size(page_size),
+        m_max_recs_per_page(page_size.logical() / SDI_REC_SIZE),
+        m_sdi_root(0),
+        m_tot_pages(0) {}
+
+  ~ib_tablespace() {
+    for (auto &f : m_file_vec) {
+      if (f.file_handle != -1) my_close(f.file_handle, MYF(0));
+    }
+  }
+
+  void add_data_file(const ib_file_t &df) {
+    m_file_vec.push_back(df);
+    m_page_num_recs.resize(m_page_num_recs.size() + df.tot_num_of_pages, 0);
+    m_tot_pages += df.tot_num_of_pages;
+  }
+
+  void set_sdi_root(page_no_t root) { m_sdi_root = root; }
+  page_no_t get_sdi_root() const { return m_sdi_root; }
+  space_id_t get_space_id() const { return m_space_id; }
+  const page_size_t &get_page_size() const { return m_page_size; }
+  page_no_t get_tot_pages() const { return m_tot_pages; }
+  uint64_t get_max_recs_per_page() const { return m_max_recs_per_page; }
+
+  File get_file_handle_for_page(page_no_t page_num,
+                                page_no_t *offset) const {
+    for (auto &f : m_file_vec) {
+      if (page_num < f.first_page_num + f.tot_num_of_pages) {
+        *offset = page_num - f.first_page_num;
+        return f.file_handle;
+      }
+    }
+    *offset = FIL_NULL;
+    return -1;
+  }
+
+  bool inc_num_of_recs_on_page(page_no_t page_num) {
+    ut_ad(page_num < m_page_num_recs.size());
+    if (++m_page_num_recs[page_num] > m_max_recs_per_page) {
+      xb::error() << "sdi_reader: too many records on page " << page_num;
+      return true;
+    }
+    return false;
+  }
+
+ private:
+  space_id_t m_space_id;
+  page_size_t m_page_size;
+  std::vector<ib_file_t> m_file_vec;
+  std::vector<uint64_t> m_page_num_recs;
+  uint64_t m_max_recs_per_page;
+  page_no_t m_sdi_root;
+  page_no_t m_tot_pages;
+};
+
+static size_t fetch_page(ib_tablespace *ts, page_no_t page_num,
+                         uint32_t buf_len, byte *buf) {
+  if (page_num >= ts->get_tot_pages()) {
+    xb::error() << "sdi_reader: invalid page number " << page_num;
+    return IB_ERROR_VAL;
+  }
+  page_no_t offset_in_file;
+  File file_in = ts->get_file_handle_for_page(page_num, &offset_in_file);
+  if (file_in == -1) return IB_ERROR_VAL;
+
+  const page_size_t &page_size = ts->get_page_size();
+  memset(buf, 0, page_size.physical());
+
+  size_t n_bytes = read_page(offset_in_file, page_size, buf_len, buf, file_in);
+  if (n_bytes == IB_ERROR_VAL) return IB_ERROR_VAL;
+
+  if (page_size.is_compressed() && fil_page_get_type(buf) == FIL_PAGE_SDI) {
+    byte *uncomp_buf =
+        static_cast<byte *>(ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY,
+                                               2 * page_size.logical()));
+    byte *uncomp_page =
+        static_cast<byte *>(ut_align(uncomp_buf, page_size.logical()));
+    memset(uncomp_page, 0, page_size.logical());
+    page_zip_des_t page_zip;
+    page_zip_des_init(&page_zip);
+    page_zip.data = buf;
+    page_zip.ssize = page_size_to_ssize(page_size.physical());
+    if (!page_zip_decompress_low(&page_zip, uncomp_page, true)) {
+      ut::free(uncomp_buf);
+      return IB_ERROR_VAL;
+    }
+    memcpy(buf, uncomp_page, page_size.logical());
+    ut::free(uncomp_buf);
+  }
+  return n_bytes;
+}
+
+static page_no_t get_sdi_root_page_num(byte *buf,
+                                       const page_size_t &page_size) {
+  ulint sdi_offset = fsp_header_get_sdi_offset(page_size);
+  uint32_t version = mach_read_from_4(buf + sdi_offset);
+  if (version != SDI_VERSION) {
+    xb::warn() << "sdi_reader: unexpected SDI version " << version;
+  }
+  return mach_read_from_4(buf + sdi_offset + 4);
+}
+
+static bool check_sdi(ib_tablespace *ts, page_no_t &root) {
+  root = IB_ERROR_32;
+  byte buf[UNIV_PAGE_SIZE_MAX];
+  if (fetch_page(ts, 0, UNIV_PAGE_SIZE_MAX, buf) == IB_ERROR_VAL) {
+    xb::error() << "sdi_reader: cannot read page 0";
+    return true;
+  }
+
+  ulint space_flags = fsp_header_get_flags(buf);
+  bool has_sdi = FSP_FLAGS_HAS_SDI(space_flags);
+  page_no_t sdi_root = get_sdi_root_page_num(buf, ts->get_page_size());
+
+  if (sdi_root == 0) {
+    xb::error() << "sdi_reader: SDI root page is 0 (flags="
+                << space_flags << ", has_sdi=" << has_sdi << ")";
+    return true;
+  }
+  if (!has_sdi) {
+    xb::warn() << "sdi_reader: SDI flag not set but found SDI root "
+               << sdi_root;
+  }
+  root = sdi_root;
+  return false;
+}
+
+static byte get_rec_type(byte *rec) { return *(rec - REC_OFF_TYPE) & 0x7; }
+
+static byte *get_first_user_rec(ib_tablespace *ts, uint32_t buf_len,
+                                byte *buf);
+static byte *get_next_rec(ib_tablespace *ts, byte *current_rec,
+                          uint32_t buf_len, byte *buf, bool *corrupt);
+
+static uint64_t read_page_and_return_level(ib_tablespace *ts, uint32_t buf_len,
+                                           byte *buf, page_no_t page_num) {
+  if (fetch_page(ts, page_num, buf_len, buf) == IB_ERROR_VAL) return UINT64_MAX;
+  ulint page_type = fil_page_get_type(buf);
+  if (page_type != FIL_PAGE_SDI) return UINT64_MAX;
+  return mach_read_from_2(buf + FIL_PAGE_DATA + PAGE_LEVEL);
+}
+
+enum sdi_err_t { SDI_SUCCESS, SDI_FAILURE, SDI_NO_RECORDS };
+
+static sdi_err_t reach_to_leftmost_leaf(ib_tablespace *ts, uint32_t buf_len,
+                                        byte *buf, page_no_t root_page_num) {
+  uint64_t page_level =
+      read_page_and_return_level(ts, buf_len, buf, root_page_num);
+  if (page_level == UINT64_MAX) return SDI_FAILURE;
+
+  ulint num_recs = mach_read_from_2(buf + FIL_PAGE_DATA + PAGE_N_RECS);
+  if (num_recs == 0) return SDI_NO_RECORDS;
+  if (page_level == 0) return SDI_SUCCESS;
+
+  while (page_level != 0 && page_level != UINT64_MAX) {
+    byte rec_type_byte = *(buf + PAGE_NEW_INFIMUM - REC_OFF_TYPE);
+    if ((rec_type_byte & 0x7) != REC_STATUS_INFIMUM) break;
+    ulint next_rec_off =
+        mach_read_from_2(buf + PAGE_NEW_INFIMUM - REC_OFF_NEXT);
+    page_no_t child_page_num =
+        mach_read_from_4(buf + PAGE_NEW_INFIMUM + next_rec_off +
+                         REC_DATA_TYPE_LEN + REC_DATA_ID_LEN);
+    if (child_page_num < SDI_BLOB_ALLOWED) return SDI_FAILURE;
+    uint64_t prev_level = page_level;
+    page_level = read_page_and_return_level(ts, buf_len, buf, child_page_num);
+    if (page_level != prev_level - 1) break;
+  }
+  return page_level == 0 ? SDI_SUCCESS : SDI_FAILURE;
+}
+
+static uint64_t copy_uncompressed_blob(ib_tablespace *ts,
+                                       page_no_t first_blob_page,
+                                       uint64_t total_len, byte *dest) {
+  byte page_buf[UNIV_PAGE_SIZE_MAX];
+  uint64_t calc_length = 0;
+  page_no_t next_page = first_blob_page;
+  while (next_page != FIL_NULL) {
+    if (fetch_page(ts, next_page, UNIV_PAGE_SIZE_MAX, page_buf) ==
+        IB_ERROR_VAL)
+      return 0;
+    if (fil_page_get_type(page_buf) != FIL_PAGE_SDI_BLOB) return 0;
+    uint64_t part_len =
+        mach_read_from_4(page_buf + FIL_PAGE_DATA + lob::LOB_HDR_PART_LEN);
+    memcpy(dest + calc_length,
+           page_buf + FIL_PAGE_DATA + lob::LOB_HDR_SIZE,
+           static_cast<size_t>(part_len));
+    calc_length += part_len;
+    next_page = mach_read_from_4(page_buf + FIL_PAGE_DATA +
+                                 lob::LOB_HDR_NEXT_PAGE_NO);
+    if (next_page != FIL_NULL && next_page <= SDI_BLOB_ALLOWED) return 0;
+  }
+  return calc_length;
+}
+
+static uint64_t copy_compressed_blob(ib_tablespace *ts,
+                                     page_no_t first_blob_page,
+                                     uint64_t total_len, byte *dest) {
+  byte page_buf[UNIV_PAGE_SIZE_MAX];
+  page_no_t page_num = first_blob_page;
+  const page_size_t &page_size = ts->get_page_size();
+  z_stream d_stream;
+  d_stream.next_out = dest;
+  d_stream.avail_out = static_cast<uInt>(total_len);
+  d_stream.next_in = Z_NULL;
+  d_stream.avail_in = 0;
+
+  mem_heap_t *heap = mem_heap_create(40000, UT_LOCATION_HERE);
+  page_zip_set_alloc(&d_stream, heap);
+
+  int err = inflateInit(&d_stream);
+  ut_a(err == Z_OK);
+
+  for (;;) {
+    if (fetch_page(ts, page_num, UNIV_PAGE_SIZE_MAX, page_buf) ==
+        IB_ERROR_VAL)
+      break;
+    if (fil_page_get_type(page_buf) != FIL_PAGE_SDI_ZBLOB) break;
+
+    page_no_t next_page = mach_read_from_4(page_buf + FIL_PAGE_NEXT);
+    d_stream.next_in = page_buf + FIL_PAGE_DATA;
+    d_stream.avail_in =
+        static_cast<uInt>(page_size.physical() - FIL_PAGE_DATA);
+    err = inflate(&d_stream, Z_NO_FLUSH);
+    if (err == Z_STREAM_END || !d_stream.avail_out) break;
+    if (err != Z_OK) break;
+
+    if (next_page == FIL_NULL || next_page <= SDI_BLOB_ALLOWED) {
+      if (d_stream.avail_in) inflate(&d_stream, Z_FINISH);
+      break;
+    }
+    page_num = next_page;
+  }
+
+  inflateEnd(&d_stream);
+  mem_heap_free(heap);
+  return d_stream.total_out;
+}
+
+static dberr_t parse_fields_in_rec(ib_tablespace *ts, byte *rec,
+                                   uint64_t *sdi_type, uint64_t *sdi_id,
+                                   byte **sdi_data, uint64_t *sdi_data_len) {
+  if (page_rec_is_infimum(rec) || page_rec_is_supremum(rec))
+    return DB_CORRUPTION;
+
+  *sdi_type = mach_read_from_4(rec + REC_OFF_DATA_TYPE);
+  *sdi_id = mach_read_from_8(rec + REC_OFF_DATA_ID);
+  uint32_t sdi_uncomp_len = mach_read_from_4(rec + REC_OFF_DATA_UNCOMP_LEN);
+  uint32_t sdi_comp_len = mach_read_from_4(rec + REC_OFF_DATA_COMP_LEN);
+
+  byte rec_data_len_partial = *(rec - REC_MIN_HDR_SIZE - 1);
+  uint64_t rec_data_length;
+  bool is_external = false;
+  uint32_t rec_data_in_page_len = 0;
+
+  if (rec_data_len_partial & 0x80) {
+    rec_data_in_page_len = (rec_data_len_partial & 0x3f) << 8;
+    if (rec_data_len_partial & 0x40) {
+      is_external = true;
+      rec_data_length =
+          mach_read_from_8(rec + REC_OFF_DATA_VARCHAR + rec_data_in_page_len +
+                           lob::BTR_EXTERN_LEN);
+      rec_data_length += rec_data_in_page_len;
+    } else {
+      rec_data_length = *(rec - REC_MIN_HDR_SIZE - 2);
+      rec_data_length += rec_data_in_page_len;
+    }
+  } else {
+    rec_data_length = rec_data_len_partial;
+  }
+
+  byte *str = static_cast<byte *>(
+      calloc(static_cast<size_t>(rec_data_length + 1), sizeof(char)));
+  byte *rec_data_origin = rec + REC_OFF_DATA_VARCHAR;
+
+  if (is_external) {
+    if (rec_data_in_page_len != 0)
+      memcpy(str, rec_data_origin, rec_data_in_page_len);
+
+    page_no_t first_blob_page =
+        mach_read_from_4(rec + REC_OFF_DATA_VARCHAR + rec_data_in_page_len +
+                         lob::BTR_EXTERN_PAGE_NO);
+
+    const page_size_t &page_size = ts->get_page_size();
+    if (page_size.is_compressed()) {
+      copy_compressed_blob(ts, first_blob_page,
+                           rec_data_length - rec_data_in_page_len,
+                           str + rec_data_in_page_len);
+    } else {
+      copy_uncompressed_blob(ts, first_blob_page,
+                             rec_data_length - rec_data_in_page_len,
+                             str + rec_data_in_page_len);
+    }
+  } else {
+    memcpy(str, rec_data_origin, static_cast<size_t>(rec_data_length));
+  }
+
+  if (rec_data_length != sdi_comp_len) {
+    free(str);
+    return DB_CORRUPTION;
+  }
+
+  byte *uncompressed_sdi = static_cast<byte *>(calloc(sdi_uncomp_len + 1, 1));
+  Sdi_Decompressor decompressor(uncompressed_sdi, sdi_uncomp_len + 1, str,
+                                sdi_comp_len);
+  decompressor.decompress();
+
+  *sdi_data_len = sdi_uncomp_len + 1;
+  *sdi_data = uncompressed_sdi;
+  free(str);
+  return DB_SUCCESS;
+}
+
+static byte *get_first_user_rec(ib_tablespace *ts, uint32_t buf_len,
+                                byte *buf) {
+  ulint next_rec_off =
+      mach_read_from_2(buf + PAGE_NEW_INFIMUM - REC_OFF_NEXT);
+  if (next_rec_off > buf_len) return nullptr;
+  byte *current_rec = buf + PAGE_NEW_INFIMUM + next_rec_off;
+  ut_ad(static_cast<uint32_t>(current_rec - buf) <= buf_len);
+
+  bool is_comp = page_is_comp(buf);
+  if (rec_get_deleted_flag(current_rec, is_comp) != 0) {
+    bool corrupt;
+    return get_next_rec(ts, current_rec, buf_len, buf, &corrupt);
+  }
+  return current_rec;
+}
+
+static byte *get_next_rec(ib_tablespace *ts, byte *current_rec,
+                          uint32_t buf_len, byte *buf, bool *corrupt) {
+  page_no_t page_num = mach_read_from_4(buf + FIL_PAGE_OFFSET);
+  bool is_comp = page_is_comp(buf);
+  ulint next_rec_offset = rec_get_next_offs(current_rec, is_comp);
+  if (next_rec_offset == 0) {
+    *corrupt = true;
+    return nullptr;
+  }
+  byte *next_rec = buf + next_rec_offset;
+
+  if (rec_get_deleted_flag(next_rec, is_comp) != 0) {
+    return get_next_rec(ts, next_rec, buf_len, buf, corrupt);
+  }
+
+  if (get_rec_type(next_rec) == REC_STATUS_SUPREMUM) {
+    page_no_t next_page_num = mach_read_from_4(buf + FIL_PAGE_NEXT);
+    if (next_page_num == FIL_NULL) {
+      *corrupt = false;
+      return nullptr;
+    }
+    if (fetch_page(ts, next_page_num, buf_len, buf) == IB_ERROR_VAL) {
+      *corrupt = true;
+      return nullptr;
+    }
+    if (fil_page_get_type(buf) != FIL_PAGE_SDI) {
+      *corrupt = true;
+      return nullptr;
+    }
+    if (ts->inc_num_of_recs_on_page(next_page_num)) {
+      *corrupt = true;
+      return nullptr;
+    }
+    next_rec = get_first_user_rec(ts, buf_len, buf);
+  } else {
+    if (ts->inc_num_of_recs_on_page(page_num)) {
+      *corrupt = true;
+      return nullptr;
+    }
+  }
+  *corrupt = false;
+  return next_rec;
+}
+
+static bool get_page_size_from_flags(const byte *buf, File file_in,
+                                     page_size_t &page_size) {
+  const uint32_t flags = fsp_header_get_flags(buf);
+  if (!fsp_flags_is_valid(flags)) return false;
+
+  const ulint ssize = FSP_FLAGS_GET_PAGE_SSIZE(flags);
+  ulong ps = (ssize == 0) ? UNIV_PAGE_SIZE_ORIG
+                           : ((UNIV_ZIP_SIZE_MIN >> 1) << ssize);
+  ulong ps_shift = page_size_validate(ps);
+  if (ps_shift == 0) return false;
+
+  srv_page_size = ps;
+  srv_page_size_shift = ps_shift;
+  univ_page_size.copy_from(page_size_t(srv_page_size, srv_page_size, false));
+  page_size.copy_from(page_size_t(flags));
+  return true;
+}
+
+static std::unique_ptr<ib_tablespace> open_tablespace(const char *filepath) {
+  MY_STAT stat_info;
+  if (my_stat(filepath, &stat_info, MYF(0)) == nullptr) {
+    xb::error() << "sdi_reader: cannot stat " << filepath;
+    return nullptr;
+  }
+
+  uint64_t size = stat_info.st_size;
+  File file_in = my_open(filepath, O_RDONLY, MYF(0));
+  if (file_in == -1) {
+    xb::error() << "sdi_reader: cannot open " << filepath;
+    return nullptr;
+  }
+
+  byte buf[UNIV_ZIP_SIZE_MIN];
+  memset(buf, 0, UNIV_ZIP_SIZE_MIN);
+  size_t bytes = my_read(file_in, buf, UNIV_ZIP_SIZE_MIN, MYF(0));
+  if (bytes != UNIV_ZIP_SIZE_MIN) {
+    my_close(file_in, MYF(0));
+    xb::error() << "sdi_reader: cannot read page header from " << filepath;
+    return nullptr;
+  }
+
+  page_size_t page_size(univ_page_size);
+  if (!get_page_size_from_flags(buf, file_in, page_size)) {
+    my_close(file_in, MYF(0));
+    xb::error() << "sdi_reader: invalid page size in " << filepath;
+    return nullptr;
+  }
+
+  space_id_t space_id =
+      mach_read_from_4(buf + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID);
+  page_no_t pages = static_cast<page_no_t>(size / page_size.physical());
+
+  ib_file_t ibd_file;
+  ibd_file.first_page_num = 0;
+  ibd_file.file_handle = file_in;
+  ibd_file.tot_num_of_pages = pages;
+
+  auto ts = std::make_unique<ib_tablespace>(space_id, page_size);
+  ts->add_data_file(ibd_file);
+
+  page_no_t root;
+  if (check_sdi(ts.get(), root)) {
+    return nullptr;
+  }
+  xb::info() << "sdi_reader: SDI root page = " << root;
+  ts->set_sdi_root(root);
+  return ts;
+}
+
+static std::vector<SdiRecord> read_all_sdi_records(ib_tablespace *ts) {
+  std::vector<SdiRecord> result;
+  const page_size_t &page_size = ts->get_page_size();
+
+  byte buf_unalign[2 * UNIV_PAGE_SIZE_MAX];
+  byte *buf = static_cast<byte *>(ut_align(buf_unalign, page_size.logical()));
+  memset(buf, 0, page_size.logical());
+
+  sdi_err_t err =
+      reach_to_leftmost_leaf(ts, page_size.logical(), buf, ts->get_sdi_root());
+  if (err != SDI_SUCCESS) return result;
+
+  byte *current_rec = get_first_user_rec(ts, page_size.logical(), buf);
+  bool corrupt = false;
+
+  while (current_rec != nullptr &&
+         get_rec_type(current_rec) != REC_STATUS_SUPREMUM && !corrupt) {
+    uint64_t sdi_type, sdi_id;
+    byte *sdi_data = nullptr;
+    uint64_t sdi_data_len = 0;
+
+    dberr_t parse_err =
+        parse_fields_in_rec(ts, current_rec, &sdi_type, &sdi_id,
+                            &sdi_data, &sdi_data_len);
+    if (parse_err == DB_SUCCESS && sdi_data != nullptr) {
+      SdiRecord rec;
+      rec.type = sdi_type;
+      rec.id = sdi_id;
+      rec.data.assign(reinterpret_cast<char *>(sdi_data), sdi_data_len);
+      result.push_back(std::move(rec));
+      free(sdi_data);
+    }
+
+    current_rec =
+        get_next_rec(ts, current_rec, page_size.logical(), buf, &corrupt);
+  }
+  return result;
+}
+
+}  // namespace sdi_reader
+
+/** Read all SDI records from a single .ibd file using raw page I/O.
+@param[in] filepath  path to the .ibd file
+@return vector of SDI records (empty if no SDI found) */
+std::vector<sdi_reader::SdiRecord> xb_read_sdi_from_ibd(
+    const char *filepath) {
+  auto ts = sdi_reader::open_tablespace(filepath);
+  if (!ts) return {};
+  return sdi_reader::read_all_sdi_records(ts.get());
+}
+
+static std::string generate_create_table_sql(dd::Table &tbl,
+                                             const dd::String_type &schema_name);
+
 static void show_create_table(space_id_t space_id, dd::Table *dd_table,
                               const dd::String_type &schema_name) {
   if (space_id == dict_sys_t::s_dict_space_id) {
     return;
   }
 
-  dd::Table &tbl = *dd_table;
+  std::string sql = generate_create_table_sql(*dd_table, schema_name);
+
+  if (xtrabackup_export) {
+    std::string path = std::string(xtrabackup_real_target_dir) + "/" +
+                       std::string(schema_name.c_str()) + "/" +
+                       std::string(dd_table->name().c_str()) + ".sql";
+    std::ofstream sql_file(path);
+    if (sql_file.is_open()) {
+      sql_file << sql;
+      sql_file.close();
+      DBUG_LOG("xb_schema", "wrote " << path);
+    } else {
+      xb::error() << "cannot write schema file " << path;
+    }
+  }
+}
+
+static std::string generate_create_table_sql(
+    dd::Table &tbl, const dd::String_type &schema_name) {
   std::ostringstream ss;
   bool first_col = true;
 
@@ -901,20 +1495,154 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
 
   ss << ";\n";
 
-  if (xtrabackup_export) {
-    std::string path = std::string(xtrabackup_real_target_dir) + "/" +
-                       std::string(schema_name.c_str()) + "/" +
-                       std::string(tbl.name().c_str()) + ".sql";
-    std::ofstream sql_file(path);
-    if (sql_file.is_open()) {
-      sql_file << ss.str();
-      sql_file.close();
-      DBUG_LOG("xb_schema", "wrote " << path);
-    } else {
-      xb::error() << "cannot write schema file " << path;
+  return ss.str();
+}
+
+/** Generate CREATE TABLESPACE SQL from dd::Tablespace.
+@param[in] ts  dd::Tablespace object
+@return SQL string */
+static std::string generate_create_tablespace_sql(dd::Tablespace &ts) {
+  std::ostringstream ss;
+  ss << "CREATE TABLESPACE " << quote_identifier(ts.name());
+  for (const auto *f : ts.files()) {
+    ss << " ADD DATAFILE '" << f->filename() << "'";
+    break;
+  }
+  ss << " ENGINE = " << ts.engine();
+  ss << ";\n";
+  return ss.str();
+}
+
+/** Process SDI records from a single .ibd file: deserialize dd::Table /
+dd::Tablespace objects, generate SQL, write to .sql file and stdout.
+@param[in] ibd_path   path to the .ibd file
+@param[in] records    SDI records read from the file
+@param[in] sql_path   path for the output .sql file */
+void process_sdi_records(const char *ibd_path,
+                         const std::vector<sdi_reader::SdiRecord> &records,
+                         const std::string &sql_path) {
+  THD *thd = current_thd;
+  std::string all_sql;
+
+  for (const auto &rec : records) {
+    if (rec.type == 2 /* dd::Sdi_type::TABLESPACE */) {
+      std::unique_ptr<dd::Tablespace> dd_ts{
+          dd::create_object<dd::Tablespace>()};
+      if (!dd::deserialize(
+              thd, dd::Sdi_type(rec.data.c_str(), rec.data.size()),
+              dd_ts.get())) {
+        std::string ts_name(dd_ts->name());
+        bool is_file_per_table = ts_name.find('/') != std::string::npos;
+        bool is_system = ts_name.find("innodb_") == 0 || ts_name == "mysql";
+        if (!is_file_per_table && !is_system) {
+          all_sql += generate_create_tablespace_sql(*dd_ts);
+        }
+      }
+    }
+  }
+
+  for (const auto &rec : records) {
+    if (rec.type == 1 /* dd::Sdi_type::TABLE */) {
+      dd_Table_Ptr dd_table{dd::create_object<dd::Table>()};
+      dd::String_type schema_name;
+      bool res = dd::deserialize(
+          thd, dd::Sdi_type(rec.data.c_str(), rec.data.size()),
+          dd_table.get(), &schema_name);
+      if (!res) {
+        all_sql += generate_create_table_sql(*dd_table, schema_name);
+      }
+    }
+  }
+
+  if (all_sql.empty()) return;
+
+  std::ofstream sql_file(sql_path);
+  if (sql_file.is_open()) {
+    sql_file << all_sql;
+    sql_file.close();
+    xb::info() << "wrote " << sql_path;
+  } else {
+    xb::error() << "cannot write " << sql_path;
+  }
+
+  std::cout << all_sql;
+}
+
+}  // namespace prepare
+}  // namespace xb
+
+/** Read SDI from a single .ibd file and generate SQL.
+@param[in] ibd_path  path to the .ibd file */
+void xb_sdi_to_sql_single_file(const char *ibd_path) {
+  auto records = xb::prepare::xb_read_sdi_from_ibd(ibd_path);
+  if (records.empty()) {
+    xb::error() << "no SDI records found in " << ibd_path;
+    return;
+  }
+
+  std::string sql_path(ibd_path);
+  auto dot_pos = sql_path.rfind(".ibd");
+  if (dot_pos != std::string::npos)
+    sql_path.replace(dot_pos, 4, ".sql");
+  else
+    sql_path += ".sql";
+
+  xb::prepare::process_sdi_records(ibd_path, records, sql_path);
+}
+
+/** Read SDI from all .ibd files in a directory and generate SQL.
+@param[in] dir_path  path to the database directory */
+void xb_sdi_to_sql_database_dir(const char *dir_path) {
+  namespace fs = std::filesystem;
+  fs::path dir(dir_path);
+
+  if (!fs::is_directory(dir)) {
+    xb::error() << dir_path << " is not a directory";
+    return;
+  }
+
+  std::map<std::string, std::vector<std::string>> table_groups;
+
+  for (const auto &entry : fs::directory_iterator(dir)) {
+    if (!entry.is_regular_file()) continue;
+    std::string fname = entry.path().filename().string();
+    if (fname.size() < 4 ||
+        fname.substr(fname.size() - 4) != ".ibd")
+      continue;
+
+    std::string base = fname.substr(0, fname.size() - 4);
+    auto hash_pos = base.find("#p#");
+    std::string table_name = (hash_pos != std::string::npos)
+                                 ? base.substr(0, hash_pos)
+                                 : base;
+    table_groups[table_name].push_back(entry.path().string());
+  }
+
+  for (auto &[table_name, files] : table_groups) {
+    std::sort(files.begin(), files.end());
+
+    std::string sql_path =
+        (dir / (table_name + ".sql")).string();
+
+    for (const auto &ibd_file : files) {
+      auto records = xb::prepare::xb_read_sdi_from_ibd(ibd_file.c_str());
+      bool has_table_sdi = false;
+      for (const auto &rec : records) {
+        if (rec.type == 1) {
+          has_table_sdi = true;
+          break;
+        }
+      }
+      if (has_table_sdi) {
+        xb::prepare::process_sdi_records(ibd_file.c_str(), records, sql_path);
+        break;
+      }
     }
   }
 }
+
+namespace xb {
+namespace prepare {
 
 /** Load all InnoDB tables from space_id. There could be multiple tables
 in a tablespace (general tablespace like mysql.ibd or a partition IBD (p0
