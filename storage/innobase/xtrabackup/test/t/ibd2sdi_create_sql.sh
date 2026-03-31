@@ -17,10 +17,19 @@
 IBD2SDI=$(dirname "$(which xtrabackup)")/ibd2sdi
 
 TABLES=""
+PARTITION_TABLES=""
 
 function add_test_table() {
     local tbl=$1
     TABLES="$TABLES $tbl"
+}
+
+function add_partition_table() {
+    local tbl=$1
+    local ibd=$2
+    TABLES="$TABLES $tbl"
+    PARTITION_TABLES="$PARTITION_TABLES $tbl"
+    eval "PART_IBD_${tbl}=${ibd}"
 }
 
 start_server
@@ -144,6 +153,105 @@ mysql -e "CREATE TABLE t9 (
   COMMENT='compressed table'" test
 add_test_table t9
 
+# t10: FULLTEXT index and SPATIAL index
+mysql -e "CREATE TABLE t10 (
+  id INT NOT NULL AUTO_INCREMENT,
+  title VARCHAR(200),
+  body TEXT,
+  location POINT NOT NULL SRID 0,
+  PRIMARY KEY (id),
+  FULLTEXT KEY ft_body (body),
+  SPATIAL KEY sp_loc (location)
+) ENGINE=InnoDB" test
+add_test_table t10
+
+# t11: RANGE partitioning
+mysql -e "CREATE TABLE t11 (
+  id INT NOT NULL,
+  created DATE NOT NULL,
+  PRIMARY KEY (id, created)
+) ENGINE=InnoDB
+PARTITION BY RANGE (YEAR(created)) (
+  PARTITION p0 VALUES LESS THAN (2021),
+  PARTITION p1 VALUES LESS THAN (2022),
+  PARTITION pmax VALUES LESS THAN MAXVALUE
+)" test
+add_partition_table t11 't11#p#p0.ibd'
+
+# t12: HASH partitioning
+mysql -e "CREATE TABLE t12 (
+  id INT NOT NULL AUTO_INCREMENT,
+  val INT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB
+PARTITION BY HASH (id)
+PARTITIONS 4" test
+add_partition_table t12 't12#p#p0.ibd'
+
+# t13: LIST partitioning
+mysql -e "CREATE TABLE t13 (
+  id INT NOT NULL,
+  region INT NOT NULL,
+  PRIMARY KEY (id, region)
+) ENGINE=InnoDB
+PARTITION BY LIST (region) (
+  PARTITION p_east VALUES IN (1, 2, 3),
+  PARTITION p_west VALUES IN (4, 5, 6),
+  PARTITION p_other VALUES IN (7, 8, 9)
+)" test
+add_partition_table t13 't13#p#p_east.ibd'
+
+# t14: KEY partitioning
+mysql -e "CREATE TABLE t14 (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(100),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB
+PARTITION BY KEY (id)
+PARTITIONS 4" test
+add_partition_table t14 't14#p#p0.ibd'
+
+# t15: RANGE COLUMNS partition (string values)
+mysql -e "CREATE TABLE t15 (
+  fname VARCHAR(50),
+  lname VARCHAR(50),
+  id INT NOT NULL,
+  PRIMARY KEY (id, lname)
+) ENGINE=InnoDB
+PARTITION BY RANGE COLUMNS(lname) (
+  PARTITION p_a_m VALUES LESS THAN ('N'),
+  PARTITION p_n_z VALUES LESS THAN (MAXVALUE)
+)" test
+add_partition_table t15 't15#p#p_a_m.ibd'
+
+# t16: LIST COLUMNS partition
+mysql -e "CREATE TABLE t16 (
+  id INT NOT NULL,
+  city VARCHAR(25) NOT NULL,
+  PRIMARY KEY (id, city)
+) ENGINE=InnoDB
+PARTITION BY LIST COLUMNS(city) (
+  PARTITION p_nyc VALUES IN ('New York'),
+  PARTITION p_la VALUES IN ('Los Angeles'),
+  PARTITION p_other VALUES IN ('Chicago','Houston')
+)" test
+add_partition_table t16 't16#p#p_nyc.ibd'
+
+# t17: RANGE with HASH subpartitioning
+mysql -e "CREATE TABLE t17 (
+  id INT NOT NULL,
+  purchased DATE NOT NULL,
+  PRIMARY KEY (id, purchased)
+) ENGINE=InnoDB
+PARTITION BY RANGE (YEAR(purchased))
+SUBPARTITION BY HASH (TO_DAYS(purchased))
+SUBPARTITIONS 2 (
+  PARTITION p0 VALUES LESS THAN (2020),
+  PARTITION p1 VALUES LESS THAN (2025),
+  PARTITION pmax VALUES LESS THAN MAXVALUE
+)" test
+add_partition_table t17 't17#p#p0#sp#p0sp0.ibd'
+
 # =====================================================================
 # Step 2: Capture reference schemas via mysqldump
 # =====================================================================
@@ -168,33 +276,37 @@ vlog "Server shut down cleanly"
 # =====================================================================
 
 for tbl in $TABLES; do
-    ibd_file="${DATADIR}test/${tbl}.ibd"
+    # Determine the .ibd file: partitioned tables use a specific partition file
+    is_part=0
+    for pt in $PARTITION_TABLES; do
+        if [ "$pt" = "$tbl" ]; then is_part=1; break; fi
+    done
 
-    if [ ! -f "$ibd_file" ]; then
-        vlog "Skipping ibd2sdi for $tbl (no ${tbl}.ibd - likely partitioned)"
-        continue
+    if [ $is_part -eq 1 ]; then
+        eval "ibd_basename=\${PART_IBD_${tbl}}"
+        ibd_file="${DATADIR}test/${ibd_basename}"
+    else
+        ibd_file="${DATADIR}test/${tbl}.ibd"
     fi
 
-    rm -f "${DATADIR}test/${tbl}.sql"
+    if [ ! -f "$ibd_file" ]; then
+        die "ERROR: .ibd file not found: ${ibd_file}"
+    fi
 
+    # The .sql is written next to the .ibd -- for partitioned tables it goes
+    # next to the partition file. We'll capture from stdout instead.
     vlog "Running: $IBD2SDI --create-sql ${ibd_file}"
     run_cmd $IBD2SDI --create-sql "${ibd_file}" \
-        > $topdir/stdout_${tbl}.sql 2>$topdir/stderr_${tbl}.log
+        > $topdir/generated_${tbl}.sql 2>$topdir/stderr_${tbl}.log
 
-    if [ ! -f "${DATADIR}test/${tbl}.sql" ]; then
-        vlog "ERROR: ${tbl}.sql was not generated"
+    if ! grep -q "CREATE TABLE" $topdir/generated_${tbl}.sql; then
+        vlog "ERROR: stdout for ${tbl} does not contain CREATE TABLE"
         cat $topdir/stderr_${tbl}.log >&2
         exit -1
     fi
 
-    if ! grep -q "CREATE TABLE" $topdir/stdout_${tbl}.sql; then
-        vlog "ERROR: stdout for ${tbl} does not contain CREATE TABLE"
-        cat $topdir/stdout_${tbl}.sql >&2
-        exit -1
-    fi
-
-    vlog "Generated ${tbl}.sql:"
-    cat ${DATADIR}test/${tbl}.sql >&2
+    vlog "Generated SQL for ${tbl}:"
+    cat $topdir/generated_${tbl}.sql >&2
 done
 
 vlog "All ibd2sdi --create-sql runs completed"
@@ -210,11 +322,7 @@ for tbl in $TABLES; do
 done
 
 for tbl in $TABLES; do
-    sql_file="${DATADIR}test/${tbl}.sql"
-    if [ ! -f "$sql_file" ]; then
-        vlog "No .sql for $tbl, skipping recreate"
-        continue
-    fi
+    sql_file="$topdir/generated_${tbl}.sql"
 
     vlog "Recreating $tbl from generated SQL"
     (echo "SET foreign_key_checks=0;"; cat "$sql_file") | mysql test
@@ -227,11 +335,6 @@ vlog "All tables recreated from generated SQL"
 # =====================================================================
 
 for tbl in $TABLES; do
-    sql_file="${DATADIR}test/${tbl}.sql"
-    if [ ! -f "$sql_file" ]; then
-        continue
-    fi
-
     ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
         test "$tbl" > $topdir/recreated_${tbl}.sql
 
