@@ -241,6 +241,14 @@ mysql -e "CREATE TABLE t16 (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" test
 add_test_table t16
 
+# t17: COMPRESSION (InnoDB page-level compression)
+mysql -e "CREATE TABLE t17 (
+  id INT NOT NULL AUTO_INCREMENT,
+  data TEXT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB COMPRESSION='zlib'" test
+add_test_table t17
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

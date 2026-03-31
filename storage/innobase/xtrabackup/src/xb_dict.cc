@@ -627,21 +627,33 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     }
   }
 
-  ss << "\n) ENGINE=" << tbl.engine().c_str();
+  ss << "\n)";
 
   const auto &opts = tbl.options();
 
+  ss << " ENGINE=" << tbl.engine().c_str();
+
+  /* DEFAULT CHARSET / COLLATE */
+  const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
+  ss << " DEFAULT CHARSET=" << cs->csname;
+  if (!(cs->state & MY_CS_PRIMARY) || cs == &my_charset_utf8mb4_0900_ai_ci) {
+    ss << " COLLATE=" << cs->m_coll_name;
+  }
+
+  /* PACK_KEYS */
   uint64 pack_keys_val;
   if (opts.exists("pack_keys") && !opts.get("pack_keys", &pack_keys_val)) {
     ss << " PACK_KEYS=" << (pack_keys_val ? "1" : "0");
   }
 
+  /* STATS_PERSISTENT */
   uint64 stats_persistent_val;
   if (opts.exists("stats_persistent") &&
       !opts.get("stats_persistent", &stats_persistent_val)) {
     ss << " STATS_PERSISTENT=" << (stats_persistent_val ? "1" : "0");
   }
 
+  /* STATS_AUTO_RECALC */
   uint64 stats_auto_recalc_val;
   if (opts.exists("stats_auto_recalc") &&
       !opts.get("stats_auto_recalc", &stats_auto_recalc_val)) {
@@ -651,6 +663,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       ss << " STATS_AUTO_RECALC=0";
   }
 
+  /* STATS_SAMPLE_PAGES */
   uint64 stats_sample_pages_val;
   if (opts.exists("stats_sample_pages") &&
       !opts.get("stats_sample_pages", &stats_sample_pages_val) &&
@@ -658,12 +671,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     ss << " STATS_SAMPLE_PAGES=" << stats_sample_pages_val;
   }
 
-  const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
-  ss << " DEFAULT CHARSET=" << cs->csname;
-  if (!(cs->state & MY_CS_PRIMARY) || cs == &my_charset_utf8mb4_0900_ai_ci) {
-    ss << " COLLATE=" << cs->m_coll_name;
-  }
-
+  /* ROW_FORMAT */
   switch (tbl.row_format()) {
     case dd::Table::RF_COMPRESSED:
       ss << " ROW_FORMAT=COMPRESSED";
@@ -678,6 +686,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       break;
   }
 
+  /* KEY_BLOCK_SIZE */
   uint64 key_block_size_val;
   if (opts.exists("key_block_size") &&
       !opts.get("key_block_size", &key_block_size_val) &&
@@ -685,8 +694,37 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     ss << " KEY_BLOCK_SIZE=" << key_block_size_val;
   }
 
+  /* COMPRESSION */
+  dd::String_type compress_val;
+  if (opts.exists("compress") && !opts.get("compress", &compress_val) &&
+      !compress_val.empty()) {
+    ss << " COMPRESSION='" << compress_val << "'";
+  }
+
+  /* ENCRYPTION */
+  dd::String_type encrypt_val;
+  if (opts.exists("encrypt_type") && !opts.get("encrypt_type", &encrypt_val) &&
+      !encrypt_val.empty() && encrypt_val != "N") {
+    ss << " ENCRYPTION='" << encrypt_val << "'";
+  }
+
+  /* COMMENT */
   if (!tbl.comment().empty()) {
     ss << " COMMENT='" << escape_string(tbl.comment()) << "'";
+  }
+
+  /* ENGINE_ATTRIBUTE */
+  auto ea = tbl.engine_attribute();
+  if (ea.length > 0) {
+    ss << " /*!80021 ENGINE_ATTRIBUTE='"
+       << escape_string(dd::String_type(ea.str, ea.length)) << "' */";
+  }
+
+  /* SECONDARY_ENGINE_ATTRIBUTE */
+  auto sea = tbl.secondary_engine_attribute();
+  if (sea.length > 0) {
+    ss << " /*!80021 SECONDARY_ENGINE_ATTRIBUTE='"
+       << escape_string(dd::String_type(sea.str, sea.length)) << "' */";
   }
 
   if (tbl.partition_type() != dd::Table::PT_NONE) {
