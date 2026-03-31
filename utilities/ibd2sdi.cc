@@ -650,6 +650,11 @@ static const char *fk_rule_str(int rule) {
 
 static std::string generate_create_table_from_json(
     const rapidjson::Value &dd_obj) {
+  /* Skip hidden/internal tables (FTS aux tables, etc.)
+     hidden: 1=HT_VISIBLE, 2=HT_HIDDEN_SYSTEM, 3=HT_HIDDEN_SE */
+  int tbl_hidden = get_json_int(dd_obj, "hidden", 1);
+  if (tbl_hidden != 1) return "";
+
   std::ostringstream ss;
 
   std::string tbl_name = get_json_string(dd_obj, "name");
@@ -1114,6 +1119,13 @@ static std::string generate_create_table_from_json(
        << "' */";
   }
 
+  /* TABLESPACE (general tablespaces only; file-per-table refs contain '/') */
+  std::string ts_ref = get_json_string(dd_obj, "tablespace_ref");
+  if (!ts_ref.empty() && ts_ref.find('/') == std::string::npos &&
+      ts_ref != "innodb_system") {
+    ss << " /*!50100 TABLESPACE " << quote_identifier(ts_ref) << " */";
+  }
+
   /* PARTITIONS */
   int pt = get_json_int(dd_obj, "partition_type");
   if (pt != part_type::PT_NONE) {
@@ -1280,6 +1292,23 @@ static std::string generate_create_tablespace_from_json(
       break;
     }
   }
+
+  /* FILE_BLOCK_SIZE for compressed tablespaces (derived from InnoDB flags) */
+  std::string se_priv = get_json_string(dd_obj, "se_private_data");
+  if (!se_priv.empty()) {
+    auto se_opts = parse_options_string(se_priv);
+    auto it = se_opts.find("flags");
+    if (it != se_opts.end()) {
+      uint64_t flags = strtoull(it->second.c_str(), nullptr, 10);
+      uint32_t zip_ssize = (flags >> 1) & 0xF;
+      if (zip_ssize > 0) {
+        uint64_t file_block_size = static_cast<uint64_t>(1024)
+                                   << (zip_ssize - 1);
+        ss << " FILE_BLOCK_SIZE = " << file_block_size;
+      }
+    }
+  }
+
   ss << " ENGINE = " << get_json_string(dd_obj, "engine");
   ss << ";\n";
   return ss.str();
@@ -1287,7 +1316,8 @@ static std::string generate_create_tablespace_from_json(
 
 static void process_sdi_create_sql(const char *sdi_data, uint64_t sdi_data_len,
                                    const char *ibd_path,
-                                   std::string &accumulated_sql) {
+                                   std::string &tablespace_sql,
+                                   std::string &table_sql) {
   rapidjson::Document doc;
   rapidjson::ParseResult ok =
       doc.Parse(sdi_data, static_cast<size_t>(sdi_data_len - 1));
@@ -1308,10 +1338,10 @@ static void process_sdi_create_sql(const char *sdi_data, uint64_t sdi_data_len,
 
   if (obj_type == "Table") {
     std::string sql = generate_create_table_from_json(dd_obj);
-    if (!sql.empty()) accumulated_sql += sql;
+    if (!sql.empty()) table_sql += sql;
   } else if (obj_type == "Tablespace") {
     std::string sql = generate_create_tablespace_from_json(dd_obj);
-    if (!sql.empty()) accumulated_sql += sql;
+    if (!sql.empty()) tablespace_sql += sql;
   }
 }
 
@@ -3217,7 +3247,8 @@ bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
   uint64_t sdi_data_len = 0;
   bool corrupt = false;
 
-  std::string accumulated_sql;
+  std::string tablespace_sql;
+  std::string table_sql;
 
   while (current_rec != nullptr &&
          get_rec_type(current_rec) != REC_STATUS_SUPREMUM && !corrupt) {
@@ -3227,7 +3258,7 @@ bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
     if (err == DB_SUCCESS && sdi_data != nullptr) {
       create_sql::process_sdi_create_sql(
           reinterpret_cast<const char *>(sdi_data), sdi_data_len, ibd_path,
-          accumulated_sql);
+          tablespace_sql, table_sql);
       free(sdi_data);
       sdi_data = nullptr;
     }
@@ -3236,6 +3267,7 @@ bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
         get_next_rec(ts, current_rec, page_size.logical(), buf, &corrupt);
   }
 
+  std::string accumulated_sql = tablespace_sql + table_sql;
   if (!accumulated_sql.empty()) {
     create_sql::write_sql_output(accumulated_sql, ibd_path);
   }

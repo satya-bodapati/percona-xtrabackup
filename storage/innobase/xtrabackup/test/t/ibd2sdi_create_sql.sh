@@ -3,7 +3,7 @@
 # directly parsed from .ibd files using pure RapidJSON (no dd::deserialize).
 #
 # Strategy:
-#   1. Start server, create diverse tables
+#   1. Start server, create diverse tables (file-per-table + general TS)
 #   2. Capture reference schemas via mysqldump --no-data
 #   3. Shutdown server cleanly (ensures .ibd files are flushed)
 #   4. Run ibd2sdi --create-sql on each .ibd file
@@ -18,6 +18,8 @@ IBD2SDI=$(dirname "$(which xtrabackup)")/ibd2sdi
 
 TABLES=""
 PARTITION_TABLES=""
+GS_TABLES=""
+GC_TABLES=""
 
 function add_test_table() {
     local tbl=$1
@@ -37,7 +39,7 @@ start_server
 DATADIR=$(${MYSQL} ${MYSQL_ARGS} -N -B -e "SELECT @@datadir")
 
 # =====================================================================
-# Create test tables
+# Create test tables (file-per-table)
 # =====================================================================
 
 # t1: basic columns, AUTO_INCREMENT, PRIMARY KEY, secondary KEY
@@ -255,10 +257,142 @@ SUBPARTITIONS 2 (
 add_partition_table t17 't17#p#p0#sp#p0sp0.ibd'
 
 # =====================================================================
+# Create general tablespace tables (regular)
+# =====================================================================
+
+mysql -e "CREATE TABLESPACE ts_regular ADD DATAFILE 'ts_regular.ibd' ENGINE=InnoDB"
+GS_TABLES="gs_t1 gs_t2 gs_t3 gs_t4 gs_t5 gs_t6_parent gs_t6 gs_t7 gs_t8"
+
+mysql -e "CREATE TABLE gs_t1 (
+  a INT NOT NULL AUTO_INCREMENT,
+  b INT NOT NULL,
+  c VARCHAR(100),
+  PRIMARY KEY (a),
+  KEY idx_b (b)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t2 (
+  a INT NOT NULL,
+  b INT GENERATED ALWAYS AS (a * 2) VIRTUAL,
+  c INT GENERATED ALWAYS AS (a + 1) STORED,
+  PRIMARY KEY (a)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t3 (
+  id INT NOT NULL AUTO_INCREMENT,
+  d_int INT DEFAULT 42,
+  d_bigint BIGINT DEFAULT 0,
+  d_float FLOAT DEFAULT 3.14,
+  d_varchar VARCHAR(50) DEFAULT 'hello world',
+  d_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  d_dt DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  d_nullable INT DEFAULT NULL,
+  d_expr INT DEFAULT (d_int * 2),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t4 (
+  id INT NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  name VARCHAR(100) COMMENT 'user name',
+  location POINT NOT NULL SRID 4326,
+  plain_geom POINT NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t5 (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(255) NOT NULL,
+  data TEXT,
+  a INT NOT NULL,
+  b INT NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_prefix (name(50)),
+  KEY idx_desc (a DESC, b),
+  KEY idx_func ((a + b)),
+  KEY idx_combo (name(20), a DESC)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t6_parent (
+  id INT NOT NULL AUTO_INCREMENT,
+  code VARCHAR(10) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_code (code)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t6 (
+  id INT NOT NULL AUTO_INCREMENT,
+  parent_id INT NOT NULL,
+  parent_code VARCHAR(10),
+  PRIMARY KEY (id),
+  KEY idx_parent (parent_id),
+  KEY idx_code (parent_code),
+  CONSTRAINT gs_fk_parent FOREIGN KEY (parent_id) REFERENCES gs_t6_parent (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT gs_fk_code FOREIGN KEY (parent_code) REFERENCES gs_t6_parent (code) ON DELETE SET NULL
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t7 (
+  id INT NOT NULL AUTO_INCREMENT,
+  age INT NOT NULL,
+  status ENUM('active','inactive') NOT NULL DEFAULT 'active',
+  PRIMARY KEY (id),
+  CONSTRAINT gs_chk_age CHECK (age >= 0 AND age <= 150),
+  CONSTRAINT gs_chk_status CHECK (status IN ('active','inactive')) /*!80016 NOT ENFORCED */
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+mysql -e "CREATE TABLE gs_t8 (
+  id INT NOT NULL AUTO_INCREMENT,
+  title VARCHAR(200),
+  body TEXT,
+  location POINT NOT NULL SRID 0,
+  PRIMARY KEY (id),
+  FULLTEXT KEY ft_body (body),
+  FULLTEXT KEY ft_title_body (title, body),
+  FULLTEXT KEY ft_ngram (body) WITH PARSER ngram,
+  SPATIAL KEY sp_loc (location)
+) ENGINE=InnoDB TABLESPACE ts_regular" test
+
+vlog "Regular general tablespace tables created"
+
+# =====================================================================
+# Create compressed general tablespace tables
+# =====================================================================
+
+mysql -e "CREATE TABLESPACE ts_compressed ADD DATAFILE 'ts_compressed.ibd' FILE_BLOCK_SIZE=8192 ENGINE=InnoDB"
+GC_TABLES="gc_t1 gc_t2 gc_t3"
+
+mysql -e "CREATE TABLE gc_t1 (
+  a INT NOT NULL AUTO_INCREMENT,
+  b INT NOT NULL,
+  c VARCHAR(100),
+  PRIMARY KEY (a),
+  KEY idx_b (b)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8 TABLESPACE ts_compressed" test
+
+mysql -e "CREATE TABLE gc_t2 (
+  a INT NOT NULL,
+  b INT GENERATED ALWAYS AS (a * 2) VIRTUAL,
+  c INT GENERATED ALWAYS AS (a + 1) STORED,
+  PRIMARY KEY (a)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8 TABLESPACE ts_compressed" test
+
+mysql -e "CREATE TABLE gc_t3 (
+  id INT NOT NULL AUTO_INCREMENT,
+  d_int INT DEFAULT 42,
+  d_varchar VARCHAR(50) DEFAULT 'hello world',
+  d_text TEXT,
+  d_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8 TABLESPACE ts_compressed" test
+
+vlog "Compressed general tablespace tables created"
+
+# =====================================================================
 # Step 2: Capture reference schemas via mysqldump
 # =====================================================================
 
-for tbl in $TABLES; do
+ALL_USER_TABLES="$TABLES $GS_TABLES $GC_TABLES"
+
+for tbl in $ALL_USER_TABLES; do
     ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
         test "$tbl" > $topdir/original_${tbl}.sql
 done
@@ -277,8 +411,8 @@ vlog "Server shut down cleanly"
 # Step 4: Run ibd2sdi --create-sql on each .ibd file
 # =====================================================================
 
+# --- File-per-table .ibd files ---
 for tbl in $TABLES; do
-    # Determine the .ibd file: partitioned tables use a specific partition file
     is_part=0
     for pt in $PARTITION_TABLES; do
         if [ "$pt" = "$tbl" ]; then is_part=1; break; fi
@@ -295,8 +429,6 @@ for tbl in $TABLES; do
         die "ERROR: .ibd file not found: ${ibd_file}"
     fi
 
-    # The .sql is written next to the .ibd -- for partitioned tables it goes
-    # next to the partition file. We'll capture from stdout instead.
     vlog "Running: $IBD2SDI --create-sql ${ibd_file}"
     run_cmd $IBD2SDI --create-sql "${ibd_file}" \
         > $topdir/generated_${tbl}.sql 2>$topdir/stderr_${tbl}.log
@@ -311,24 +443,70 @@ for tbl in $TABLES; do
     cat $topdir/generated_${tbl}.sql >&2
 done
 
+# --- Regular general tablespace .ibd ---
+vlog "Running ibd2sdi --create-sql on ts_regular.ibd"
+run_cmd $IBD2SDI --create-sql "${DATADIR}ts_regular.ibd" \
+    > $topdir/generated_ts_regular.sql 2>$topdir/stderr_ts_regular.log
+
+if ! grep -q "CREATE TABLESPACE" $topdir/generated_ts_regular.sql; then
+    vlog "ERROR: generated output for ts_regular does not contain CREATE TABLESPACE"
+    cat $topdir/stderr_ts_regular.log >&2
+    exit -1
+fi
+vlog "Generated SQL for ts_regular:"
+cat $topdir/generated_ts_regular.sql >&2
+
+# --- Compressed general tablespace .ibd ---
+vlog "Running ibd2sdi --create-sql on ts_compressed.ibd"
+run_cmd $IBD2SDI --create-sql "${DATADIR}ts_compressed.ibd" \
+    > $topdir/generated_ts_compressed.sql 2>$topdir/stderr_ts_compressed.log
+
+if ! grep -q "CREATE TABLESPACE" $topdir/generated_ts_compressed.sql; then
+    vlog "ERROR: generated output for ts_compressed does not contain CREATE TABLESPACE"
+    cat $topdir/stderr_ts_compressed.log >&2
+    exit -1
+fi
+if ! grep -q "FILE_BLOCK_SIZE" $topdir/generated_ts_compressed.sql; then
+    vlog "ERROR: generated output for ts_compressed does not contain FILE_BLOCK_SIZE"
+    cat $topdir/generated_ts_compressed.sql >&2
+    exit -1
+fi
+vlog "Generated SQL for ts_compressed:"
+cat $topdir/generated_ts_compressed.sql >&2
+
 vlog "All ibd2sdi --create-sql runs completed"
 
 # =====================================================================
-# Step 5: Start server, drop all tables, replay generated .sql
+# Step 5: Start server, drop everything, replay generated .sql
 # =====================================================================
 
 start_server
 
-for tbl in $TABLES; do
+# Drop all tables (FK child tables first, then all others)
+mysql -e "SET foreign_key_checks=0; DROP TABLE IF EXISTS t7, gs_t6" test
+
+for tbl in $ALL_USER_TABLES; do
     mysql -e "SET foreign_key_checks=0; DROP TABLE IF EXISTS \`$tbl\`" test
 done
+mysql -e "DROP TABLESPACE ts_regular"
+mysql -e "DROP TABLESPACE ts_compressed"
 
+vlog "All tables and tablespaces dropped"
+
+# Replay file-per-table tables
 for tbl in $TABLES; do
     sql_file="$topdir/generated_${tbl}.sql"
-
     vlog "Recreating $tbl from generated SQL"
     (echo "SET foreign_key_checks=0;"; cat "$sql_file") | mysql test
 done
+
+# Replay regular general tablespace (CREATE TABLESPACE + CREATE TABLEs)
+vlog "Replaying generated SQL for ts_regular"
+(echo "SET foreign_key_checks=0;"; cat "$topdir/generated_ts_regular.sql") | mysql test
+
+# Replay compressed general tablespace
+vlog "Replaying generated SQL for ts_compressed"
+(echo "SET foreign_key_checks=0;"; cat "$topdir/generated_ts_compressed.sql") | mysql test
 
 vlog "All tables recreated from generated SQL"
 
@@ -336,7 +514,7 @@ vlog "All tables recreated from generated SQL"
 # Step 6: Capture schemas again and compare
 # =====================================================================
 
-for tbl in $TABLES; do
+for tbl in $ALL_USER_TABLES; do
     ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
         test "$tbl" > $topdir/recreated_${tbl}.sql
 
@@ -347,9 +525,5 @@ done
 # =====================================================================
 # Cleanup
 # =====================================================================
-
-for tbl in $TABLES; do
-    mysql -e "SET foreign_key_checks=0; DROP TABLE IF EXISTS \`$tbl\`" test 2>/dev/null || true
-done
 
 vlog "All ibd2sdi --create-sql tests passed"
