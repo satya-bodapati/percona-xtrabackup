@@ -424,10 +424,11 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
         ss << " STORED";
     }
 
-    if (col->is_nullable()) {
-      ss << " NULL";
-    } else {
+    if (!col->is_nullable()) {
       ss << " NOT NULL";
+    } else if (col->type() == dd::enum_column_types::TIMESTAMP ||
+               col->type() == dd::enum_column_types::TIMESTAMP2) {
+      ss << " NULL";
     }
 
     if (col->type() == dd::enum_column_types::GEOMETRY && col->srs_id()) {
