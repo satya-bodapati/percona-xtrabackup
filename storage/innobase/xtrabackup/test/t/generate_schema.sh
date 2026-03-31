@@ -75,6 +75,21 @@ mysql -e "CREATE TABLE t2 (
 ) ENGINE=InnoDB" test
 add_test_table t2
 
+# t3: DEFAULT values - literals, CURRENT_TIMESTAMP, expressions, ON UPDATE
+mysql -e "CREATE TABLE t3 (
+  id INT NOT NULL AUTO_INCREMENT,
+  d_int INT DEFAULT 42,
+  d_bigint BIGINT DEFAULT 0,
+  d_float FLOAT DEFAULT 3.14,
+  d_varchar VARCHAR(50) DEFAULT 'hello world',
+  d_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  d_dt DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  d_nullable INT DEFAULT NULL,
+  d_expr INT DEFAULT (d_int * 2),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t3
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

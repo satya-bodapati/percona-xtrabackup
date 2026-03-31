@@ -388,12 +388,42 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     if (!is_gcol && has_default(col)) {
       ss << " DEFAULT";
       if (!col->default_option().empty()) {
-        ss << " " << col->default_option();
+        const auto &opt = col->default_option();
+        if (opt.find("CURRENT_TIMESTAMP") == 0) {
+          ss << " " << opt;
+        } else {
+          ss << " (" << opt << ")";
+        }
       } else if (col->is_default_value_utf8_null()) {
         ss << " NULL";
       } else {
-        ss << " '" << col->default_value_utf8() << "'";
+        const auto &val = col->default_value_utf8();
+        bool needs_quote = true;
+        switch (col->type()) {
+          case dd::enum_column_types::DECIMAL:
+          case dd::enum_column_types::NEWDECIMAL:
+          case dd::enum_column_types::TINY:
+          case dd::enum_column_types::SHORT:
+          case dd::enum_column_types::LONG:
+          case dd::enum_column_types::LONGLONG:
+          case dd::enum_column_types::INT24:
+          case dd::enum_column_types::FLOAT:
+          case dd::enum_column_types::DOUBLE:
+            needs_quote = false;
+            break;
+          default:
+            break;
+        }
+        if (needs_quote) {
+          ss << " '" << val << "'";
+        } else {
+          ss << " " << val;
+        }
       }
+    }
+
+    if (!col->update_option().empty()) {
+      ss << " ON UPDATE " << col->update_option();
     }
 
     if (col->is_auto_increment()) {
