@@ -115,6 +115,18 @@ mysql -e "CREATE TABLE t5 (
 ) ENGINE=InnoDB" test
 add_test_table t5
 
+# t6: index options - algorithm, visibility, comment
+mysql -e "CREATE TABLE t6 (
+  id INT NOT NULL AUTO_INCREMENT,
+  a INT NOT NULL,
+  b INT NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_btree (a) USING BTREE,
+  KEY idx_invisible (b) /*!80000 INVISIBLE */,
+  KEY idx_comment (a, b) COMMENT 'composite index'
+) ENGINE=InnoDB" test
+add_test_table t6
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

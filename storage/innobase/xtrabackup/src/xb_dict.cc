@@ -498,6 +498,30 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     }
 
     ss << ")";
+
+    if (key->is_algorithm_explicit()) {
+      switch (key->algorithm()) {
+        case dd::Index::IA_BTREE:
+          ss << " USING BTREE";
+          break;
+        case dd::Index::IA_HASH:
+          ss << " USING HASH";
+          break;
+        case dd::Index::IA_RTREE:
+          if (key->type() != dd::Index::IT_SPATIAL) ss << " USING RTREE";
+          break;
+        default:
+          break;
+      }
+    }
+
+    if (!key->comment().empty()) {
+      ss << " COMMENT '" << key->comment() << "'";
+    }
+
+    if (!key->is_visible()) {
+      ss << " /*!80000 INVISIBLE */";
+    }
   }
 
   ss << "\n) ENGINE=" << tbl.engine().c_str();
