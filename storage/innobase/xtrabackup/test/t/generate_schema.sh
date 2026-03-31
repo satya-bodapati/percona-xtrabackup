@@ -90,6 +90,16 @@ mysql -e "CREATE TABLE t3 (
 ) ENGINE=InnoDB" test
 add_test_table t3
 
+# t4: column COMMENT and GEOMETRY SRID
+mysql -e "CREATE TABLE t4 (
+  id INT NOT NULL AUTO_INCREMENT COMMENT 'primary key',
+  name VARCHAR(100) COMMENT 'user name',
+  location POINT NOT NULL SRID 4326,
+  plain_geom POINT NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t4
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

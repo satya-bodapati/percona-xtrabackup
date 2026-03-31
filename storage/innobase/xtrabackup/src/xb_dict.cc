@@ -363,7 +363,8 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
 
     ss << "  " << col->name().c_str() << " " << col->column_type_utf8();
 
-    if (col->is_explicit_collation()) {
+    if (col->is_explicit_collation() &&
+        col->type() != dd::enum_column_types::GEOMETRY) {
       const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
       ss << " CHARACTER SET " << cs->csname;
       ss << " COLLATE " << cs->m_coll_name;
@@ -383,6 +384,10 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       ss << " NULL";
     } else {
       ss << " NOT NULL";
+    }
+
+    if (col->type() == dd::enum_column_types::GEOMETRY && col->srs_id()) {
+      ss << " /*!80003 SRID " << col->srs_id().value() << " */";
     }
 
     if (!is_gcol && has_default(col)) {
@@ -432,6 +437,10 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
 
     if (col->hidden() == dd::Column::enum_hidden_type::HT_HIDDEN_USER) {
       ss << " /*!80023 INVISIBLE */";
+    }
+
+    if (!col->comment().empty()) {
+      ss << " COMMENT '" << col->comment() << "'";
     }
   }
 
