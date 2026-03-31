@@ -39,8 +39,12 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <unistd.h>
 #endif
 #include <zlib.h>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
+#include <vector>
 
 #include "my_rapidjson_size_t.h"
 
@@ -53,6 +57,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <exception>
 #include <iostream>
 #include <sstream>
+#include "m_ctype.h"
 #include "m_string.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
@@ -60,6 +65,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "my_getopt.h"
 #include "my_io.h"
 #include "my_macros.h"
+#include "my_sys.h"
 #include "print_version.h"
 #include "typelib.h"
 #include "welcome_copyright_notice.h"
@@ -177,6 +183,7 @@ struct sdi_options {
   char *dump_filename;
   ulong strict_check;
   bool pretty;
+  bool create_sql;
 };
 struct sdi_options opts;
 
@@ -227,6 +234,11 @@ static struct my_option ibd2sdi_options[] = {
      "If false, SDI would be not human readable but it will be of less size",
      &opts.pretty, &opts.pretty, nullptr, GET_BOOL, OPT_ARG, 1, 0, 0, nullptr,
      0, nullptr},
+    {"create-sql", 'S',
+     "Generate CREATE TABLE SQL from SDI data instead of dumping JSON."
+     " Output is written to stdout and to a .sql file alongside the .ibd file.",
+     &opts.create_sql, &opts.create_sql, nullptr, GET_BOOL, NO_ARG, 0, 0, 0,
+     nullptr, 0, nullptr},
 
     {nullptr, 0, nullptr, nullptr, nullptr, nullptr, GET_NO_ARG, NO_ARG, 0, 0,
      0, nullptr, 0, nullptr}};
@@ -365,6 +377,9 @@ extern "C" bool ibd2sdi_get_one_option(int optid,
       break;
     case 'p':
       break;
+    case 'S':
+      opts.create_sql = true;
+      break;
     case 'h':
       usage();
       exit(EXIT_SUCCESS);
@@ -388,6 +403,943 @@ static bool get_options(int *argc, char ***argv) {
 
   return (false);
 }
+
+/* ========================================================================
+   --create-sql: Generate CREATE TABLE SQL from SDI JSON
+   ======================================================================== */
+namespace create_sql {
+
+namespace col_type {
+constexpr int DECIMAL = 1;
+constexpr int TINY = 2;
+constexpr int SHORT = 3;
+constexpr int LONG = 4;
+constexpr int FLOAT = 5;
+constexpr int DOUBLE = 6;
+constexpr int TIMESTAMP = 8;
+constexpr int LONGLONG = 9;
+constexpr int INT24 = 10;
+constexpr int VARCHAR = 16;
+constexpr int BIT = 17;
+constexpr int TIMESTAMP2 = 18;
+constexpr int NEWDECIMAL = 21;
+constexpr int TINY_BLOB = 24;
+constexpr int MEDIUM_BLOB = 25;
+constexpr int LONG_BLOB = 26;
+constexpr int BLOB = 27;
+constexpr int VAR_STRING = 28;
+constexpr int STRING = 29;
+constexpr int GEOMETRY = 30;
+constexpr int JSON = 31;
+}  // namespace col_type
+
+namespace col_hidden {
+constexpr int HT_VISIBLE = 1;
+constexpr int HT_HIDDEN_SE = 2;
+constexpr int HT_HIDDEN_SQL = 3;
+constexpr int HT_HIDDEN_USER = 4;
+}  // namespace col_hidden
+
+namespace idx_type {
+constexpr int IT_PRIMARY = 1;
+constexpr int IT_UNIQUE = 2;
+constexpr int IT_MULTIPLE = 3;
+constexpr int IT_FULLTEXT = 4;
+constexpr int IT_SPATIAL = 5;
+}  // namespace idx_type
+
+namespace idx_algo {
+constexpr int IA_BTREE = 2;
+constexpr int IA_RTREE = 3;
+constexpr int IA_HASH = 4;
+}  // namespace idx_algo
+
+namespace row_fmt {
+constexpr int RF_COMPRESSED = 3;
+constexpr int RF_REDUNDANT = 4;
+constexpr int RF_COMPACT = 5;
+}  // namespace row_fmt
+
+namespace fk_rule {
+constexpr int RULE_NO_ACTION = 1;
+constexpr int RULE_RESTRICT = 2;
+constexpr int RULE_CASCADE = 3;
+constexpr int RULE_SET_NULL = 4;
+constexpr int RULE_SET_DEFAULT = 5;
+}  // namespace fk_rule
+
+namespace idx_elem_order {
+constexpr int ORDER_DESC = 3;
+}  // namespace idx_elem_order
+
+namespace chk_state {
+constexpr int CS_NOT_ENFORCED = 1;
+}  // namespace chk_state
+
+namespace part_type {
+constexpr int PT_NONE = 0;
+constexpr int PT_HASH = 1;
+constexpr int PT_KEY_51 = 2;
+constexpr int PT_KEY_55 = 3;
+constexpr int PT_LINEAR_HASH = 4;
+constexpr int PT_LINEAR_KEY_51 = 5;
+constexpr int PT_LINEAR_KEY_55 = 6;
+constexpr int PT_RANGE = 7;
+constexpr int PT_LIST = 8;
+constexpr int PT_RANGE_COLUMNS = 9;
+constexpr int PT_LIST_COLUMNS = 10;
+}  // namespace part_type
+
+namespace sub_type {
+constexpr int ST_NONE = 0;
+constexpr int ST_HASH = 1;
+constexpr int ST_KEY_51 = 2;
+constexpr int ST_KEY_55 = 3;
+constexpr int ST_LINEAR_HASH = 4;
+constexpr int ST_LINEAR_KEY_51 = 5;
+constexpr int ST_LINEAR_KEY_55 = 6;
+}  // namespace sub_type
+
+static std::string quote_identifier(const std::string &name) {
+  std::string r = "`";
+  for (char c : name) {
+    if (c == '`') r += '`';
+    r += c;
+  }
+  r += "`";
+  return r;
+}
+
+static std::string escape_string(const std::string &s) {
+  std::string r;
+  r.reserve(s.length());
+  for (char c : s) {
+    switch (c) {
+      case '\0':
+        r += "\\0";
+        break;
+      case '\n':
+        r += "\\n";
+        break;
+      case '\r':
+        r += "\\r";
+        break;
+      case '\\':
+        r += "\\\\";
+        break;
+      case '\'':
+        r += "''";
+        break;
+      default:
+        r += c;
+        break;
+    }
+  }
+  return r;
+}
+
+static std::string unescape_dd_string(const std::string &s) {
+  std::string result;
+  result.reserve(s.length());
+  for (size_t i = 0; i < s.length(); i++) {
+    if (s[i] == '\\' && i + 1 < s.length()) {
+      result += s[i + 1];
+      i++;
+    } else {
+      result += s[i];
+    }
+  }
+  return result;
+}
+
+static std::map<std::string, std::string> parse_options_string(
+    const std::string &raw) {
+  std::map<std::string, std::string> result;
+  std::string key, val;
+  bool in_key = true;
+  bool escaped = false;
+  for (size_t i = 0; i < raw.length(); i++) {
+    char c = raw[i];
+    if (escaped) {
+      if (in_key)
+        key += c;
+      else
+        val += c;
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (c == '=' && in_key) {
+      in_key = false;
+      continue;
+    }
+    if (c == ';') {
+      if (!key.empty()) result[key] = val;
+      key.clear();
+      val.clear();
+      in_key = true;
+      continue;
+    }
+    if (in_key)
+      key += c;
+    else
+      val += c;
+  }
+  if (!key.empty()) result[key] = val;
+  return result;
+}
+
+static std::string get_json_string(const rapidjson::Value &v,
+                                   const char *key) {
+  if (v.HasMember(key) && v[key].IsString()) return v[key].GetString();
+  return "";
+}
+
+static int get_json_int(const rapidjson::Value &v, const char *key,
+                        int def = 0) {
+  if (v.HasMember(key) && v[key].IsInt()) return v[key].GetInt();
+  return def;
+}
+
+static uint64_t get_json_uint64(const rapidjson::Value &v, const char *key,
+                                uint64_t def = 0) {
+  if (v.HasMember(key) && v[key].IsUint64()) return v[key].GetUint64();
+  if (v.HasMember(key) && v[key].IsInt64())
+    return static_cast<uint64_t>(v[key].GetInt64());
+  return def;
+}
+
+static bool get_json_bool(const rapidjson::Value &v, const char *key,
+                          bool def = false) {
+  if (v.HasMember(key) && v[key].IsBool()) return v[key].GetBool();
+  return def;
+}
+
+static bool is_numeric_type(int ct) {
+  return ct == col_type::DECIMAL || ct == col_type::NEWDECIMAL ||
+         ct == col_type::TINY || ct == col_type::SHORT ||
+         ct == col_type::LONG || ct == col_type::LONGLONG ||
+         ct == col_type::INT24 || ct == col_type::FLOAT ||
+         ct == col_type::DOUBLE || ct == col_type::BIT;
+}
+
+static bool is_string_type(int ct) {
+  return ct == col_type::VARCHAR || ct == col_type::VAR_STRING ||
+         ct == col_type::STRING || ct == col_type::TINY_BLOB ||
+         ct == col_type::MEDIUM_BLOB || ct == col_type::LONG_BLOB ||
+         ct == col_type::BLOB;
+}
+
+static const char *fk_rule_str(int rule) {
+  switch (rule) {
+    case fk_rule::RULE_RESTRICT:
+      return "RESTRICT";
+    case fk_rule::RULE_CASCADE:
+      return "CASCADE";
+    case fk_rule::RULE_SET_NULL:
+      return "SET NULL";
+    case fk_rule::RULE_SET_DEFAULT:
+      return "SET DEFAULT";
+    default:
+      return nullptr;
+  }
+}
+
+static std::string generate_create_table_from_json(
+    const rapidjson::Value &dd_obj) {
+  std::ostringstream ss;
+
+  std::string tbl_name = get_json_string(dd_obj, "name");
+  ss << "CREATE TABLE " << quote_identifier(tbl_name) << " (\n";
+
+  /* Build columns vector for column_opx resolution */
+  struct ColInfo {
+    std::string name;
+    int hidden;
+    int type;
+    std::string column_type_utf8;
+    std::string gen_expr_utf8;
+    int collation_id;
+  };
+  std::vector<ColInfo> all_columns;
+
+  const auto &columns = dd_obj["columns"];
+  for (rapidjson::SizeType i = 0; i < columns.Size(); i++) {
+    const auto &col = columns[i];
+    ColInfo ci;
+    ci.name = get_json_string(col, "name");
+    ci.hidden = get_json_int(col, "hidden", col_hidden::HT_VISIBLE);
+    ci.type = get_json_int(col, "type");
+    ci.column_type_utf8 = get_json_string(col, "column_type_utf8");
+    ci.gen_expr_utf8 = get_json_string(col, "generation_expression_utf8");
+    ci.collation_id = get_json_int(col, "collation_id");
+    all_columns.push_back(ci);
+  }
+
+  bool first_col = true;
+  for (rapidjson::SizeType i = 0; i < columns.Size(); i++) {
+    const auto &col = columns[i];
+    int hidden = get_json_int(col, "hidden", col_hidden::HT_VISIBLE);
+    if (hidden == col_hidden::HT_HIDDEN_SE ||
+        hidden == col_hidden::HT_HIDDEN_SQL)
+      continue;
+
+    if (!first_col) ss << ",\n";
+    first_col = false;
+
+    std::string col_name = get_json_string(col, "name");
+    std::string col_type_utf8 = get_json_string(col, "column_type_utf8");
+    int col_type = get_json_int(col, "type");
+
+    ss << "  " << quote_identifier(col_name) << " " << col_type_utf8;
+
+    /* CHARACTER SET / COLLATE */
+    if (get_json_bool(col, "is_explicit_collation")) {
+      int coll_id = get_json_int(col, "collation_id");
+      CHARSET_INFO *col_cs =
+          get_charset(static_cast<uint>(coll_id), MYF(0));
+      if (col_cs && strcmp(col_cs->csname, "binary") != 0 &&
+          col_type != col_type::GEOMETRY) {
+        ss << " CHARACTER SET " << col_cs->csname;
+        ss << " COLLATE " << col_cs->m_coll_name;
+      }
+    }
+
+    /* Generated column */
+    std::string gen_expr = get_json_string(col, "generation_expression_utf8");
+    bool is_gcol = !gen_expr.empty();
+    if (is_gcol) {
+      ss << " GENERATED ALWAYS AS (" << gen_expr << ")";
+      if (get_json_bool(col, "is_virtual"))
+        ss << " VIRTUAL";
+      else
+        ss << " STORED";
+    }
+
+    /* NULL / NOT NULL */
+    if (!get_json_bool(col, "is_nullable")) {
+      ss << " NOT NULL";
+    } else if (col_type == col_type::TIMESTAMP ||
+               col_type == col_type::TIMESTAMP2) {
+      ss << " NULL";
+    }
+
+    /* NOT SECONDARY */
+    std::string col_options_str = get_json_string(col, "options");
+    if (!col_options_str.empty()) {
+      auto col_opts = parse_options_string(col_options_str);
+      auto it = col_opts.find("not_secondary");
+      if (it != col_opts.end() && it->second == "1") {
+        ss << " NOT SECONDARY";
+      }
+    }
+
+    /* SRID */
+    if (col_type == col_type::GEOMETRY &&
+        !get_json_bool(col, "srs_id_null")) {
+      ss << " /*!80003 SRID " << get_json_uint64(col, "srs_id") << " */";
+    }
+
+    /* DEFAULT */
+    bool has_no_default = get_json_bool(col, "has_no_default");
+    bool is_auto_inc = get_json_bool(col, "is_auto_increment");
+    if (!is_gcol && !has_no_default && !is_auto_inc) {
+      std::string default_option = get_json_string(col, "default_option");
+      bool def_utf8_null = get_json_bool(col, "default_value_utf8_null");
+      std::string def_utf8 = get_json_string(col, "default_value_utf8");
+
+      if (!default_option.empty()) {
+        ss << " DEFAULT";
+        if (default_option.find("CURRENT_TIMESTAMP") == 0) {
+          ss << " " << default_option;
+        } else {
+          ss << " (" << default_option << ")";
+        }
+      } else if (def_utf8_null) {
+        ss << " DEFAULT NULL";
+      } else if (!get_json_bool(col, "default_value_null")) {
+        ss << " DEFAULT";
+        if (is_numeric_type(col_type)) {
+          ss << " " << def_utf8;
+        } else {
+          ss << " '" << escape_string(def_utf8) << "'";
+        }
+      }
+    }
+
+    /* ON UPDATE */
+    std::string update_opt = get_json_string(col, "update_option");
+    if (!update_opt.empty()) {
+      ss << " ON UPDATE " << update_opt;
+    }
+
+    /* AUTO_INCREMENT */
+    if (is_auto_inc) {
+      ss << " AUTO_INCREMENT";
+    }
+
+    /* INVISIBLE */
+    if (hidden == col_hidden::HT_HIDDEN_USER) {
+      ss << " /*!80023 INVISIBLE */";
+    }
+
+    /* COMMENT */
+    std::string col_comment = get_json_string(col, "comment");
+    if (!col_comment.empty()) {
+      ss << " COMMENT '" << escape_string(col_comment) << "'";
+    }
+
+    /* ENGINE_ATTRIBUTE */
+    std::string col_ea = get_json_string(col, "engine_attribute");
+    if (!col_ea.empty()) {
+      ss << " /*!80021 ENGINE_ATTRIBUTE '" << escape_string(col_ea) << "' */";
+    }
+
+    /* SECONDARY_ENGINE_ATTRIBUTE */
+    std::string col_sea = get_json_string(col, "secondary_engine_attribute");
+    if (!col_sea.empty()) {
+      ss << " /*!80021 SECONDARY_ENGINE_ATTRIBUTE '" << escape_string(col_sea)
+         << "' */";
+    }
+  }
+
+  /* INDEXES */
+  if (dd_obj.HasMember("indexes") && dd_obj["indexes"].IsArray()) {
+    const auto &indexes = dd_obj["indexes"];
+    for (rapidjson::SizeType i = 0; i < indexes.Size(); i++) {
+      const auto &key = indexes[i];
+      if (get_json_bool(key, "hidden")) continue;
+
+      int key_type = get_json_int(key, "type");
+      bool is_primary = (key_type == idx_type::IT_PRIMARY);
+
+      ss << ",\n  ";
+      if (is_primary) {
+        ss << "PRIMARY KEY";
+      } else if (key_type == idx_type::IT_UNIQUE) {
+        ss << "UNIQUE KEY ";
+      } else if (key_type == idx_type::IT_FULLTEXT) {
+        ss << "FULLTEXT KEY ";
+      } else if (key_type == idx_type::IT_SPATIAL) {
+        ss << "SPATIAL KEY ";
+      } else if (key_type == idx_type::IT_MULTIPLE) {
+        ss << "KEY ";
+      }
+
+      if (!is_primary) {
+        ss << quote_identifier(get_json_string(key, "name"));
+      }
+
+      ss << " (";
+      bool first_elem = true;
+      if (key.HasMember("elements") && key["elements"].IsArray()) {
+        const auto &elems = key["elements"];
+        for (rapidjson::SizeType j = 0; j < elems.Size(); j++) {
+          const auto &elem = elems[j];
+          if (get_json_bool(elem, "hidden")) continue;
+          if (!first_elem) ss << ",";
+          first_elem = false;
+
+          int col_opx = get_json_int(elem, "column_opx");
+          if (col_opx >= 0 &&
+              col_opx < static_cast<int>(all_columns.size())) {
+            const auto &ref_col = all_columns[col_opx];
+            if (ref_col.hidden == col_hidden::HT_HIDDEN_SQL) {
+              ss << "(" << ref_col.gen_expr_utf8 << ")";
+            } else {
+              ss << quote_identifier(ref_col.name);
+
+              /* Prefix length: only applicable to string/blob types */
+              if (is_string_type(ref_col.type) &&
+                  key_type != idx_type::IT_FULLTEXT &&
+                  key_type != idx_type::IT_SPATIAL) {
+                uint elem_length =
+                    static_cast<uint>(get_json_uint64(elem, "length", 0));
+                uint char_length =
+                    static_cast<uint>(get_json_uint64(
+                        columns[col_opx], "char_length", 0));
+                if (elem_length > 0 && elem_length < char_length) {
+                  CHARSET_INFO *elem_cs =
+                      get_charset(static_cast<uint>(ref_col.collation_id),
+                                  MYF(0));
+                  uint prefix_len = elem_length;
+                  if (elem_cs && elem_cs->mbmaxlen > 0) {
+                    prefix_len /= elem_cs->mbmaxlen;
+                  }
+                  if (prefix_len > 0) {
+                    ss << "(" << prefix_len << ")";
+                  }
+                }
+              }
+
+              /* DESC */
+              if (get_json_int(elem, "order") ==
+                  idx_elem_order::ORDER_DESC) {
+                ss << " DESC";
+              }
+            }
+          }
+        }
+      }
+      ss << ")";
+
+      /* USING algorithm */
+      if (get_json_bool(key, "is_algorithm_explicit")) {
+        int algo = get_json_int(key, "algorithm");
+        switch (algo) {
+          case idx_algo::IA_BTREE:
+            ss << " USING BTREE";
+            break;
+          case idx_algo::IA_HASH:
+            ss << " USING HASH";
+            break;
+          case idx_algo::IA_RTREE:
+            if (key_type != idx_type::IT_SPATIAL) ss << " USING RTREE";
+            break;
+          default:
+            break;
+        }
+      }
+
+      /* KEY_BLOCK_SIZE */
+      std::string key_opts_str = get_json_string(key, "options");
+      std::map<std::string, std::string> key_opts;
+      if (!key_opts_str.empty()) key_opts = parse_options_string(key_opts_str);
+
+      auto kbs_it = key_opts.find("block_size");
+      if (kbs_it != key_opts.end() && kbs_it->second != "0") {
+        ss << " KEY_BLOCK_SIZE=" << kbs_it->second;
+      }
+
+      /* COMMENT */
+      std::string key_comment = get_json_string(key, "comment");
+      if (!key_comment.empty()) {
+        ss << " COMMENT '" << escape_string(key_comment) << "'";
+      }
+
+      /* INVISIBLE */
+      if (!get_json_bool(key, "is_visible")) {
+        ss << " /*!80000 INVISIBLE */";
+      }
+
+      /* ENGINE_ATTRIBUTE */
+      std::string key_ea = get_json_string(key, "engine_attribute");
+      if (!key_ea.empty()) {
+        ss << " /*!80021 ENGINE_ATTRIBUTE '" << escape_string(key_ea)
+           << "' */";
+      }
+
+      /* SECONDARY_ENGINE_ATTRIBUTE */
+      std::string key_sea =
+          get_json_string(key, "secondary_engine_attribute");
+      if (!key_sea.empty()) {
+        ss << " /*!80021 SECONDARY_ENGINE_ATTRIBUTE '"
+           << escape_string(key_sea) << "' */";
+      }
+
+      /* WITH PARSER */
+      auto parser_it = key_opts.find("parser_name");
+      if (parser_it != key_opts.end() && !parser_it->second.empty()) {
+        ss << " /*!50100 WITH PARSER "
+           << quote_identifier(parser_it->second) << " */";
+      }
+    }
+  }
+
+  /* FOREIGN KEYS */
+  if (dd_obj.HasMember("foreign_keys") && dd_obj["foreign_keys"].IsArray()) {
+    const auto &fks = dd_obj["foreign_keys"];
+    for (rapidjson::SizeType i = 0; i < fks.Size(); i++) {
+      const auto &fk = fks[i];
+      ss << ",\n  CONSTRAINT " << quote_identifier(get_json_string(fk, "name"))
+         << " FOREIGN KEY (";
+
+      bool first_fk = true;
+      if (fk.HasMember("elements") && fk["elements"].IsArray()) {
+        const auto &fk_elems = fk["elements"];
+        for (rapidjson::SizeType j = 0; j < fk_elems.Size(); j++) {
+          if (!first_fk) ss << ",";
+          first_fk = false;
+          int col_opx = get_json_int(fk_elems[j], "column_opx");
+          if (col_opx >= 0 &&
+              col_opx < static_cast<int>(all_columns.size())) {
+            ss << quote_identifier(all_columns[col_opx].name);
+          }
+        }
+
+        ss << ") REFERENCES "
+           << quote_identifier(get_json_string(fk, "referenced_table_name"))
+           << " (";
+        bool first_ref = true;
+        for (rapidjson::SizeType j = 0; j < fk_elems.Size(); j++) {
+          if (!first_ref) ss << ",";
+          first_ref = false;
+          ss << quote_identifier(
+              get_json_string(fk_elems[j], "referenced_column_name"));
+        }
+        ss << ")";
+      }
+
+      const char *del_rule_str =
+          fk_rule_str(get_json_int(fk, "delete_rule"));
+      if (del_rule_str) ss << " ON DELETE " << del_rule_str;
+      const char *upd_rule_str =
+          fk_rule_str(get_json_int(fk, "update_rule"));
+      if (upd_rule_str) ss << " ON UPDATE " << upd_rule_str;
+    }
+  }
+
+  /* CHECK CONSTRAINTS */
+  if (dd_obj.HasMember("check_constraints") &&
+      dd_obj["check_constraints"].IsArray()) {
+    const auto &ccs = dd_obj["check_constraints"];
+    for (rapidjson::SizeType i = 0; i < ccs.Size(); i++) {
+      const auto &cc = ccs[i];
+      ss << ",\n  CONSTRAINT " << quote_identifier(get_json_string(cc, "name"))
+         << " CHECK ("
+         << unescape_dd_string(get_json_string(cc, "check_clause_utf8"))
+         << ")";
+      if (get_json_int(cc, "state") == chk_state::CS_NOT_ENFORCED) {
+        ss << " /*!80016 NOT ENFORCED */";
+      }
+    }
+  }
+
+  ss << "\n)";
+
+  /* TABLE OPTIONS */
+  ss << " ENGINE=" << get_json_string(dd_obj, "engine");
+
+  /* DEFAULT CHARSET / COLLATE */
+  int tbl_coll_id = get_json_int(dd_obj, "collation_id");
+  CHARSET_INFO *cs =
+      get_charset(static_cast<uint>(tbl_coll_id), MYF(0));
+  if (cs) {
+    ss << " DEFAULT CHARSET=" << cs->csname;
+    if (!(cs->state & MY_CS_PRIMARY) ||
+        cs == &my_charset_utf8mb4_0900_ai_ci) {
+      ss << " COLLATE=" << cs->m_coll_name;
+    }
+  }
+
+  /* Parse table options */
+  std::string tbl_opts_str = get_json_string(dd_obj, "options");
+  std::map<std::string, std::string> tbl_opts;
+  if (!tbl_opts_str.empty()) tbl_opts = parse_options_string(tbl_opts_str);
+
+  /* PACK_KEYS: stored as HA_OPTION_PACK_KEYS (2) or 0 */
+  auto pk_it = tbl_opts.find("pack_keys");
+  if (pk_it != tbl_opts.end()) {
+    uint64_t pk_val = strtoull(pk_it->second.c_str(), nullptr, 10);
+    ss << " PACK_KEYS=" << (pk_val ? "1" : "0");
+  }
+
+  /* STATS_PERSISTENT: stored as HA_OPTION_STATS_PERSISTENT (4096) or 0 */
+  auto sp_it = tbl_opts.find("stats_persistent");
+  if (sp_it != tbl_opts.end()) {
+    uint64_t sp_val = strtoull(sp_it->second.c_str(), nullptr, 10);
+    ss << " STATS_PERSISTENT=" << (sp_val ? "1" : "0");
+  }
+
+  /* STATS_AUTO_RECALC */
+  auto sar_it = tbl_opts.find("stats_auto_recalc");
+  if (sar_it != tbl_opts.end()) {
+    if (sar_it->second == "1")
+      ss << " STATS_AUTO_RECALC=1";
+    else if (sar_it->second == "2")
+      ss << " STATS_AUTO_RECALC=0";
+  }
+
+  /* STATS_SAMPLE_PAGES */
+  auto ssp_it = tbl_opts.find("stats_sample_pages");
+  if (ssp_it != tbl_opts.end() && ssp_it->second != "0") {
+    ss << " STATS_SAMPLE_PAGES=" << ssp_it->second;
+  }
+
+  /* ROW_FORMAT */
+  int rf = get_json_int(dd_obj, "row_format");
+  switch (rf) {
+    case row_fmt::RF_COMPRESSED:
+      ss << " ROW_FORMAT=COMPRESSED";
+      break;
+    case row_fmt::RF_REDUNDANT:
+      ss << " ROW_FORMAT=REDUNDANT";
+      break;
+    case row_fmt::RF_COMPACT:
+      ss << " ROW_FORMAT=COMPACT";
+      break;
+    default:
+      break;
+  }
+
+  /* KEY_BLOCK_SIZE */
+  auto kbs2_it = tbl_opts.find("key_block_size");
+  if (kbs2_it != tbl_opts.end() && kbs2_it->second != "0") {
+    ss << " KEY_BLOCK_SIZE=" << kbs2_it->second;
+  }
+
+  /* COMPRESSION */
+  auto comp_it = tbl_opts.find("compress");
+  if (comp_it != tbl_opts.end() && !comp_it->second.empty()) {
+    ss << " COMPRESSION='" << comp_it->second << "'";
+  }
+
+  /* ENCRYPTION */
+  auto enc_it = tbl_opts.find("encrypt_type");
+  if (enc_it != tbl_opts.end() && !enc_it->second.empty() &&
+      enc_it->second != "N") {
+    ss << " ENCRYPTION='" << enc_it->second << "'";
+  }
+
+  /* COMMENT */
+  std::string tbl_comment = get_json_string(dd_obj, "comment");
+  if (!tbl_comment.empty()) {
+    ss << " COMMENT='" << escape_string(tbl_comment) << "'";
+  }
+
+  /* ENGINE_ATTRIBUTE */
+  std::string tbl_ea = get_json_string(dd_obj, "engine_attribute");
+  if (!tbl_ea.empty()) {
+    ss << " /*!80021 ENGINE_ATTRIBUTE='" << escape_string(tbl_ea) << "' */";
+  }
+
+  /* SECONDARY_ENGINE_ATTRIBUTE */
+  std::string tbl_sea =
+      get_json_string(dd_obj, "secondary_engine_attribute");
+  if (!tbl_sea.empty()) {
+    ss << " /*!80021 SECONDARY_ENGINE_ATTRIBUTE='" << escape_string(tbl_sea)
+       << "' */";
+  }
+
+  /* PARTITIONS */
+  int pt = get_json_int(dd_obj, "partition_type");
+  if (pt != part_type::PT_NONE) {
+    ss << "\n/*!50100 PARTITION BY ";
+    std::string part_expr =
+        get_json_string(dd_obj, "partition_expression_utf8");
+
+    switch (pt) {
+      case part_type::PT_HASH:
+        ss << "HASH (" << part_expr << ")";
+        break;
+      case part_type::PT_LINEAR_HASH:
+        ss << "LINEAR HASH (" << part_expr << ")";
+        break;
+      case part_type::PT_KEY_55:
+      case part_type::PT_KEY_51:
+        ss << "KEY (" << part_expr << ")";
+        break;
+      case part_type::PT_LINEAR_KEY_51:
+      case part_type::PT_LINEAR_KEY_55:
+        ss << "LINEAR KEY (" << part_expr << ")";
+        break;
+      case part_type::PT_RANGE:
+        ss << "RANGE (" << part_expr << ")";
+        break;
+      case part_type::PT_RANGE_COLUMNS:
+        ss << "RANGE COLUMNS(" << part_expr << ")";
+        break;
+      case part_type::PT_LIST:
+        ss << "LIST (" << part_expr << ")";
+        break;
+      case part_type::PT_LIST_COLUMNS:
+        ss << "LIST COLUMNS(" << part_expr << ")";
+        break;
+      default:
+        break;
+    }
+
+    int st = get_json_int(dd_obj, "subpartition_type");
+    bool has_subparts = st != sub_type::ST_NONE;
+    if (has_subparts) {
+      std::string subpart_expr =
+          get_json_string(dd_obj, "subpartition_expression_utf8");
+      switch (st) {
+        case sub_type::ST_HASH:
+          ss << "\nSUBPARTITION BY HASH (" << subpart_expr << ")";
+          break;
+        case sub_type::ST_LINEAR_HASH:
+          ss << "\nSUBPARTITION BY LINEAR HASH (" << subpart_expr << ")";
+          break;
+        case sub_type::ST_KEY_55:
+        case sub_type::ST_KEY_51:
+          ss << "\nSUBPARTITION BY KEY (" << subpart_expr << ")";
+          break;
+        case sub_type::ST_LINEAR_KEY_51:
+        case sub_type::ST_LINEAR_KEY_55:
+          ss << "\nSUBPARTITION BY LINEAR KEY (" << subpart_expr << ")";
+          break;
+        default:
+          break;
+      }
+
+      if (dd_obj.HasMember("partitions") &&
+          dd_obj["partitions"].IsArray()) {
+        const auto &parts = dd_obj["partitions"];
+        for (rapidjson::SizeType pi = 0; pi < parts.Size(); pi++) {
+          const auto &part = parts[pi];
+          if (part.HasMember("subpartitions") &&
+              part["subpartitions"].IsArray() &&
+              part["subpartitions"].Size() > 0) {
+            ss << "\nSUBPARTITIONS " << part["subpartitions"].Size();
+            break;
+          }
+        }
+      }
+    }
+
+    bool need_part_defs =
+        (pt == part_type::PT_RANGE || pt == part_type::PT_RANGE_COLUMNS ||
+         pt == part_type::PT_LIST || pt == part_type::PT_LIST_COLUMNS);
+
+    if (need_part_defs && dd_obj.HasMember("partitions") &&
+        dd_obj["partitions"].IsArray()) {
+      ss << "\n(";
+      bool first_part = true;
+      const auto &parts = dd_obj["partitions"];
+      for (rapidjson::SizeType pi = 0; pi < parts.Size(); pi++) {
+        const auto &part = parts[pi];
+        uint64_t parent_id =
+            get_json_uint64(part, "parent_partition_id", UINT64_MAX);
+        if (parent_id != UINT64_MAX) continue;
+
+        if (!first_part) ss << ",\n ";
+        first_part = false;
+        ss << "PARTITION "
+           << quote_identifier(get_json_string(part, "name"));
+
+        if (pt == part_type::PT_RANGE || pt == part_type::PT_RANGE_COLUMNS) {
+          ss << " VALUES LESS THAN (";
+          bool first_val = true;
+          if (part.HasMember("values") && part["values"].IsArray()) {
+            const auto &vals = part["values"];
+            for (rapidjson::SizeType vi = 0; vi < vals.Size(); vi++) {
+              if (!first_val) ss << ",";
+              first_val = false;
+              if (get_json_bool(vals[vi], "max_value"))
+                ss << "MAXVALUE";
+              else if (get_json_bool(vals[vi], "null_value"))
+                ss << "NULL";
+              else
+                ss << get_json_string(vals[vi], "value_utf8");
+            }
+          }
+          ss << ")";
+        } else if (pt == part_type::PT_LIST ||
+                   pt == part_type::PT_LIST_COLUMNS) {
+          ss << " VALUES IN (";
+          bool first_val = true;
+          if (part.HasMember("values") && part["values"].IsArray()) {
+            const auto &vals = part["values"];
+            for (rapidjson::SizeType vi = 0; vi < vals.Size(); vi++) {
+              if (!first_val) ss << ",";
+              first_val = false;
+              if (get_json_bool(vals[vi], "null_value"))
+                ss << "NULL";
+              else
+                ss << get_json_string(vals[vi], "value_utf8");
+            }
+          }
+          ss << ")";
+        }
+
+        ss << " ENGINE = " << get_json_string(part, "engine");
+      }
+      ss << ")";
+    } else if (!need_part_defs && dd_obj.HasMember("partitions") &&
+               dd_obj["partitions"].IsArray()) {
+      auto num_parts = dd_obj["partitions"].Size();
+      if (num_parts > 0) ss << "\nPARTITIONS " << num_parts;
+    }
+    ss << " */";
+  }
+
+  ss << ";\n";
+  return ss.str();
+}
+
+static std::string generate_create_tablespace_from_json(
+    const rapidjson::Value &dd_obj) {
+  std::ostringstream ss;
+  std::string ts_name = get_json_string(dd_obj, "name");
+
+  if (ts_name.find('/') != std::string::npos ||
+      ts_name.find("innodb_") == 0 || ts_name == "mysql") {
+    return "";
+  }
+
+  ss << "CREATE TABLESPACE " << quote_identifier(ts_name);
+  if (dd_obj.HasMember("files") && dd_obj["files"].IsArray()) {
+    const auto &files = dd_obj["files"];
+    for (rapidjson::SizeType i = 0; i < files.Size(); i++) {
+      ss << " ADD DATAFILE '" << get_json_string(files[i], "filename")
+         << "'";
+      break;
+    }
+  }
+  ss << " ENGINE = " << get_json_string(dd_obj, "engine");
+  ss << ";\n";
+  return ss.str();
+}
+
+static void process_sdi_create_sql(const char *sdi_data, uint64_t sdi_data_len,
+                                   const char *ibd_path,
+                                   std::string &accumulated_sql) {
+  rapidjson::Document doc;
+  rapidjson::ParseResult ok =
+      doc.Parse(sdi_data, static_cast<size_t>(sdi_data_len - 1));
+  if (!ok) {
+    std::cerr << "JSON parse error: "
+              << rapidjson::GetParseError_En(ok.Code()) << " (offset "
+              << ok.Offset() << ")" << std::endl;
+    return;
+  }
+
+  if (!doc.HasMember("dd_object") || !doc["dd_object"].IsObject()) {
+    std::cerr << "SDI record missing dd_object" << std::endl;
+    return;
+  }
+
+  const auto &dd_obj = doc["dd_object"];
+  std::string obj_type = get_json_string(doc, "dd_object_type");
+
+  if (obj_type == "Table") {
+    std::string sql = generate_create_table_from_json(dd_obj);
+    if (!sql.empty()) accumulated_sql += sql;
+  } else if (obj_type == "Tablespace") {
+    std::string sql = generate_create_tablespace_from_json(dd_obj);
+    if (!sql.empty()) accumulated_sql += sql;
+  }
+}
+
+static void write_sql_output(const std::string &sql,
+                              const char *ibd_path) {
+  /* Print to stdout */
+  std::cout << sql;
+
+  /* Write .sql file alongside .ibd */
+  std::string path(ibd_path);
+  auto dot_pos = path.rfind('.');
+  std::string sql_path;
+  if (dot_pos != std::string::npos)
+    sql_path = path.substr(0, dot_pos) + ".sql";
+  else
+    sql_path = path + ".sql";
+
+  std::ofstream sql_file(sql_path);
+  if (sql_file.is_open()) {
+    sql_file << sql;
+    sql_file.close();
+    std::cerr << "Wrote " << sql_path << std::endl;
+  } else {
+    std::cerr << "Error: cannot write " << sql_path << std::endl;
+  }
+}
+
+}  // namespace create_sql
 
 /** Error logging classes. */
 namespace ib {
@@ -1309,7 +2261,17 @@ class ibd2sdi {
   @return false on success, true on failure */
   bool dump_matching_types(uint64_t sdi_type);
 
+  /** Generate CREATE TABLE SQL from SDI records
+  @param[in]	ibd_path	path to the .ibd file
+  @return false on success, true on failure */
+  bool dump_create_sql(const char *ibd_path);
+
  private:
+  /** Collect SDI records and generate SQL
+  @param[in]	ts		tablespace structure
+  @param[in]	ibd_path	path to the .ibd file
+  @return false on success, true on failure */
+  bool create_sql_from_copy(ib_tablespace *ts, const char *ibd_path);
   /** Process SDI from a tablespace
   @param[in]	ts	tablespace structure
   @return false on success, true on failure */
@@ -2227,6 +3189,66 @@ bool ibd2sdi::dump_matching_types(uint64_t sdi_type) {
   return (ret);
 }
 
+bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
+  page_no_t root_page_num = ts->get_sdi_root();
+  page_size_t page_size(ts->get_page_size());
+
+  byte buf_unalign[2 * UNIV_PAGE_SIZE_MAX];
+  byte *buf = static_cast<byte *>(ut_align(buf_unalign, page_size.logical()));
+  memset(buf, 0, page_size.logical());
+
+  switch (reach_to_leftmost_leaf_level(ts, page_size.logical(), buf,
+                                       root_page_num)) {
+    case SUCCESS:
+      break;
+    case FALIURE:
+      return true;
+    case NO_RECORDS:
+      ib::info() << "SDI is empty";
+      return false;
+    default:
+      ut_ad(0);
+  }
+
+  byte *current_rec = get_first_user_rec(ts, page_size.logical(), buf);
+  uint64_t sdi_id;
+  uint64_t sdi_type;
+  byte *sdi_data = nullptr;
+  uint64_t sdi_data_len = 0;
+  bool corrupt = false;
+
+  std::string accumulated_sql;
+
+  while (current_rec != nullptr &&
+         get_rec_type(current_rec) != REC_STATUS_SUPREMUM && !corrupt) {
+    dberr_t err = parse_fields_in_rec(ts, current_rec, &sdi_type, &sdi_id,
+                                      &sdi_data, &sdi_data_len);
+
+    if (err == DB_SUCCESS && sdi_data != nullptr) {
+      create_sql::process_sdi_create_sql(
+          reinterpret_cast<const char *>(sdi_data), sdi_data_len, ibd_path,
+          accumulated_sql);
+      free(sdi_data);
+      sdi_data = nullptr;
+    }
+
+    current_rec =
+        get_next_rec(ts, current_rec, page_size.logical(), buf, &corrupt);
+  }
+
+  if (!accumulated_sql.empty()) {
+    create_sql::write_sql_output(accumulated_sql, ibd_path);
+  }
+
+  return corrupt;
+}
+
+bool ibd2sdi::dump_create_sql(const char *ibd_path) {
+  ut_a(m_tablespace_creator != nullptr);
+  ib_tablespace *ts = m_tablespace_creator->get_tablespace();
+  return create_sql_from_copy(ts, ibd_path);
+}
+
 int main(int argc, char **argv) {
   /* Buffer to hold temporary file name. */
   char tmp_filename_buf[FN_REFLEN];
@@ -2271,13 +3293,17 @@ int main(int argc, char **argv) {
     dump_file = stdout;
   }
 
-  ibd2sdi sdi(argc, argv, dump_file, opts.skip_data);
+  /* --create-sql forces data reading (cannot skip) */
+  bool skip_data = opts.create_sql ? false : opts.skip_data;
+  ibd2sdi sdi(argc, argv, dump_file, skip_data);
 
   if (sdi.process_files()) {
     return 1;
   }
 
-  if (opts.is_sdi_rec) {
+  if (opts.create_sql) {
+    ret = sdi.dump_create_sql(argv[0]);
+  } else if (opts.is_sdi_rec) {
     ret = sdi.dump_one_sdi(opts.sdi_rec_id, opts.sdi_rec_type);
   } else if (opts.is_sdi_id) {
     ret = sdi.dump_matching_ids(opts.sdi_rec_id);
