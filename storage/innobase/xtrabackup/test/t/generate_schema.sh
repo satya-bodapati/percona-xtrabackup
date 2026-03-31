@@ -24,7 +24,7 @@ function verify_roundtrip() {
     # Capture original schema for all test tables
     for tbl in $TABLES; do
         ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
-            test $tbl > $topdir/original_${tbl}.sql
+            test "$tbl" > $topdir/original_${tbl}.sql
     done
 
     # Backup
@@ -43,11 +43,11 @@ function verify_roundtrip() {
         vlog "Generated ${tbl}.sql contents:"
         cat $topdir/backup/test/${tbl}.sql >&2
 
-        mysql -e "SET foreign_key_checks=0; DROP TABLE $tbl" test
+        mysql -e "SET foreign_key_checks=0; DROP TABLE \`$tbl\`" test
         (echo "SET foreign_key_checks=0;"; cat $topdir/backup/test/${tbl}.sql) | mysql test
 
         ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
-            test $tbl > $topdir/recreated_${tbl}.sql
+            test "$tbl" > $topdir/recreated_${tbl}.sql
 
         run_cmd diff -u $topdir/original_${tbl}.sql $topdir/recreated_${tbl}.sql
         vlog "generate_schema: $tbl roundtrip passed"
@@ -204,6 +204,17 @@ PARTITION BY LIST (region) (
   PARTITION p_other VALUES IN (7, 8, 9)
 )" test
 add_test_table t12
+
+# t13: backtick quoting - reserved words and special identifiers
+mysql -e "CREATE TABLE \`select\` (
+  \`order\` INT NOT NULL AUTO_INCREMENT,
+  \`group\` VARCHAR(100) DEFAULT 'test',
+  \`key\` INT,
+  PRIMARY KEY (\`order\`),
+  KEY \`index\` (\`group\`(50)),
+  KEY \`desc\` (\`key\`)
+) ENGINE=InnoDB" test
+add_test_table 'select'
 
 verify_roundtrip
 

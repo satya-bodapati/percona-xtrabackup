@@ -359,6 +359,16 @@ static std::string unescape_dd_string(const dd::String_type &s) {
   return result;
 }
 
+static std::string quote_identifier(const dd::String_type &name) {
+  std::string r = "`";
+  for (char c : name) {
+    if (c == '`') r += '`';
+    r += c;
+  }
+  r += '`';
+  return r;
+}
+
 static const char *fk_rule_str(dd::Foreign_key::enum_rule rule) {
   switch (rule) {
     case dd::Foreign_key::RULE_RESTRICT:
@@ -384,7 +394,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
   std::ostringstream ss;
   bool first_col = true;
 
-  ss << "CREATE TABLE " << tbl.name().c_str() << " (\n";
+  ss << "CREATE TABLE " << quote_identifier(tbl.name()) << " (\n";
 
   for (const auto col : *tbl.columns()) {
     if (col->is_se_hidden() ||
@@ -394,7 +404,8 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     if (!first_col) ss << ",\n";
     first_col = false;
 
-    ss << "  " << col->name().c_str() << " " << col->column_type_utf8();
+    ss << "  " << quote_identifier(col->name()) << " "
+       << col->column_type_utf8();
 
     if (col->is_explicit_collation() &&
         col->type() != dd::enum_column_types::GEOMETRY) {
@@ -496,7 +507,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     }
 
     if (!found_primary) {
-      ss << key->name();
+      ss << quote_identifier(key->name());
     }
 
     ss << " (";
@@ -512,7 +523,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       if (elem_col.hidden() == dd::Column::enum_hidden_type::HT_HIDDEN_SQL) {
         ss << "(" << elem_col.generation_expression_utf8() << ")";
       } else {
-        ss << elem_col.name();
+        ss << quote_identifier(elem_col.name());
         if (!key_elem->is_length_null() && key_elem->is_prefix()) {
           uint prefix_len = key_elem->length();
           const CHARSET_INFO *elem_cs =
@@ -556,19 +567,21 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
   }
 
   for (const auto fk : *tbl.foreign_keys()) {
-    ss << ",\n  CONSTRAINT " << fk->name() << " FOREIGN KEY (";
+    ss << ",\n  CONSTRAINT " << quote_identifier(fk->name())
+       << " FOREIGN KEY (";
     bool first_fk_col = true;
     for (const auto fk_el : *fk->elements()) {
       if (!first_fk_col) ss << ",";
       first_fk_col = false;
-      ss << fk_el->column().name();
+      ss << quote_identifier(fk_el->column().name());
     }
-    ss << ") REFERENCES " << fk->referenced_table_name() << " (";
+    ss << ") REFERENCES " << quote_identifier(fk->referenced_table_name())
+       << " (";
     bool first_ref_col = true;
     for (const auto fk_el : *fk->elements()) {
       if (!first_ref_col) ss << ",";
       first_ref_col = false;
-      ss << fk_el->referenced_column_name();
+      ss << quote_identifier(fk_el->referenced_column_name());
     }
     ss << ")";
     const char *del_rule = fk_rule_str(fk->delete_rule());
@@ -578,7 +591,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
   }
 
   for (const auto cc : *tbl.check_constraints()) {
-    ss << ",\n  CONSTRAINT " << cc->name() << " CHECK ("
+    ss << ",\n  CONSTRAINT " << quote_identifier(cc->name()) << " CHECK ("
        << unescape_dd_string(cc->check_clause_utf8()) << ")";
     if (cc->constraint_state() == dd::Check_constraint::CS_NOT_ENFORCED) {
       ss << " /*!80016 NOT ENFORCED */";
@@ -714,7 +727,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
         if (part->parent_partition_id() != dd::INVALID_OBJECT_ID) continue;
         if (!first_part) ss << ",\n ";
         first_part = false;
-        ss << "PARTITION " << part->name();
+        ss << "PARTITION " << quote_identifier(part->name());
 
         if (tbl.partition_type() == dd::Table::PT_RANGE ||
             tbl.partition_type() == dd::Table::PT_RANGE_COLUMNS) {
