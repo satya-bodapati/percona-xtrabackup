@@ -153,7 +153,7 @@ mysql -e "CREATE TABLE t9 (
   COMMENT='compressed table'" test
 add_test_table t9
 
-# t10: FULLTEXT index and SPATIAL index
+# t10: FULLTEXT index (basic, multi-column, WITH PARSER ngram), SPATIAL index
 mysql -e "CREATE TABLE t10 (
   id INT NOT NULL AUTO_INCREMENT,
   title VARCHAR(200),
@@ -161,6 +161,8 @@ mysql -e "CREATE TABLE t10 (
   location POINT NOT NULL SRID 0,
   PRIMARY KEY (id),
   FULLTEXT KEY ft_body (body),
+  FULLTEXT KEY ft_title_body (title, body),
+  FULLTEXT KEY ft_ngram (body) WITH PARSER ngram,
   SPATIAL KEY sp_loc (location)
 ) ENGINE=InnoDB" test
 add_test_table t10
