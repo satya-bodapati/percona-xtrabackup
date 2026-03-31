@@ -155,6 +155,26 @@ mysql -e "CREATE TABLE t9 (
   COMMENT='compressed table'" test
 add_test_table t9
 
+# t9a: compressed via KEY_BLOCK_SIZE only (no explicit ROW_FORMAT)
+mysql -e "CREATE TABLE t9a (
+  id INT NOT NULL AUTO_INCREMENT,
+  data VARCHAR(200),
+  txt TEXT,
+  PRIMARY KEY (id),
+  KEY idx_data (data(50))
+) ENGINE=InnoDB KEY_BLOCK_SIZE=4" test
+add_test_table t9a
+
+# t9b: compressed via ROW_FORMAT=COMPRESSED only (no KEY_BLOCK_SIZE)
+mysql -e "CREATE TABLE t9b (
+  id INT NOT NULL AUTO_INCREMENT,
+  data VARCHAR(200),
+  txt TEXT,
+  PRIMARY KEY (id),
+  KEY idx_data (data(50))
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED" test
+add_test_table t9b
+
 # t10: FULLTEXT index (basic, multi-column, WITH PARSER ngram), SPATIAL index
 mysql -e "CREATE TABLE t10 (
   id INT NOT NULL AUTO_INCREMENT,

@@ -455,6 +455,7 @@ constexpr int IA_HASH = 4;
 }  // namespace idx_algo
 
 namespace row_fmt {
+constexpr int RF_DYNAMIC = 2;
 constexpr int RF_COMPRESSED = 3;
 constexpr int RF_REDUNDANT = 4;
 constexpr int RF_COMPACT = 5;
@@ -1069,20 +1070,29 @@ static std::string generate_create_table_from_json(
     ss << " STATS_SAMPLE_PAGES=" << ssp_it->second;
   }
 
-  /* ROW_FORMAT */
-  int rf = get_json_int(dd_obj, "row_format");
-  switch (rf) {
-    case row_fmt::RF_COMPRESSED:
-      ss << " ROW_FORMAT=COMPRESSED";
-      break;
-    case row_fmt::RF_REDUNDANT:
-      ss << " ROW_FORMAT=REDUNDANT";
-      break;
-    case row_fmt::RF_COMPACT:
-      ss << " ROW_FORMAT=COMPACT";
-      break;
-    default:
-      break;
+  /* ROW_FORMAT -- use row_type from options (set only when user explicitly
+   * specified ROW_FORMAT), not the top-level row_format field which reflects
+   * the effective format (e.g. KEY_BLOCK_SIZE implies COMPRESSED internally
+   * but SHOW CREATE TABLE omits ROW_FORMAT in that case). */
+  auto rt_it = tbl_opts.find("row_type");
+  if (rt_it != tbl_opts.end()) {
+    int rt = static_cast<int>(strtoull(rt_it->second.c_str(), nullptr, 10));
+    switch (rt) {
+      case row_fmt::RF_COMPRESSED:
+        ss << " ROW_FORMAT=COMPRESSED";
+        break;
+      case row_fmt::RF_REDUNDANT:
+        ss << " ROW_FORMAT=REDUNDANT";
+        break;
+      case row_fmt::RF_COMPACT:
+        ss << " ROW_FORMAT=COMPACT";
+        break;
+      case row_fmt::RF_DYNAMIC:
+        ss << " ROW_FORMAT=DYNAMIC";
+        break;
+      default:
+        break;
+    }
   }
 
   /* KEY_BLOCK_SIZE */
