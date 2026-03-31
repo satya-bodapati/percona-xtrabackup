@@ -159,6 +159,16 @@ mysql -e "CREATE TABLE t8 (
 ) ENGINE=InnoDB" test
 add_test_table t8
 
+# t9: table options - ROW_FORMAT, KEY_BLOCK_SIZE, COMMENT, STATS_*
+mysql -e "CREATE TABLE t9 (
+  id INT NOT NULL AUTO_INCREMENT,
+  data TEXT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8
+  STATS_PERSISTENT=1 STATS_AUTO_RECALC=0 STATS_SAMPLE_PAGES=100
+  COMMENT='compressed table'" test
+add_test_table t9
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

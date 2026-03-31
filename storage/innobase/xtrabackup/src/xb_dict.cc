@@ -585,9 +585,64 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
   }
 
   ss << "\n) ENGINE=" << tbl.engine().c_str();
+
+  const auto &opts = tbl.options();
+
+  uint64 pack_keys_val;
+  if (opts.exists("pack_keys") && !opts.get("pack_keys", &pack_keys_val)) {
+    ss << " PACK_KEYS=" << (pack_keys_val ? "1" : "0");
+  }
+
+  uint64 stats_persistent_val;
+  if (opts.exists("stats_persistent") &&
+      !opts.get("stats_persistent", &stats_persistent_val)) {
+    ss << " STATS_PERSISTENT=" << (stats_persistent_val ? "1" : "0");
+  }
+
+  uint64 stats_auto_recalc_val;
+  if (opts.exists("stats_auto_recalc") &&
+      !opts.get("stats_auto_recalc", &stats_auto_recalc_val)) {
+    if (stats_auto_recalc_val == 1)
+      ss << " STATS_AUTO_RECALC=1";
+    else if (stats_auto_recalc_val == 2)
+      ss << " STATS_AUTO_RECALC=0";
+  }
+
+  uint64 stats_sample_pages_val;
+  if (opts.exists("stats_sample_pages") &&
+      !opts.get("stats_sample_pages", &stats_sample_pages_val) &&
+      stats_sample_pages_val != 0) {
+    ss << " STATS_SAMPLE_PAGES=" << stats_sample_pages_val;
+  }
+
   const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
   ss << " DEFAULT CHARSET=" << cs->csname;
   ss << " COLLATE=" << cs->m_coll_name;
+
+  switch (tbl.row_format()) {
+    case dd::Table::RF_COMPRESSED:
+      ss << " ROW_FORMAT=COMPRESSED";
+      break;
+    case dd::Table::RF_REDUNDANT:
+      ss << " ROW_FORMAT=REDUNDANT";
+      break;
+    case dd::Table::RF_COMPACT:
+      ss << " ROW_FORMAT=COMPACT";
+      break;
+    default:
+      break;
+  }
+
+  uint64 key_block_size_val;
+  if (opts.exists("key_block_size") &&
+      !opts.get("key_block_size", &key_block_size_val) &&
+      key_block_size_val != 0) {
+    ss << " KEY_BLOCK_SIZE=" << key_block_size_val;
+  }
+
+  if (!tbl.comment().empty()) {
+    ss << " COMMENT='" << tbl.comment() << "'";
+  }
 
   ss << ";\n";
 
