@@ -354,6 +354,57 @@ mysql -e "CREATE TABLE t25 (
 ) ENGINE=InnoDB" test
 add_test_table t25
 
+# t26: RANGE COLUMNS partition (multi-column, with string values)
+mysql -e "CREATE TABLE t26 (
+  fname VARCHAR(50),
+  lname VARCHAR(50),
+  id INT NOT NULL,
+  PRIMARY KEY (id, lname)
+) ENGINE=InnoDB
+PARTITION BY RANGE COLUMNS(lname) (
+  PARTITION p_a_m VALUES LESS THAN ('N'),
+  PARTITION p_n_z VALUES LESS THAN (MAXVALUE)
+)" test
+add_test_table t26
+
+# t27: LIST COLUMNS partition
+mysql -e "CREATE TABLE t27 (
+  id INT NOT NULL,
+  city VARCHAR(25) NOT NULL,
+  PRIMARY KEY (id, city)
+) ENGINE=InnoDB
+PARTITION BY LIST COLUMNS(city) (
+  PARTITION p_nyc VALUES IN ('New York'),
+  PARTITION p_la VALUES IN ('Los Angeles'),
+  PARTITION p_other VALUES IN ('Chicago','Houston')
+)" test
+add_test_table t27
+
+# t28: RANGE with HASH subpartitioning
+mysql -e "CREATE TABLE t28 (
+  id INT NOT NULL,
+  purchased DATE NOT NULL,
+  PRIMARY KEY (id, purchased)
+) ENGINE=InnoDB
+PARTITION BY RANGE (YEAR(purchased))
+SUBPARTITION BY HASH (TO_DAYS(purchased))
+SUBPARTITIONS 2 (
+  PARTITION p0 VALUES LESS THAN (2020),
+  PARTITION p1 VALUES LESS THAN (2025),
+  PARTITION pmax VALUES LESS THAN MAXVALUE
+)" test
+add_test_table t28
+
+# t29: KEY partition
+mysql -e "CREATE TABLE t29 (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(100),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB
+PARTITION BY KEY (id)
+PARTITIONS 4" test
+add_test_table t29
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

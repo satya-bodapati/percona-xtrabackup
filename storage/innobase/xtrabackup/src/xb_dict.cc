@@ -813,7 +813,8 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
         break;
     }
 
-    if (tbl.subpartition_type() != dd::Table::ST_NONE) {
+    bool has_subparts = tbl.subpartition_type() != dd::Table::ST_NONE;
+    if (has_subparts) {
       const auto &subpart_expr = tbl.subpartition_expression_utf8();
       switch (tbl.subpartition_type()) {
         case dd::Table::ST_HASH:
@@ -832,6 +833,14 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
           break;
         default:
           break;
+      }
+
+      for (const auto part : *tbl.partitions()) {
+        auto num_sub = part->subpartitions()->size();
+        if (num_sub > 0) {
+          ss << "\nSUBPARTITIONS " << num_sub;
+          break;
+        }
       }
     }
 
@@ -879,14 +888,12 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
           }
           ss << ")";
         }
+
         ss << " ENGINE = " << part->engine();
       }
       ss << ")";
     } else {
-      uint num_parts = 0;
-      for (const auto part : *tbl.partitions()) {
-        if (part->parent_partition_id() == dd::INVALID_OBJECT_ID) num_parts++;
-      }
+      auto num_parts = tbl.partitions()->size();
       if (num_parts > 0) ss << "\nPARTITIONS " << num_parts;
     }
     ss << " */";
