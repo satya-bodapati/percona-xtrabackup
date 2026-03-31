@@ -256,6 +256,74 @@ SUBPARTITIONS 2 (
 )" test
 add_partition_table t17 't17#p#p0#sp#p0sp0.ibd'
 
+# t18: kitchen-sink column types not covered elsewhere
+mysql -e "CREATE TABLE t18 (
+  id INT NOT NULL AUTO_INCREMENT,
+  c_tinyint TINYINT,
+  c_tinyint_u TINYINT UNSIGNED,
+  c_smallint SMALLINT,
+  c_smallint_u SMALLINT UNSIGNED,
+  c_mediumint MEDIUMINT,
+  c_mediumint_u MEDIUMINT UNSIGNED,
+  c_bigint_u BIGINT UNSIGNED,
+  c_decimal DECIMAL(10,2),
+  c_decimal_u DECIMAL(10,2) UNSIGNED,
+  c_numeric NUMERIC(5,3),
+  c_double DOUBLE,
+  c_real REAL,
+  c_bit BIT(1),
+  c_bit64 BIT(64),
+  c_char CHAR(50) NOT NULL,
+  c_binary BINARY(16),
+  c_varbinary VARBINARY(255),
+  c_tinyblob TINYBLOB,
+  c_mediumblob MEDIUMBLOB,
+  c_longblob LONGBLOB,
+  c_tinytext TINYTEXT,
+  c_mediumtext MEDIUMTEXT,
+  c_longtext LONGTEXT,
+  c_bool BOOLEAN DEFAULT TRUE,
+  c_year YEAR,
+  c_time TIME,
+  c_time_fsp TIME(6),
+  c_date DATE,
+  c_set SET('a','b','c','d'),
+  c_json JSON,
+  c_varchar_cs VARCHAR(100) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin,
+  c_text_cs TEXT CHARACTER SET latin1,
+  PRIMARY KEY (id),
+  KEY idx_decimal (c_decimal),
+  KEY idx_char (c_char(20)),
+  KEY idx_varbinary (c_varbinary(30))
+) ENGINE=InnoDB" test
+add_test_table t18
+
+# t19: INVISIBLE columns
+mysql -e 'CREATE TABLE t19 (
+  id INT NOT NULL AUTO_INCREMENT,
+  visible_col VARCHAR(100) NOT NULL,
+  invisible_col INT /*!80023 INVISIBLE */,
+  val INT NOT NULL DEFAULT 0,
+  invisible_gen INT GENERATED ALWAYS AS (val * 10) STORED /*!80023 INVISIBLE */,
+  PRIMARY KEY (id),
+  KEY idx_vis (visible_col(30))
+) ENGINE=InnoDB' test
+add_test_table t19
+
+# t20: JSON column with functional index and multi-valued index
+${MYSQL} ${MYSQL_ARGS} test <<'EOSQL'
+CREATE TABLE t20 (
+  id INT NOT NULL AUTO_INCREMENT,
+  doc JSON,
+  tags JSON,
+  PRIMARY KEY (id),
+  KEY idx_name ((CAST(doc->>'$.name' AS CHAR(50)))),
+  KEY idx_age ((CAST(doc->>'$.age' AS UNSIGNED))),
+  KEY idx_tags ((CAST(tags->'$[*]' AS UNSIGNED ARRAY)))
+) ENGINE=InnoDB;
+EOSQL
+add_test_table t20
+
 # =====================================================================
 # Create general tablespace tables (regular)
 # =====================================================================

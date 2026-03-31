@@ -633,6 +633,11 @@ static bool is_string_type(int ct) {
          ct == col_type::BLOB;
 }
 
+static bool is_blob_type(int ct) {
+  return ct == col_type::TINY_BLOB || ct == col_type::MEDIUM_BLOB ||
+         ct == col_type::LONG_BLOB || ct == col_type::BLOB;
+}
+
 static const char *fk_rule_str(int rule) {
   switch (rule) {
     case fk_rule::RULE_RESTRICT:
@@ -679,7 +684,8 @@ static std::string generate_create_table_from_json(
     ci.hidden = get_json_int(col, "hidden", col_hidden::HT_VISIBLE);
     ci.type = get_json_int(col, "type");
     ci.column_type_utf8 = get_json_string(col, "column_type_utf8");
-    ci.gen_expr_utf8 = get_json_string(col, "generation_expression_utf8");
+    ci.gen_expr_utf8 =
+        unescape_dd_string(get_json_string(col, "generation_expression_utf8"));
     ci.collation_id = get_json_int(col, "collation_id");
     all_columns.push_back(ci);
   }
@@ -714,7 +720,8 @@ static std::string generate_create_table_from_json(
     }
 
     /* Generated column */
-    std::string gen_expr = get_json_string(col, "generation_expression_utf8");
+    std::string gen_expr =
+        unescape_dd_string(get_json_string(col, "generation_expression_utf8"));
     bool is_gcol = !gen_expr.empty();
     if (is_gcol) {
       ss << " GENERATED ALWAYS AS (" << gen_expr << ")";
@@ -752,7 +759,8 @@ static std::string generate_create_table_from_json(
     bool has_no_default = get_json_bool(col, "has_no_default");
     bool is_auto_inc = get_json_bool(col, "is_auto_increment");
     if (!is_gcol && !has_no_default && !is_auto_inc) {
-      std::string default_option = get_json_string(col, "default_option");
+      std::string default_option =
+          unescape_dd_string(get_json_string(col, "default_option"));
       bool def_utf8_null = get_json_bool(col, "default_value_utf8_null");
       std::string def_utf8 = get_json_string(col, "default_value_utf8");
 
@@ -764,7 +772,8 @@ static std::string generate_create_table_from_json(
           ss << " (" << default_option << ")";
         }
       } else if (def_utf8_null) {
-        ss << " DEFAULT NULL";
+        /* BLOB/TEXT: mysqldump suppresses implicit DEFAULT NULL */
+        if (!is_blob_type(col_type)) ss << " DEFAULT NULL";
       } else if (!get_json_bool(col, "default_value_null")) {
         ss << " DEFAULT";
         if (is_numeric_type(col_type)) {
@@ -909,15 +918,11 @@ static std::string generate_create_table_from_json(
         }
       }
 
-      /* KEY_BLOCK_SIZE */
+      /* Per-index options (KEY_BLOCK_SIZE is table-level only in SHOW CREATE
+       * TABLE) */
       std::string key_opts_str = get_json_string(key, "options");
       std::map<std::string, std::string> key_opts;
       if (!key_opts_str.empty()) key_opts = parse_options_string(key_opts_str);
-
-      auto kbs_it = key_opts.find("block_size");
-      if (kbs_it != key_opts.end() && kbs_it->second != "0") {
-        ss << " KEY_BLOCK_SIZE=" << kbs_it->second;
-      }
 
       /* COMMENT */
       std::string key_comment = get_json_string(key, "comment");
