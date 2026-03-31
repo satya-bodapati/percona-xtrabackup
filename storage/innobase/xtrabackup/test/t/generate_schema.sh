@@ -225,6 +225,22 @@ mysql -e "CREATE TABLE t14 (
 ) ENGINE=InnoDB COMMENT='table with ''quotes'' and back\\\\slashes'" test
 add_test_table t14
 
+# t15: COLLATE conditional - latin1 (primary collation, no COLLATE printed)
+mysql -e "CREATE TABLE t15 (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(100),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1" test
+add_test_table t15
+
+# t16: COLLATE conditional - non-primary collation (COLLATE must be printed)
+mysql -e "CREATE TABLE t16 (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(100),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" test
+add_test_table t16
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

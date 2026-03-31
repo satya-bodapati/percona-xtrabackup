@@ -660,7 +660,9 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
 
   const CHARSET_INFO *cs = dd_get_mysql_charset(tbl.collation_id());
   ss << " DEFAULT CHARSET=" << cs->csname;
-  ss << " COLLATE=" << cs->m_coll_name;
+  if (!(cs->state & MY_CS_PRIMARY) || cs == &my_charset_utf8mb4_0900_ai_ci) {
+    ss << " COLLATE=" << cs->m_coll_name;
+  }
 
   switch (tbl.row_format()) {
     case dd::Table::RF_COMPRESSED:
