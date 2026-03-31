@@ -459,6 +459,14 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       ss << " NULL";
     }
 
+    const auto &col_opts = col->options();
+    uint64 not_secondary_val;
+    if (col_opts.exists("not_secondary") &&
+        !col_opts.get("not_secondary", &not_secondary_val) &&
+        not_secondary_val) {
+      ss << " NOT SECONDARY";
+    }
+
     if (col->type() == dd::enum_column_types::GEOMETRY && col->srs_id()) {
       ss << " /*!80003 SRID " << col->srs_id().value() << " */";
     }
@@ -514,6 +522,19 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
 
     if (!col->comment().empty()) {
       ss << " COMMENT '" << escape_string(col->comment()) << "'";
+    }
+
+    auto col_ea = col->engine_attribute();
+    if (col_ea.length > 0) {
+      ss << " /*!80021 ENGINE_ATTRIBUTE '"
+         << escape_string(dd::String_type(col_ea.str, col_ea.length)) << "' */";
+    }
+
+    auto col_sea = col->secondary_engine_attribute();
+    if (col_sea.length > 0) {
+      ss << " /*!80021 SECONDARY_ENGINE_ATTRIBUTE '"
+         << escape_string(dd::String_type(col_sea.str, col_sea.length))
+         << "' */";
     }
   }
 
