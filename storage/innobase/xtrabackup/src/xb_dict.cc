@@ -345,6 +345,34 @@ static bool has_default(dd::Column *dd_col) {
   return !dd_col->has_no_default() && !dd_col->is_auto_increment();
 }
 
+static std::string escape_string(const dd::String_type &s) {
+  std::string r;
+  r.reserve(s.length());
+  for (char c : s) {
+    switch (c) {
+      case '\0':
+        r += "\\0";
+        break;
+      case '\n':
+        r += "\\n";
+        break;
+      case '\r':
+        r += "\\r";
+        break;
+      case '\\':
+        r += "\\\\";
+        break;
+      case '\'':
+        r += "''";
+        break;
+      default:
+        r += c;
+        break;
+    }
+  }
+  return r;
+}
+
 static std::string unescape_dd_string(const dd::String_type &s) {
   std::string result;
   result.reserve(s.length());
@@ -465,7 +493,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
             break;
         }
         if (needs_quote) {
-          ss << " '" << val << "'";
+          ss << " '" << escape_string(val) << "'";
         } else {
           ss << " " << val;
         }
@@ -485,7 +513,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     }
 
     if (!col->comment().empty()) {
-      ss << " COMMENT '" << col->comment() << "'";
+      ss << " COMMENT '" << escape_string(col->comment()) << "'";
     }
   }
 
@@ -559,7 +587,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     }
 
     if (!key->comment().empty()) {
-      ss << " COMMENT '" << key->comment() << "'";
+      ss << " COMMENT '" << escape_string(key->comment()) << "'";
     }
 
     if (!key->is_visible()) {
@@ -656,7 +684,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
   }
 
   if (!tbl.comment().empty()) {
-    ss << " COMMENT='" << tbl.comment() << "'";
+    ss << " COMMENT='" << escape_string(tbl.comment()) << "'";
   }
 
   if (tbl.partition_type() != dd::Table::PT_NONE) {

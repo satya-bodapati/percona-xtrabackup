@@ -216,6 +216,15 @@ mysql -e "CREATE TABLE \`select\` (
 ) ENGINE=InnoDB" test
 add_test_table 'select'
 
+# t14: string escaping in comments and defaults
+mysql -e "CREATE TABLE t14 (
+  id INT NOT NULL AUTO_INCREMENT COMMENT 'it''s the primary key',
+  name VARCHAR(100) DEFAULT 'O''Brien' COMMENT 'user''s name with quote',
+  data VARCHAR(255) DEFAULT 'back\\\\slash',
+  PRIMARY KEY (id)
+) ENGINE=InnoDB COMMENT='table with ''quotes'' and back\\\\slashes'" test
+add_test_table t14
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"
