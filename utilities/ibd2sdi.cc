@@ -539,6 +539,15 @@ static std::string escape_string(const std::string &s) {
   return r;
 }
 
+static std::string strip_backticks(const std::string &s) {
+  std::string result;
+  result.reserve(s.length());
+  for (char c : s) {
+    if (c != '`') result += c;
+  }
+  return result;
+}
+
 static std::string unescape_dd_string(const std::string &s) {
   std::string result;
   result.reserve(s.length());
@@ -617,14 +626,6 @@ static bool get_json_bool(const rapidjson::Value &v, const char *key,
                           bool def = false) {
   if (v.HasMember(key) && v[key].IsBool()) return v[key].GetBool();
   return def;
-}
-
-static bool is_numeric_type(int ct) {
-  return ct == col_type::DECIMAL || ct == col_type::NEWDECIMAL ||
-         ct == col_type::TINY || ct == col_type::SHORT ||
-         ct == col_type::LONG || ct == col_type::LONGLONG ||
-         ct == col_type::INT24 || ct == col_type::FLOAT ||
-         ct == col_type::DOUBLE || ct == col_type::BIT;
 }
 
 static bool is_string_type(int ct) {
@@ -776,12 +777,7 @@ static std::string generate_create_table_from_json(
         /* BLOB/TEXT: mysqldump suppresses implicit DEFAULT NULL */
         if (!is_blob_type(col_type)) ss << " DEFAULT NULL";
       } else if (!get_json_bool(col, "default_value_null")) {
-        ss << " DEFAULT";
-        if (is_numeric_type(col_type)) {
-          ss << " " << def_utf8;
-        } else {
-          ss << " '" << escape_string(def_utf8) << "'";
-        }
+        ss << " DEFAULT '" << escape_string(def_utf8) << "'";
       }
     }
 
@@ -954,17 +950,24 @@ static std::string generate_create_table_from_json(
       /* WITH PARSER */
       auto parser_it = key_opts.find("parser_name");
       if (parser_it != key_opts.end() && !parser_it->second.empty()) {
-        ss << " /*!50100 WITH PARSER "
-           << quote_identifier(parser_it->second) << " */";
+        ss << " /*!50100 WITH PARSER " << quote_identifier(parser_it->second)
+           << " */ ";
       }
     }
   }
 
-  /* FOREIGN KEYS */
+  /* FOREIGN KEYS (sorted by name to match SHOW CREATE TABLE) */
   if (dd_obj.HasMember("foreign_keys") && dd_obj["foreign_keys"].IsArray()) {
     const auto &fks = dd_obj["foreign_keys"];
-    for (rapidjson::SizeType i = 0; i < fks.Size(); i++) {
-      const auto &fk = fks[i];
+    std::vector<rapidjson::SizeType> fk_order(fks.Size());
+    for (rapidjson::SizeType i = 0; i < fks.Size(); i++) fk_order[i] = i;
+    std::sort(fk_order.begin(), fk_order.end(),
+              [&fks](rapidjson::SizeType a, rapidjson::SizeType b) {
+                return get_json_string(fks[a], "name") <
+                       get_json_string(fks[b], "name");
+              });
+    for (auto idx : fk_order) {
+      const auto &fk = fks[idx];
       ss << ",\n  CONSTRAINT " << quote_identifier(get_json_string(fk, "name"))
          << " FOREIGN KEY (";
 
@@ -1020,6 +1023,14 @@ static std::string generate_create_table_from_json(
   }
 
   ss << "\n)";
+
+  /* TABLESPACE (general tablespaces only; file-per-table refs contain '/').
+   * Must appear before ENGINE= to match SHOW CREATE TABLE output. */
+  std::string ts_ref = get_json_string(dd_obj, "tablespace_ref");
+  if (!ts_ref.empty() && ts_ref.find('/') == std::string::npos &&
+      ts_ref != "innodb_system") {
+    ss << " /*!50100 TABLESPACE " << quote_identifier(ts_ref) << " */";
+  }
 
   /* TABLE OPTIONS */
   ss << " ENGINE=" << get_json_string(dd_obj, "engine");
@@ -1134,17 +1145,13 @@ static std::string generate_create_table_from_json(
        << "' */";
   }
 
-  /* TABLESPACE (general tablespaces only; file-per-table refs contain '/') */
-  std::string ts_ref = get_json_string(dd_obj, "tablespace_ref");
-  if (!ts_ref.empty() && ts_ref.find('/') == std::string::npos &&
-      ts_ref != "innodb_system") {
-    ss << " /*!50100 TABLESPACE " << quote_identifier(ts_ref) << " */";
-  }
-
   /* PARTITIONS */
   int pt = get_json_int(dd_obj, "partition_type");
   if (pt != part_type::PT_NONE) {
-    ss << "\n/*!50100 PARTITION BY ";
+    bool is_columns_part =
+        (pt == part_type::PT_RANGE_COLUMNS || pt == part_type::PT_LIST_COLUMNS);
+    ss << (is_columns_part ? "\n/*!50500 PARTITION BY "
+                           : "\n/*!50100 PARTITION BY ");
     std::string part_expr =
         get_json_string(dd_obj, "partition_expression_utf8");
 
@@ -1157,23 +1164,23 @@ static std::string generate_create_table_from_json(
         break;
       case part_type::PT_KEY_55:
       case part_type::PT_KEY_51:
-        ss << "KEY (" << part_expr << ")";
+        ss << "KEY (" << strip_backticks(part_expr) << ")";
         break;
       case part_type::PT_LINEAR_KEY_51:
       case part_type::PT_LINEAR_KEY_55:
-        ss << "LINEAR KEY (" << part_expr << ")";
+        ss << "LINEAR KEY (" << strip_backticks(part_expr) << ")";
         break;
       case part_type::PT_RANGE:
         ss << "RANGE (" << part_expr << ")";
         break;
       case part_type::PT_RANGE_COLUMNS:
-        ss << "RANGE COLUMNS(" << part_expr << ")";
+        ss << "RANGE  COLUMNS(" << strip_backticks(part_expr) << ")";
         break;
       case part_type::PT_LIST:
         ss << "LIST (" << part_expr << ")";
         break;
       case part_type::PT_LIST_COLUMNS:
-        ss << "LIST COLUMNS(" << part_expr << ")";
+        ss << "LIST  COLUMNS(" << strip_backticks(part_expr) << ")";
         break;
       default:
         break;
@@ -1193,11 +1200,13 @@ static std::string generate_create_table_from_json(
           break;
         case sub_type::ST_KEY_55:
         case sub_type::ST_KEY_51:
-          ss << "\nSUBPARTITION BY KEY (" << subpart_expr << ")";
+          ss << "\nSUBPARTITION BY KEY (" << strip_backticks(subpart_expr)
+             << ")";
           break;
         case sub_type::ST_LINEAR_KEY_51:
         case sub_type::ST_LINEAR_KEY_55:
-          ss << "\nSUBPARTITION BY LINEAR KEY (" << subpart_expr << ")";
+          ss << "\nSUBPARTITION BY LINEAR KEY ("
+             << strip_backticks(subpart_expr) << ")";
           break;
         default:
           break;
@@ -1235,26 +1244,41 @@ static std::string generate_create_table_from_json(
 
         if (!first_part) ss << ",\n ";
         first_part = false;
-        ss << "PARTITION "
-           << quote_identifier(get_json_string(part, "name"));
+        ss << "PARTITION " << get_json_string(part, "name");
 
         if (pt == part_type::PT_RANGE || pt == part_type::PT_RANGE_COLUMNS) {
-          ss << " VALUES LESS THAN (";
-          bool first_val = true;
+          bool all_maxvalue = true;
           if (part.HasMember("values") && part["values"].IsArray()) {
             const auto &vals = part["values"];
             for (rapidjson::SizeType vi = 0; vi < vals.Size(); vi++) {
-              if (!first_val) ss << ",";
-              first_val = false;
-              if (get_json_bool(vals[vi], "max_value"))
-                ss << "MAXVALUE";
-              else if (get_json_bool(vals[vi], "null_value"))
-                ss << "NULL";
-              else
-                ss << get_json_string(vals[vi], "value_utf8");
+              if (!get_json_bool(vals[vi], "max_value")) {
+                all_maxvalue = false;
+                break;
+              }
             }
           }
-          ss << ")";
+
+          /* RANGE uses bare MAXVALUE; RANGE COLUMNS keeps parentheses */
+          if (all_maxvalue && pt == part_type::PT_RANGE) {
+            ss << " VALUES LESS THAN MAXVALUE";
+          } else {
+            ss << " VALUES LESS THAN (";
+            bool first_val = true;
+            if (part.HasMember("values") && part["values"].IsArray()) {
+              const auto &vals = part["values"];
+              for (rapidjson::SizeType vi = 0; vi < vals.Size(); vi++) {
+                if (!first_val) ss << ",";
+                first_val = false;
+                if (get_json_bool(vals[vi], "max_value"))
+                  ss << "MAXVALUE";
+                else if (get_json_bool(vals[vi], "null_value"))
+                  ss << "NULL";
+                else
+                  ss << get_json_string(vals[vi], "value_utf8");
+              }
+            }
+            ss << ")";
+          }
         } else if (pt == part_type::PT_LIST ||
                    pt == part_type::PT_LIST_COLUMNS) {
           ss << " VALUES IN (";

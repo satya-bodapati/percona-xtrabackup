@@ -488,6 +488,19 @@ done
 vlog "Reference schemas captured"
 
 # =====================================================================
+# Step 2b: Capture SHOW CREATE TABLE output for direct comparison
+# =====================================================================
+
+for tbl in $ALL_USER_TABLES; do
+    ${MYSQL} ${MYSQL_ARGS} -N -B test \
+        -e "SHOW CREATE TABLE \`$tbl\`" \
+        | cut -f2 | sed 's/\\n/\n/g' | sed '$ s/$/;/' \
+        > $topdir/showct_${tbl}.sql
+done
+
+vlog "SHOW CREATE TABLE output captured"
+
+# =====================================================================
 # Step 3: Shutdown server cleanly so .ibd files are fully flushed
 # =====================================================================
 
@@ -563,6 +576,33 @@ vlog "Generated SQL for ts_compressed:"
 cat $topdir/generated_ts_compressed.sql >&2
 
 vlog "All ibd2sdi --create-sql runs completed"
+
+# =====================================================================
+# Step 4b: Direct comparison - generated SQL vs SHOW CREATE TABLE
+# =====================================================================
+
+# File-per-table tables: generated file contains exactly one CREATE TABLE
+for tbl in $TABLES; do
+    run_cmd diff -u $topdir/showct_${tbl}.sql $topdir/generated_${tbl}.sql
+    vlog "ibd2sdi_create_sql: $tbl direct match passed"
+done
+
+# General tablespace tables: extract individual CREATE TABLE from combined output
+for tbl in $GS_TABLES; do
+    awk "/^CREATE TABLE \`$tbl\`/,/;$/" $topdir/generated_ts_regular.sql \
+        > $topdir/extracted_${tbl}.sql
+    run_cmd diff -u $topdir/showct_${tbl}.sql $topdir/extracted_${tbl}.sql
+    vlog "ibd2sdi_create_sql: $tbl direct match passed"
+done
+
+for tbl in $GC_TABLES; do
+    awk "/^CREATE TABLE \`$tbl\`/,/;$/" $topdir/generated_ts_compressed.sql \
+        > $topdir/extracted_${tbl}.sql
+    run_cmd diff -u $topdir/showct_${tbl}.sql $topdir/extracted_${tbl}.sql
+    vlog "ibd2sdi_create_sql: $tbl direct match passed"
+done
+
+vlog "All direct SHOW CREATE TABLE comparisons passed"
 
 # =====================================================================
 # Step 5: Start server, drop everything, replay generated .sql
