@@ -169,6 +169,42 @@ mysql -e "CREATE TABLE t9 (
   COMMENT='compressed table'" test
 add_test_table t9
 
+# t10: RANGE partitioning
+mysql -e "CREATE TABLE t10 (
+  id INT NOT NULL,
+  created DATE NOT NULL,
+  PRIMARY KEY (id, created)
+) ENGINE=InnoDB
+PARTITION BY RANGE (YEAR(created)) (
+  PARTITION p2020 VALUES LESS THAN (2021),
+  PARTITION p2021 VALUES LESS THAN (2022),
+  PARTITION pmax VALUES LESS THAN MAXVALUE
+)" test
+add_test_table t10
+
+# t11: HASH partitioning
+mysql -e "CREATE TABLE t11 (
+  id INT NOT NULL AUTO_INCREMENT,
+  val INT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB
+PARTITION BY HASH (id)
+PARTITIONS 4" test
+add_test_table t11
+
+# t12: LIST partitioning
+mysql -e "CREATE TABLE t12 (
+  id INT NOT NULL,
+  region INT NOT NULL,
+  PRIMARY KEY (id, region)
+) ENGINE=InnoDB
+PARTITION BY LIST (region) (
+  PARTITION p_east VALUES IN (1, 2, 3),
+  PARTITION p_west VALUES IN (4, 5, 6),
+  PARTITION p_other VALUES IN (7, 8, 9)
+)" test
+add_test_table t12
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

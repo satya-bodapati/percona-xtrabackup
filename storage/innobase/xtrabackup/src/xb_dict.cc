@@ -44,6 +44,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "sql/dd/types/foreign_key_element.h"  // dd::Foreign_key_element
 #include "sql/dd/types/partition.h"
 #include "sql/dd/types/partition_index.h"
+#include "sql/dd/types/partition_value.h"
 #include "sql/dd/types/schema.h"
 #include "sql/dd/types/table.h"
 #include "sql/dd/types/table.h"  // dd::Table
@@ -642,6 +643,119 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
 
   if (!tbl.comment().empty()) {
     ss << " COMMENT='" << tbl.comment() << "'";
+  }
+
+  if (tbl.partition_type() != dd::Table::PT_NONE) {
+    ss << "\n/*!50100 PARTITION BY ";
+    const auto &part_expr = tbl.partition_expression_utf8();
+    switch (tbl.partition_type()) {
+      case dd::Table::PT_HASH:
+        ss << "HASH (" << part_expr << ")";
+        break;
+      case dd::Table::PT_LINEAR_HASH:
+        ss << "LINEAR HASH (" << part_expr << ")";
+        break;
+      case dd::Table::PT_KEY_55:
+      case dd::Table::PT_KEY_51:
+        ss << "KEY (" << part_expr << ")";
+        break;
+      case dd::Table::PT_LINEAR_KEY_51:
+      case dd::Table::PT_LINEAR_KEY_55:
+        ss << "LINEAR KEY (" << part_expr << ")";
+        break;
+      case dd::Table::PT_RANGE:
+        ss << "RANGE (" << part_expr << ")";
+        break;
+      case dd::Table::PT_RANGE_COLUMNS:
+        ss << "RANGE COLUMNS(" << part_expr << ")";
+        break;
+      case dd::Table::PT_LIST:
+        ss << "LIST (" << part_expr << ")";
+        break;
+      case dd::Table::PT_LIST_COLUMNS:
+        ss << "LIST COLUMNS(" << part_expr << ")";
+        break;
+      default:
+        break;
+    }
+
+    if (tbl.subpartition_type() != dd::Table::ST_NONE) {
+      const auto &subpart_expr = tbl.subpartition_expression_utf8();
+      switch (tbl.subpartition_type()) {
+        case dd::Table::ST_HASH:
+          ss << "\nSUBPARTITION BY HASH (" << subpart_expr << ")";
+          break;
+        case dd::Table::ST_LINEAR_HASH:
+          ss << "\nSUBPARTITION BY LINEAR HASH (" << subpart_expr << ")";
+          break;
+        case dd::Table::ST_KEY_55:
+        case dd::Table::ST_KEY_51:
+          ss << "\nSUBPARTITION BY KEY (" << subpart_expr << ")";
+          break;
+        case dd::Table::ST_LINEAR_KEY_51:
+        case dd::Table::ST_LINEAR_KEY_55:
+          ss << "\nSUBPARTITION BY LINEAR KEY (" << subpart_expr << ")";
+          break;
+        default:
+          break;
+      }
+    }
+
+    bool need_part_defs =
+        (tbl.partition_type() == dd::Table::PT_RANGE ||
+         tbl.partition_type() == dd::Table::PT_RANGE_COLUMNS ||
+         tbl.partition_type() == dd::Table::PT_LIST ||
+         tbl.partition_type() == dd::Table::PT_LIST_COLUMNS);
+
+    if (need_part_defs) {
+      ss << "\n(";
+      bool first_part = true;
+      for (const auto part : *tbl.partitions()) {
+        if (part->parent_partition_id() != dd::INVALID_OBJECT_ID) continue;
+        if (!first_part) ss << ",\n ";
+        first_part = false;
+        ss << "PARTITION " << part->name();
+
+        if (tbl.partition_type() == dd::Table::PT_RANGE ||
+            tbl.partition_type() == dd::Table::PT_RANGE_COLUMNS) {
+          ss << " VALUES LESS THAN (";
+          bool first_val = true;
+          for (const auto pv : part->values()) {
+            if (!first_val) ss << ",";
+            first_val = false;
+            if (pv->max_value())
+              ss << "MAXVALUE";
+            else if (pv->is_value_null())
+              ss << "NULL";
+            else
+              ss << pv->value_utf8();
+          }
+          ss << ")";
+        } else if (tbl.partition_type() == dd::Table::PT_LIST ||
+                   tbl.partition_type() == dd::Table::PT_LIST_COLUMNS) {
+          ss << " VALUES IN (";
+          bool first_val = true;
+          for (const auto pv : part->values()) {
+            if (!first_val) ss << ",";
+            first_val = false;
+            if (pv->is_value_null())
+              ss << "NULL";
+            else
+              ss << pv->value_utf8();
+          }
+          ss << ")";
+        }
+        ss << " ENGINE = " << part->engine();
+      }
+      ss << ")";
+    } else {
+      uint num_parts = 0;
+      for (const auto part : *tbl.partitions()) {
+        if (part->parent_partition_id() == dd::INVALID_OBJECT_ID) num_parts++;
+      }
+      if (num_parts > 0) ss << "\nPARTITIONS " << num_parts;
+    }
+    ss << " */";
   }
 
   ss << ";\n";
