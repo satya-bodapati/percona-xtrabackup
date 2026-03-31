@@ -435,11 +435,13 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     ss << "  " << quote_identifier(col->name()) << " "
        << col->column_type_utf8();
 
-    if (col->is_explicit_collation() &&
-        col->type() != dd::enum_column_types::GEOMETRY) {
-      const CHARSET_INFO *cs = dd_get_mysql_charset(col->collation_id());
-      ss << " CHARACTER SET " << cs->csname;
-      ss << " COLLATE " << cs->m_coll_name;
+    if (col->is_explicit_collation()) {
+      const CHARSET_INFO *col_cs = dd_get_mysql_charset(col->collation_id());
+      if (col_cs && strcmp(col_cs->csname, "binary") != 0 &&
+          col->type() != dd::enum_column_types::GEOMETRY) {
+        ss << " CHARACTER SET " << col_cs->csname;
+        ss << " COLLATE " << col_cs->m_coll_name;
+      }
     }
 
     bool is_gcol = !col->is_generation_expression_utf8_null();
@@ -495,6 +497,7 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
           case dd::enum_column_types::INT24:
           case dd::enum_column_types::FLOAT:
           case dd::enum_column_types::DOUBLE:
+          case dd::enum_column_types::BIT:
             needs_quote = false;
             break;
           default:

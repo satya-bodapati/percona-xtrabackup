@@ -261,6 +261,99 @@ mysql -e "CREATE TABLE t18 (
 ) ENGINE=InnoDB" test
 add_test_table t18
 
+# t19: integer types with UNSIGNED, ZEROFILL, and defaults
+mysql -e "CREATE TABLE t19 (
+  c_tinyint TINYINT DEFAULT 1,
+  c_smallint SMALLINT UNSIGNED DEFAULT 0,
+  c_mediumint MEDIUMINT NOT NULL DEFAULT 100,
+  c_int INT DEFAULT NULL,
+  c_bigint BIGINT UNSIGNED NOT NULL DEFAULT 9999999999,
+  c_bool BOOLEAN DEFAULT TRUE,
+  id INT NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t19
+
+# t20: decimal, float, double types
+mysql -e "CREATE TABLE t20 (
+  id INT NOT NULL AUTO_INCREMENT,
+  c_decimal DECIMAL(10,2) DEFAULT 0.00,
+  c_numeric NUMERIC(8,4) NOT NULL,
+  c_float FLOAT DEFAULT 3.14,
+  c_double DOUBLE DEFAULT NULL,
+  c_real REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t20
+
+# t21: date/time types with various defaults
+mysql -e "CREATE TABLE t21 (
+  id INT NOT NULL AUTO_INCREMENT,
+  c_date DATE DEFAULT '2025-01-01',
+  c_datetime DATETIME DEFAULT CURRENT_TIMESTAMP,
+  c_datetime6 DATETIME(6) DEFAULT NULL,
+  c_timestamp TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  c_time TIME DEFAULT '12:00:00',
+  c_year YEAR DEFAULT 2025,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t21
+
+# t22: string types - CHAR, VARCHAR, BINARY, VARBINARY
+mysql -e "CREATE TABLE t22 (
+  id INT NOT NULL AUTO_INCREMENT,
+  c_char CHAR(10) DEFAULT '',
+  c_varchar VARCHAR(255) NOT NULL DEFAULT 'hello',
+  c_binary BINARY(16) DEFAULT NULL,
+  c_varbinary VARBINARY(256) DEFAULT NULL,
+  c_tinytext TINYTEXT,
+  c_text TEXT,
+  c_mediumtext MEDIUMTEXT,
+  c_longtext LONGTEXT,
+  c_tinyblob TINYBLOB,
+  c_blob BLOB,
+  c_mediumblob MEDIUMBLOB,
+  c_longblob LONGBLOB,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t22
+
+# t23: ENUM, SET, BIT, JSON types
+mysql -e "CREATE TABLE t23 (
+  id INT NOT NULL AUTO_INCREMENT,
+  c_enum ENUM('a','b','c') NOT NULL DEFAULT 'a',
+  c_set SET('x','y','z') DEFAULT 'x,y',
+  c_bit BIT(8) DEFAULT b'00001111',
+  c_json JSON DEFAULT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t23
+
+# t24: geometry types
+mysql -e "CREATE TABLE t24 (
+  id INT NOT NULL AUTO_INCREMENT,
+  c_point POINT SRID 0,
+  c_linestring LINESTRING DEFAULT NULL,
+  c_polygon POLYGON DEFAULT NULL,
+  c_geometry GEOMETRY DEFAULT NULL,
+  c_multipoint MULTIPOINT DEFAULT NULL,
+  c_multilinestring MULTILINESTRING DEFAULT NULL,
+  c_multipolygon MULTIPOLYGON DEFAULT NULL,
+  c_geomcollection GEOMETRYCOLLECTION DEFAULT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t24
+
+# t25: INVISIBLE columns, expression defaults
+mysql -e "CREATE TABLE t25 (
+  id INT NOT NULL AUTO_INCREMENT,
+  val INT DEFAULT (FLOOR(RAND() * 100)),
+  uuid BINARY(16) DEFAULT (UUID_TO_BIN(UUID())),
+  secret INT /*!80023 INVISIBLE */ DEFAULT 42,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB" test
+add_test_table t25
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"
