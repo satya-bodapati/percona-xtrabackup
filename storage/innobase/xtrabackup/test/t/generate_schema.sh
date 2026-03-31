@@ -249,6 +249,18 @@ mysql -e "CREATE TABLE t17 (
 ) ENGINE=InnoDB COMPRESSION='zlib'" test
 add_test_table t17
 
+# t18: FULLTEXT index with parser, SPATIAL index
+mysql -e "CREATE TABLE t18 (
+  id INT NOT NULL AUTO_INCREMENT,
+  title VARCHAR(200),
+  body TEXT,
+  location POINT NOT NULL SRID 0,
+  PRIMARY KEY (id),
+  FULLTEXT KEY ft_body (body),
+  SPATIAL KEY sp_loc (location)
+) ENGINE=InnoDB" test
+add_test_table t18
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"

@@ -553,7 +553,9 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
         ss << "(" << elem_col.generation_expression_utf8() << ")";
       } else {
         ss << quote_identifier(elem_col.name());
-        if (!key_elem->is_length_null() && key_elem->is_prefix()) {
+        if (!key_elem->is_length_null() && key_elem->is_prefix() &&
+            key->type() != dd::Index::IT_FULLTEXT &&
+            key->type() != dd::Index::IT_SPATIAL) {
           uint prefix_len = key_elem->length();
           const CHARSET_INFO *elem_cs =
               dd_get_mysql_charset(elem_col.collation_id());
@@ -586,12 +588,38 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       }
     }
 
+    const auto &key_opts = key->options();
+    uint64 idx_block_size;
+    if (key_opts.exists("block_size") &&
+        !key_opts.get("block_size", &idx_block_size) && idx_block_size != 0) {
+      ss << " KEY_BLOCK_SIZE=" << idx_block_size;
+    }
+
     if (!key->comment().empty()) {
       ss << " COMMENT '" << escape_string(key->comment()) << "'";
     }
 
     if (!key->is_visible()) {
       ss << " /*!80000 INVISIBLE */";
+    }
+
+    auto idx_ea = key->engine_attribute();
+    if (idx_ea.length > 0) {
+      ss << " /*!80021 ENGINE_ATTRIBUTE '"
+         << escape_string(dd::String_type(idx_ea.str, idx_ea.length)) << "' */";
+    }
+
+    auto idx_sea = key->secondary_engine_attribute();
+    if (idx_sea.length > 0) {
+      ss << " /*!80021 SECONDARY_ENGINE_ATTRIBUTE '"
+         << escape_string(dd::String_type(idx_sea.str, idx_sea.length))
+         << "' */";
+    }
+
+    dd::String_type parser_name;
+    if (key_opts.exists("parser_name") &&
+        !key_opts.get("parser_name", &parser_name) && !parser_name.empty()) {
+      ss << " /*!50100 WITH PARSER " << quote_identifier(parser_name) << " */";
     }
   }
 
