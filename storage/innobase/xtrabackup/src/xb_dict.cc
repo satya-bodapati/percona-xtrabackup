@@ -356,7 +356,9 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
   ss << "CREATE TABLE " << tbl.name().c_str() << " (\n";
 
   for (const auto col : *tbl.columns()) {
-    if (col->is_se_hidden()) continue;
+    if (col->is_se_hidden() ||
+        col->hidden() == dd::Column::enum_hidden_type::HT_HIDDEN_SQL)
+      continue;
 
     if (!first_col) ss << ",\n";
     first_col = false;
@@ -475,7 +477,24 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
       if (!first_elem) ss << ",";
       first_elem = false;
 
-      ss << key_elem->column().name();
+      const auto &elem_col = key_elem->column();
+      if (elem_col.hidden() == dd::Column::enum_hidden_type::HT_HIDDEN_SQL) {
+        ss << "(" << elem_col.generation_expression_utf8() << ")";
+      } else {
+        ss << elem_col.name();
+        if (!key_elem->is_length_null() && key_elem->is_prefix()) {
+          uint prefix_len = key_elem->length();
+          const CHARSET_INFO *elem_cs =
+              dd_get_mysql_charset(elem_col.collation_id());
+          if (elem_cs && elem_cs->mbmaxlen > 0) {
+            prefix_len /= elem_cs->mbmaxlen;
+          }
+          ss << "(" << prefix_len << ")";
+        }
+        if (key_elem->order() == dd::Index_element::ORDER_DESC) {
+          ss << " DESC";
+        }
+      }
     }
 
     ss << ")";

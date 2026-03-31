@@ -100,6 +100,21 @@ mysql -e "CREATE TABLE t4 (
 ) ENGINE=InnoDB" test
 add_test_table t4
 
+# t5: index features - prefix length, DESC, functional index
+mysql -e "CREATE TABLE t5 (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(255) NOT NULL,
+  data TEXT,
+  a INT NOT NULL,
+  b INT NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_prefix (name(50)),
+  KEY idx_desc (a DESC, b),
+  KEY idx_func ((a + b)),
+  KEY idx_combo (name(20), a DESC)
+) ENGINE=InnoDB" test
+add_test_table t5
+
 verify_roundtrip
 
 vlog "generate_schema: all tests passed"
