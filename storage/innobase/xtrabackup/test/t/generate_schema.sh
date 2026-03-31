@@ -43,8 +43,8 @@ function verify_roundtrip() {
         vlog "Generated ${tbl}.sql contents:"
         cat $topdir/backup/test/${tbl}.sql >&2
 
-        mysql -e "DROP TABLE $tbl" test
-        mysql test < $topdir/backup/test/${tbl}.sql
+        mysql -e "SET foreign_key_checks=0; DROP TABLE $tbl" test
+        (echo "SET foreign_key_checks=0;"; cat $topdir/backup/test/${tbl}.sql) | mysql test
 
         ${MYSQLDUMP} ${MYSQL_ARGS} --no-data --skip-comments --skip-dump-date \
             test $tbl > $topdir/recreated_${tbl}.sql
@@ -126,6 +126,27 @@ mysql -e "CREATE TABLE t6 (
   KEY idx_comment (a, b) COMMENT 'composite index'
 ) ENGINE=InnoDB" test
 add_test_table t6
+
+# t7_parent + t7: foreign key constraints
+mysql -e "CREATE TABLE t7_parent (
+  id INT NOT NULL AUTO_INCREMENT,
+  code VARCHAR(10) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_code (code)
+) ENGINE=InnoDB" test
+add_test_table t7_parent
+
+mysql -e "CREATE TABLE t7 (
+  id INT NOT NULL AUTO_INCREMENT,
+  parent_id INT NOT NULL,
+  parent_code VARCHAR(10),
+  PRIMARY KEY (id),
+  KEY idx_parent (parent_id),
+  KEY idx_code (parent_code),
+  CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES t7_parent (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_code FOREIGN KEY (parent_code) REFERENCES t7_parent (code) ON DELETE SET NULL
+) ENGINE=InnoDB" test
+add_test_table t7
 
 verify_roundtrip
 

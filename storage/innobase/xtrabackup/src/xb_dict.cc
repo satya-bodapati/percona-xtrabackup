@@ -343,6 +343,21 @@ static bool has_default(dd::Column *dd_col) {
   return !dd_col->has_no_default() && !dd_col->is_auto_increment();
 }
 
+static const char *fk_rule_str(dd::Foreign_key::enum_rule rule) {
+  switch (rule) {
+    case dd::Foreign_key::RULE_RESTRICT:
+      return "RESTRICT";
+    case dd::Foreign_key::RULE_CASCADE:
+      return "CASCADE";
+    case dd::Foreign_key::RULE_SET_NULL:
+      return "SET NULL";
+    case dd::Foreign_key::RULE_SET_DEFAULT:
+      return "SET DEFAULT";
+    default:
+      return nullptr;
+  }
+}
+
 static void show_create_table(space_id_t space_id, dd::Table *dd_table,
                               const dd::String_type &schema_name) {
   if (space_id == dict_sys_t::s_dict_space_id) {
@@ -522,6 +537,28 @@ static void show_create_table(space_id_t space_id, dd::Table *dd_table,
     if (!key->is_visible()) {
       ss << " /*!80000 INVISIBLE */";
     }
+  }
+
+  for (const auto fk : *tbl.foreign_keys()) {
+    ss << ",\n  CONSTRAINT " << fk->name() << " FOREIGN KEY (";
+    bool first_fk_col = true;
+    for (const auto fk_el : *fk->elements()) {
+      if (!first_fk_col) ss << ",";
+      first_fk_col = false;
+      ss << fk_el->column().name();
+    }
+    ss << ") REFERENCES " << fk->referenced_table_name() << " (";
+    bool first_ref_col = true;
+    for (const auto fk_el : *fk->elements()) {
+      if (!first_ref_col) ss << ",";
+      first_ref_col = false;
+      ss << fk_el->referenced_column_name();
+    }
+    ss << ")";
+    const char *del_rule = fk_rule_str(fk->delete_rule());
+    if (del_rule) ss << " ON DELETE " << del_rule;
+    const char *upd_rule = fk_rule_str(fk->update_rule());
+    if (upd_rule) ss << " ON UPDATE " << upd_rule;
   }
 
   ss << "\n) ENGINE=" << tbl.engine().c_str();
