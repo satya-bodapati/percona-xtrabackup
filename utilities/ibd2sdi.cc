@@ -183,7 +183,8 @@ struct sdi_options {
   char *dump_filename;
   ulong strict_check;
   bool pretty;
-  bool create_sql;
+  bool generate_sql;
+  char *generate_sql_file;
 };
 struct sdi_options opts;
 
@@ -234,11 +235,12 @@ static struct my_option ibd2sdi_options[] = {
      "If false, SDI would be not human readable but it will be of less size",
      &opts.pretty, &opts.pretty, nullptr, GET_BOOL, OPT_ARG, 1, 0, 0, nullptr,
      0, nullptr},
-    {"create-sql", 'S',
-     "Generate CREATE TABLE SQL from SDI data instead of dumping JSON."
-     " Output is written to stdout and to a .sql file alongside the .ibd file.",
-     &opts.create_sql, &opts.create_sql, nullptr, GET_BOOL, NO_ARG, 0, 0, 0,
-     nullptr, 0, nullptr},
+    {"generate-sql", 'S',
+     "Generate CREATE TABLE SQL from SDI data. Without an argument, SQL is"
+     " written to stdout. With --generate-sql=FILE, SQL is written to FILE"
+     " only.",
+     &opts.generate_sql_file, &opts.generate_sql_file, nullptr, GET_STR,
+     OPT_ARG, 0, 0, 0, nullptr, 0, nullptr},
 
     {nullptr, 0, nullptr, nullptr, nullptr, nullptr, GET_NO_ARG, NO_ARG, 0, 0,
      0, nullptr, 0, nullptr}};
@@ -378,7 +380,7 @@ extern "C" bool ibd2sdi_get_one_option(int optid,
     case 'p':
       break;
     case 'S':
-      opts.create_sql = true;
+      opts.generate_sql = true;
       break;
     case 'h':
       usage();
@@ -405,9 +407,9 @@ static bool get_options(int *argc, char ***argv) {
 }
 
 /* ========================================================================
-   --create-sql: Generate CREATE TABLE SQL from SDI JSON
+   --generate-sql: Generate CREATE TABLE SQL from SDI JSON
    ======================================================================== */
-namespace create_sql {
+namespace generate_sql {
 
 namespace col_type {
 constexpr int DECIMAL = 1;
@@ -1353,10 +1355,11 @@ static std::string generate_create_tablespace_from_json(
   return ss.str();
 }
 
-static void process_sdi_create_sql(const char *sdi_data, uint64_t sdi_data_len,
-                                   const char *ibd_path,
-                                   std::string &tablespace_sql,
-                                   std::string &table_sql) {
+static void process_sdi_generate_sql(const char *sdi_data,
+                                     uint64_t sdi_data_len,
+                                     const char *ibd_path,
+                                     std::string &tablespace_sql,
+                                     std::string &table_sql) {
   rapidjson::Document doc;
   rapidjson::ParseResult ok =
       doc.Parse(sdi_data, static_cast<size_t>(sdi_data_len - 1));
@@ -1384,31 +1387,22 @@ static void process_sdi_create_sql(const char *sdi_data, uint64_t sdi_data_len,
   }
 }
 
-static void write_sql_output(const std::string &sql,
-                              const char *ibd_path) {
-  /* Print to stdout */
-  std::cout << sql;
-
-  /* Write .sql file alongside .ibd */
-  std::string path(ibd_path);
-  auto dot_pos = path.rfind('.');
-  std::string sql_path;
-  if (dot_pos != std::string::npos)
-    sql_path = path.substr(0, dot_pos) + ".sql";
-  else
-    sql_path = path + ".sql";
-
-  std::ofstream sql_file(sql_path);
-  if (sql_file.is_open()) {
-    sql_file << sql;
-    sql_file.close();
-    std::cerr << "Wrote " << sql_path << std::endl;
+static void write_sql_output(const std::string &sql, const char *output_file) {
+  if (output_file) {
+    std::ofstream f(output_file);
+    if (f.is_open()) {
+      f << sql;
+      f.close();
+      std::cerr << "Wrote " << output_file << std::endl;
+    } else {
+      std::cerr << "Error: cannot write " << output_file << std::endl;
+    }
   } else {
-    std::cerr << "Error: cannot write " << sql_path << std::endl;
+    std::cout << sql;
   }
 }
 
-}  // namespace create_sql
+}  // namespace generate_sql
 
 /** Error logging classes. */
 namespace ib {
@@ -2333,14 +2327,14 @@ class ibd2sdi {
   /** Generate CREATE TABLE SQL from SDI records
   @param[in]	ibd_path	path to the .ibd file
   @return false on success, true on failure */
-  bool dump_create_sql(const char *ibd_path);
+  bool dump_generate_sql(const char *ibd_path);
 
  private:
   /** Collect SDI records and generate SQL
   @param[in]	ts		tablespace structure
   @param[in]	ibd_path	path to the .ibd file
   @return false on success, true on failure */
-  bool create_sql_from_copy(ib_tablespace *ts, const char *ibd_path);
+  bool generate_sql_from_copy(ib_tablespace *ts, const char *ibd_path);
   /** Process SDI from a tablespace
   @param[in]	ts	tablespace structure
   @return false on success, true on failure */
@@ -3258,7 +3252,7 @@ bool ibd2sdi::dump_matching_types(uint64_t sdi_type) {
   return (ret);
 }
 
-bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
+bool ibd2sdi::generate_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
   page_no_t root_page_num = ts->get_sdi_root();
   page_size_t page_size(ts->get_page_size());
 
@@ -3295,7 +3289,7 @@ bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
                                       &sdi_data, &sdi_data_len);
 
     if (err == DB_SUCCESS && sdi_data != nullptr) {
-      create_sql::process_sdi_create_sql(
+      generate_sql::process_sdi_generate_sql(
           reinterpret_cast<const char *>(sdi_data), sdi_data_len, ibd_path,
           tablespace_sql, table_sql);
       free(sdi_data);
@@ -3308,16 +3302,16 @@ bool ibd2sdi::create_sql_from_copy(ib_tablespace *ts, const char *ibd_path) {
 
   std::string accumulated_sql = tablespace_sql + table_sql;
   if (!accumulated_sql.empty()) {
-    create_sql::write_sql_output(accumulated_sql, ibd_path);
+    generate_sql::write_sql_output(accumulated_sql, opts.generate_sql_file);
   }
 
   return corrupt;
 }
 
-bool ibd2sdi::dump_create_sql(const char *ibd_path) {
+bool ibd2sdi::dump_generate_sql(const char *ibd_path) {
   ut_a(m_tablespace_creator != nullptr);
   ib_tablespace *ts = m_tablespace_creator->get_tablespace();
-  return create_sql_from_copy(ts, ibd_path);
+  return generate_sql_from_copy(ts, ibd_path);
 }
 
 int main(int argc, char **argv) {
@@ -3364,16 +3358,16 @@ int main(int argc, char **argv) {
     dump_file = stdout;
   }
 
-  /* --create-sql forces data reading (cannot skip) */
-  bool skip_data = opts.create_sql ? false : opts.skip_data;
+  /* --generate-sql forces data reading (cannot skip) */
+  bool skip_data = opts.generate_sql ? false : opts.skip_data;
   ibd2sdi sdi(argc, argv, dump_file, skip_data);
 
   if (sdi.process_files()) {
     return 1;
   }
 
-  if (opts.create_sql) {
-    ret = sdi.dump_create_sql(argv[0]);
+  if (opts.generate_sql) {
+    ret = sdi.dump_generate_sql(argv[0]);
   } else if (opts.is_sdi_rec) {
     ret = sdi.dump_one_sdi(opts.sdi_rec_id, opts.sdi_rec_type);
   } else if (opts.is_sdi_id) {

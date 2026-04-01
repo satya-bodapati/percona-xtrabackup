@@ -1,12 +1,12 @@
 ########################################################################
-# Test ibd2sdi --create-sql: generates CREATE TABLE SQL from SDI JSON
+# Test ibd2sdi --generate-sql: generates CREATE TABLE SQL from SDI JSON
 # directly parsed from .ibd files using pure RapidJSON (no dd::deserialize).
 #
 # Strategy:
 #   1. Start server, create diverse tables (file-per-table + general TS)
 #   2. Capture reference schemas via mysqldump --no-data
 #   3. Shutdown server cleanly (ensures .ibd files are flushed)
-#   4. Run ibd2sdi --create-sql on each .ibd file
+#   4. Run ibd2sdi --generate-sql on each .ibd file
 #   5. Start server, drop all tables, replay generated .sql
 #   6. Capture schemas again via mysqldump
 #   7. Compare: reference vs regenerated must match
@@ -344,6 +344,70 @@ CREATE TABLE t20 (
 EOSQL
 add_test_table t20
 
+# t_instant: INSTANT ADD + DROP columns (ghost columns in SDI)
+mysql -e "CREATE TABLE t_instant (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  col_a VARCHAR(100),
+  col_b INT,
+  col_c TEXT
+) ENGINE=InnoDB" test
+mysql -e "ALTER TABLE t_instant ADD COLUMN col_d DATETIME DEFAULT '2024-01-01 00:00:00', ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant ADD COLUMN col_e DECIMAL(10,2) NOT NULL DEFAULT '0.00', ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant ADD COLUMN col_f VARCHAR(50) AFTER col_a, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant DROP COLUMN col_b, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant DROP COLUMN col_c, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant ADD COLUMN col_g BIGINT, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant ADD COLUMN col_h ENUM('x','y','z') DEFAULT 'x', ALGORITHM=INSTANT" test
+add_test_table t_instant
+
+# t_instant_churn: heavy instant add/drop churn (many ghost columns)
+mysql -e "CREATE TABLE t_instant_churn (
+  id INT PRIMARY KEY,
+  keep_me VARCHAR(50)
+) ENGINE=InnoDB" test
+mysql -e "ALTER TABLE t_instant_churn ADD COLUMN tmp1 INT, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn ADD COLUMN tmp2 INT, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn ADD COLUMN tmp3 INT, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn DROP COLUMN tmp1, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn DROP COLUMN tmp2, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn ADD COLUMN final_a VARCHAR(100), ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn ADD COLUMN final_b DOUBLE, ALGORITHM=INSTANT" test
+mysql -e "ALTER TABLE t_instant_churn DROP COLUMN tmp3, ALGORITHM=INSTANT" test
+add_test_table t_instant_churn
+
+# t_altered: non-INSTANT ALTER (ADD/DROP/RENAME/MODIFY + index changes)
+mysql -e "CREATE TABLE t_altered (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  old_col INT,
+  description TEXT,
+  status TINYINT DEFAULT 0,
+  INDEX idx_name (name)
+) ENGINE=InnoDB" test
+mysql -e "ALTER TABLE t_altered DROP COLUMN old_col" test
+mysql -e "ALTER TABLE t_altered ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP" test
+mysql -e "ALTER TABLE t_altered ADD COLUMN priority INT DEFAULT 5 AFTER name" test
+mysql -e "ALTER TABLE t_altered RENAME COLUMN description TO notes" test
+mysql -e "ALTER TABLE t_altered MODIFY COLUMN status ENUM('active','inactive','pending') DEFAULT 'active'" test
+mysql -e "ALTER TABLE t_altered ADD INDEX idx_priority (priority)" test
+mysql -e "ALTER TABLE t_altered ALTER COLUMN name SET DEFAULT 'unnamed'" test
+add_test_table t_altered
+
+# t_alter_index: post-creation index changes
+mysql -e "CREATE TABLE t_alter_index (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(100),
+  c INT,
+  KEY idx_a (a)
+) ENGINE=InnoDB" test
+mysql -e "ALTER TABLE t_alter_index DROP INDEX idx_a" test
+mysql -e "ALTER TABLE t_alter_index ADD UNIQUE INDEX uidx_a (a)" test
+mysql -e "ALTER TABLE t_alter_index ADD INDEX idx_b_prefix (b(30))" test
+mysql -e "ALTER TABLE t_alter_index ADD INDEX idx_composite (a, c DESC)" test
+mysql -e "ALTER TABLE t_alter_index ADD FULLTEXT INDEX ft_b (b)" test
+add_test_table t_alter_index
+
 # =====================================================================
 # Create general tablespace tables (regular)
 # =====================================================================
@@ -509,10 +573,12 @@ shutdown_server
 vlog "Server shut down cleanly"
 
 # =====================================================================
-# Step 4: Run ibd2sdi --create-sql on each .ibd file
+# Step 4: Run ibd2sdi --generate-sql on each .ibd file
+#   - Odd-numbered tables use stdout mode (--generate-sql, redirect stdout)
+#   - Even-numbered tables use file mode (--generate-sql=<file>)
 # =====================================================================
 
-# --- File-per-table .ibd files ---
+use_file_mode=0
 for tbl in $TABLES; do
     is_part=0
     for pt in $PARTITION_TABLES; do
@@ -530,24 +596,34 @@ for tbl in $TABLES; do
         die "ERROR: .ibd file not found: ${ibd_file}"
     fi
 
-    vlog "Running: $IBD2SDI --create-sql ${ibd_file}"
-    run_cmd $IBD2SDI --create-sql "${ibd_file}" \
-        > $topdir/generated_${tbl}.sql 2>$topdir/stderr_${tbl}.log
+    out_file="$topdir/generated_${tbl}.sql"
 
-    if ! grep -q "CREATE TABLE" $topdir/generated_${tbl}.sql; then
-        vlog "ERROR: stdout for ${tbl} does not contain CREATE TABLE"
+    if [ $use_file_mode -eq 1 ]; then
+        vlog "Running (file mode): $IBD2SDI --generate-sql=$out_file ${ibd_file}"
+        run_cmd $IBD2SDI --generate-sql="$out_file" "${ibd_file}" \
+            2>$topdir/stderr_${tbl}.log
+    else
+        vlog "Running (stdout mode): $IBD2SDI --generate-sql ${ibd_file}"
+        run_cmd $IBD2SDI --generate-sql "${ibd_file}" \
+            > "$out_file" 2>$topdir/stderr_${tbl}.log
+    fi
+
+    if ! grep -q "CREATE TABLE" "$out_file"; then
+        vlog "ERROR: output for ${tbl} does not contain CREATE TABLE"
         cat $topdir/stderr_${tbl}.log >&2
         exit -1
     fi
 
     vlog "Generated SQL for ${tbl}:"
-    cat $topdir/generated_${tbl}.sql >&2
+    cat "$out_file" >&2
+
+    use_file_mode=$(( 1 - use_file_mode ))
 done
 
-# --- Regular general tablespace .ibd ---
-vlog "Running ibd2sdi --create-sql on ts_regular.ibd"
-run_cmd $IBD2SDI --create-sql "${DATADIR}ts_regular.ibd" \
-    > $topdir/generated_ts_regular.sql 2>$topdir/stderr_ts_regular.log
+# --- Regular general tablespace .ibd (file mode) ---
+vlog "Running ibd2sdi --generate-sql=<file> on ts_regular.ibd"
+run_cmd $IBD2SDI --generate-sql="$topdir/generated_ts_regular.sql" \
+    "${DATADIR}ts_regular.ibd" 2>$topdir/stderr_ts_regular.log
 
 if ! grep -q "CREATE TABLESPACE" $topdir/generated_ts_regular.sql; then
     vlog "ERROR: generated output for ts_regular does not contain CREATE TABLESPACE"
@@ -557,9 +633,9 @@ fi
 vlog "Generated SQL for ts_regular:"
 cat $topdir/generated_ts_regular.sql >&2
 
-# --- Compressed general tablespace .ibd ---
-vlog "Running ibd2sdi --create-sql on ts_compressed.ibd"
-run_cmd $IBD2SDI --create-sql "${DATADIR}ts_compressed.ibd" \
+# --- Compressed general tablespace .ibd (stdout mode) ---
+vlog "Running ibd2sdi --generate-sql on ts_compressed.ibd"
+run_cmd $IBD2SDI --generate-sql "${DATADIR}ts_compressed.ibd" \
     > $topdir/generated_ts_compressed.sql 2>$topdir/stderr_ts_compressed.log
 
 if ! grep -q "CREATE TABLESPACE" $topdir/generated_ts_compressed.sql; then
@@ -575,7 +651,7 @@ fi
 vlog "Generated SQL for ts_compressed:"
 cat $topdir/generated_ts_compressed.sql >&2
 
-vlog "All ibd2sdi --create-sql runs completed"
+vlog "All ibd2sdi --generate-sql runs completed"
 
 # =====================================================================
 # Step 4b: Direct comparison - generated SQL vs SHOW CREATE TABLE
@@ -584,7 +660,7 @@ vlog "All ibd2sdi --create-sql runs completed"
 # File-per-table tables: generated file contains exactly one CREATE TABLE
 for tbl in $TABLES; do
     run_cmd diff -u $topdir/showct_${tbl}.sql $topdir/generated_${tbl}.sql
-    vlog "ibd2sdi_create_sql: $tbl direct match passed"
+    vlog "ibd2sdi_generate_sql: $tbl direct match passed"
 done
 
 # General tablespace tables: extract individual CREATE TABLE from combined output
@@ -592,14 +668,14 @@ for tbl in $GS_TABLES; do
     awk "/^CREATE TABLE \`$tbl\`/,/;$/" $topdir/generated_ts_regular.sql \
         > $topdir/extracted_${tbl}.sql
     run_cmd diff -u $topdir/showct_${tbl}.sql $topdir/extracted_${tbl}.sql
-    vlog "ibd2sdi_create_sql: $tbl direct match passed"
+    vlog "ibd2sdi_generate_sql: $tbl direct match passed"
 done
 
 for tbl in $GC_TABLES; do
     awk "/^CREATE TABLE \`$tbl\`/,/;$/" $topdir/generated_ts_compressed.sql \
         > $topdir/extracted_${tbl}.sql
     run_cmd diff -u $topdir/showct_${tbl}.sql $topdir/extracted_${tbl}.sql
-    vlog "ibd2sdi_create_sql: $tbl direct match passed"
+    vlog "ibd2sdi_generate_sql: $tbl direct match passed"
 done
 
 vlog "All direct SHOW CREATE TABLE comparisons passed"
@@ -647,11 +723,11 @@ for tbl in $ALL_USER_TABLES; do
         test "$tbl" > $topdir/recreated_${tbl}.sql
 
     run_cmd diff -u $topdir/original_${tbl}.sql $topdir/recreated_${tbl}.sql
-    vlog "ibd2sdi_create_sql: $tbl roundtrip passed"
+    vlog "ibd2sdi_generate_sql: $tbl roundtrip passed"
 done
 
 # =====================================================================
 # Cleanup
 # =====================================================================
 
-vlog "All ibd2sdi --create-sql tests passed"
+vlog "All ibd2sdi --generate-sql tests passed"
