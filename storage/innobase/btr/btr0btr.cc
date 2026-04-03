@@ -4180,6 +4180,14 @@ loop:
 
   ut_a(block->page.id.space() == index->space);
 
+  DBUG_EXECUTE_IF("check_table_wrong_index_id", {
+    static bool injected = false;
+    if (!injected && btr_page_get_index_id(page) == index->id) {
+      mach_write_to_8(page + PAGE_HEADER + PAGE_INDEX_ID, index->id + 1);
+      injected = true;
+    }
+  });
+
   if (fseg_page_is_free(seg, block->page.id.space(),
                         block->page.id.page_no())) {
     btr_validate_report1(index, level, block);
@@ -4221,6 +4229,14 @@ loop:
                       RW_SX_LATCH, UT_LOCATION_HERE, index, &mtr);
 
     right_page = buf_block_get_frame(right_block);
+
+    DBUG_EXECUTE_IF("check_table_break_sibling_link", {
+      static bool injected = false;
+      if (!injected && btr_page_get_prev(right_page, &mtr) != 0) {
+        mach_write_to_4(right_page + FIL_PAGE_PREV, 0);
+        injected = true;
+      }
+    });
 
     if (btr_page_get_prev(right_page, &mtr) != page_get_page_no(page)) {
       btr_validate_report2(index, level, block, right_block);
