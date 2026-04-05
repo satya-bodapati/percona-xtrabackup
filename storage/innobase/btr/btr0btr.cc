@@ -4036,7 +4036,8 @@ static bool btr_validate_level(
     dict_index_t *index, /*!< in: index tree */
     const trx_t *trx,    /*!< in: transaction or NULL */
     ulint level,         /*!< in: level number */
-    bool lockout)        /*!< in: true if X-latch index is intended */
+    bool lockout,        /*!< in: true if X-latch index is intended */
+    blob_ref_map *blob_map = nullptr) /*!< in: optional LOB reference map */
 {
   buf_block_t *block;
   page_t *page;
@@ -4201,7 +4202,7 @@ loop:
 
     ret = false;
 
-  } else if (!page_validate(page, index)) {
+  } else if (!page_validate(page, index, blob_map)) {
     btr_validate_report1(index, level, block);
     ret = false;
 
@@ -4522,9 +4523,10 @@ static bool btr_validate_spatial_index(
 /** Checks the consistency of an index tree.
  @return true if ok */
 bool btr_validate_index(
-    dict_index_t *index, /*!< in: index */
-    const trx_t *trx,    /*!< in: transaction or NULL */
-    bool lockout)        /*!< in: true if X-latch index is intended */
+    dict_index_t *index,    /*!< in: index */
+    const trx_t *trx,       /*!< in: transaction or NULL */
+    bool lockout,           /*!< in: true if X-latch index is intended */
+    blob_ref_map *blob_map) /*!< in: optional LOB reference map */
 {
   /* Full Text index are implemented by auxiliary tables,
   not the B-tree */
@@ -4583,7 +4585,7 @@ bool btr_validate_index(
   ulint n = btr_page_get_level(root);
 
   for (ulint i = 0; i <= n; ++i) {
-    if (!btr_validate_level(index, trx, n - i, lockout)) {
+    if (!btr_validate_level(index, trx, n - i, lockout, blob_map)) {
       ok = false;
       break;
     }

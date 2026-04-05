@@ -6915,10 +6915,15 @@ static void check_tables_thread_func(data_thread_ctxt_t *ctxt) {
 
     for (auto table : std::get<1>(result)) {
       xb::info() << "Checking: " << table->name.m_name;
+      blob_ref_map blob_map;
       for (dict_index_t *index = table->first_index(); index != nullptr;
            index = index->next()) {
         if (!index->is_committed()) continue;
-        bool valid = btr_validate_index(index, nullptr, false);
+        blob_ref_map *blob_map_ptr = nullptr;
+        if (index->is_clustered()) {
+          blob_map_ptr = &blob_map;
+        }
+        bool valid = btr_validate_index(index, nullptr, false, blob_map_ptr);
         DBUG_EXECUTE_IF("check_table_inject_corruption", valid = false;);
         if (!valid) {
           xb::error() << "Index " << index->name() << " of table "

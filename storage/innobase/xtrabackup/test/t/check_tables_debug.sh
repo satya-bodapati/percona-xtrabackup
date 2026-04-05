@@ -18,11 +18,17 @@ start_server --innodb_file_per_table
 vlog "Create table with enough rows for a multi-level B-tree"
 mysql test <<EOF
 CREATE TABLE t1 (a INT PRIMARY KEY AUTO_INCREMENT, b VARCHAR(200));
+CREATE TABLE t_lob (a INT PRIMARY KEY AUTO_INCREMENT, b LONGBLOB);
 EOF
 
 for i in $(seq 1 200); do
   run_cmd $MYSQL $MYSQL_ARGS test -e \
     "INSERT INTO t1 (b) VALUES (REPEAT('x', 200));"
+done
+
+for i in $(seq 1 10); do
+  run_cmd $MYSQL $MYSQL_ARGS test -e \
+    "INSERT INTO t_lob (b) VALUES (REPEAT('B', 100000));"
 done
 
 vlog "Take backup"
@@ -96,5 +102,23 @@ grep -q "is corrupted" $topdir/prepare_d.log || \
 grep -q "Table check failed" $topdir/prepare_d.log || \
   die "Sub-test D: Table check failed message not found"
 vlog "Sub-test D passed"
+
+#
+# Sub-test E: LOB corruption (duplicate external LOB first page)
+#
+vlog "=== Sub-test E: simulate_lob_corruption ==="
+cp -r $topdir/backup $topdir/backup_e
+
+run_cmd_expect_failure $XB_BIN $XB_ARGS --prepare --check-tables \
+  --debug=d,simulate_lob_corruption \
+  --target-dir=$topdir/backup_e 2>&1 | tee $topdir/prepare_e.log
+
+grep -q "External LOB first page cannot be shared" $topdir/prepare_e.log || \
+  die "Sub-test E: LOB duplicate message not found"
+grep -q "is corrupted" $topdir/prepare_e.log || \
+  die "Sub-test E: corruption not detected"
+grep -q "Table check failed" $topdir/prepare_e.log || \
+  die "Sub-test E: Table check failed message not found"
+vlog "Sub-test E passed"
 
 vlog "All debug sub-tests passed"
