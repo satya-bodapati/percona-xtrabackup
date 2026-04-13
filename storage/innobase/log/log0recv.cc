@@ -2851,19 +2851,81 @@ static void recv_data_copy_to_buf(byte *buf, recv_t *recv) {
 
 #ifdef XTRABACKUP
 /** Read the body bytes of a lazy redo record from the redo log file.
-Called only when recv_lazy_fetch is true, from recv_recover_page_func(),
-after the start_lsn >= page_lsn check confirms the record needs apply.
 
-The redo record format is: [type (1 B) | space_id (compressed) |
-page_no (compressed) | body (recv->len B)].  recv->start_lsn is the
-LSN of the type byte.  Since LSN counts every raw byte in the file
-(including block headers/trailers), the body starts at:
-  body_start_lsn = recv_calc_lsn_on_data_add(start_lsn, hdr_len)
-where hdr_len = 1 + compressed_size(space_id) + compressed_size(page_no).
+  Called only when recv_lazy_fetch is true, from recv_recover_page_func(),
+  after the start_lsn >= page_lsn check confirms the record actually needs
+  apply. In the lazy path recv->data was left NULL at parse time (we
+  skipped the body copy into space->m_heap); this function does the body
+  copy on demand, at apply time.
 
-The raw bytes read from the file include InnoDB log block headers (12 B)
-and trailers (4 B) every 512 B; this function strips them to produce
-exactly recv->len bytes of body data in out_buf.
+  ----------------------------------------------------------------------
+  Redo file layout (what's on disk)
+  ----------------------------------------------------------------------
+
+  The redo log file is a sequence of fixed-size log blocks:
+
+     block 0   |hdr(12)|........data(496).........|trl(4)|
+     block 1   |hdr(12)|........data(496).........|trl(4)|
+     block 2   |hdr(12)|........data(496).........|trl(4)|
+     ...
+
+  Each block is OS_FILE_LOG_BLOCK_SIZE (512 B).  The 12-byte header and
+  4-byte trailer are log-block framing (block number, checksum, etc.) and
+  are NOT part of the logical redo byte stream that records are encoded
+  in.  Only the middle 496 data bytes of each block carry record content.
+
+  LSN counts every raw byte in the file — headers, data and trailers
+  alike.  So file offset for a given LSN is purely linear:
+
+     file->offset(lsn) = LOG_FILE_HDR_SIZE + (lsn - file_start_lsn)
+
+  A redo record's logical bytes (type, compressed ids, body) are packed
+  into the 496-byte data regions and can cross block boundaries freely —
+  meaning a single record's body can span many blocks, with header/
+  trailer bytes interleaved in between.
+
+  ----------------------------------------------------------------------
+  What we need to compute
+  ----------------------------------------------------------------------
+
+  Record layout (logical, stripped bytes as seen by the parser):
+
+     | type (1) | space_id (compressed) | page_no (compressed) | body |
+     ^                                                         ^
+     recv->start_lsn                                           body_start
+                                                                     ^
+                                                            recv->end_lsn
+
+  recv->start_lsn is the LSN of the type byte.  We want to read just the
+  body (recv->len bytes of logical content).  To convert the logical
+  header length into an LSN delta, we use recv_calc_lsn_on_data_add(),
+  which accounts for any block header/trailer bytes the header may have
+  crossed:
+
+     body_start_lsn = recv_calc_lsn_on_data_add(recv->start_lsn, hdr_len)
+
+  The body then ends at recv->end_lsn.  recv_read_log_seg() pread()s the
+  raw file bytes [body_start_lsn, body_end_lsn) into raw_buf — including
+  any block headers/trailers that fall in the range — and handles redo
+  log encryption transparently.
+
+  ----------------------------------------------------------------------
+  Stripping loop
+  ----------------------------------------------------------------------
+
+  raw_buf starts at file offset file->offset(body_start_lsn), i.e. raw_buf[0]
+  is the byte at position (body_start_lsn % OS_FILE_LOG_BLOCK_SIZE) inside
+  its log block.  That position is guaranteed to be >= LOG_BLOCK_HDR_SIZE
+  and < OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE (asserts below) —
+  i.e. it's inside the data region of the block, never on a header or
+  trailer byte.
+
+  We walk forward in raw_buf: at each step, copy up to `avail` data bytes
+  (whatever's left before the trailer of the current block), then when we
+  reach the last data byte of a block (cur_lsn sits at the first trailer
+  byte), skip forward past the 4-byte trailer + 12-byte next-block header
+  — these 16 bytes are physically present in raw_buf but contain no body
+  data and must be discarded.  We stop once `copied == recv->len`.
 
 @param[out] out_buf   caller buffer of at least recv->len bytes
 @param[in]  recv      redo record with recv->data == nullptr
@@ -2875,40 +2937,56 @@ static void recv_lazy_read_body(byte *out_buf, const recv_t *recv,
   ut_ad(recv->data == nullptr);
   ut_ad(recv->len > 0);
 
-  /* Record header: type byte + compressed space_id + compressed page_no */
+  /* Logical length of the record header in stripped bytes.  This is how
+  many body-stream bytes separate recv->start_lsn (the type byte) from the
+  first byte of the body. */
   const ulint hdr_len = 1 + mach_get_compressed_size(space_id) +
                         mach_get_compressed_size(page_no);
 
-  /* LSN at the first body byte */
+  /* Advance start_lsn by hdr_len logical bytes, accounting for any log
+  block header/trailer bytes the record header may have crossed.  The
+  result is the LSN of the first body byte in the raw file stream. */
   const lsn_t body_start_lsn =
       recv_calc_lsn_on_data_add(recv->start_lsn, hdr_len);
   const lsn_t body_end_lsn = recv->end_lsn;
 
   ut_a(body_end_lsn > body_start_lsn);
 
-  /* Raw byte count: includes any block header+trailer bytes within range */
+  /* Number of raw file bytes to read — this is larger than recv->len by
+  (block_header + block_trailer) * (number of block boundaries the body
+  crosses).  For a 16 KB body that typically crosses ~33 blocks, raw_len
+  is ~16 KB + ~33 * 16 B ≈ 16.5 KB. */
   const ulint raw_len = static_cast<ulint>(body_end_lsn - body_start_lsn);
 
   byte *raw_buf = static_cast<byte *>(
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, raw_len));
 
+  /* Read raw blocks from the redo log file.  InnoDB's log-block I/O API
+  handles redo log encryption (if enabled) transparently; raw_buf will
+  contain decrypted-but-still-block-framed bytes. */
   recv_read_log_seg(*log_sys, raw_buf, body_start_lsn, body_end_lsn);
 
-  /* Walk through the raw bytes, skipping log block headers and trailers,
-  to extract recv->len data bytes into out_buf. */
+  /* Strip log-block framing: walk through raw_buf, copying data bytes into
+  out_buf and skipping the 4-byte trailer + 12-byte next-block header at
+  each block boundary.  See the layout diagram in the function header. */
   const byte *src = raw_buf;
   byte *dst = out_buf;
   ulint copied = 0;
   lsn_t cur_lsn = body_start_lsn;
 
   while (copied < recv->len) {
+    /* Position of cur_lsn inside its log block (byte offset 0..511).
+    Must be in the data region: past the 12-byte header, before the
+    4-byte trailer. */
     const ulint pos_in_block =
         static_cast<ulint>(cur_lsn % OS_FILE_LOG_BLOCK_SIZE);
 
     ut_ad(pos_in_block >= LOG_BLOCK_HDR_SIZE);
     ut_ad(pos_in_block < OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE);
 
-    /* Data bytes remaining in the current block */
+    /* How many more data bytes are left in this block before the
+    trailer starts.  If the body ends before the trailer, we copy only
+    what's needed. */
     const ulint avail =
         (OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE) - pos_in_block;
     const ulint copy_len = std::min(avail, recv->len - copied);
@@ -2919,8 +2997,10 @@ static void recv_lazy_read_body(byte *out_buf, const recv_t *recv,
     src += copy_len;
     cur_lsn += copy_len;
 
-    /* If we just consumed the last data byte in this block,
-    skip the block trailer (4 B) and the next block header (12 B). */
+    /* If we've just consumed the last data byte of this block, cur_lsn
+    now points at the first trailer byte.  The next 16 bytes in raw_buf
+    (4 trailer + 12 header of the following block) contain no body data
+    and must be stepped over before we continue copying. */
     if (cur_lsn % OS_FILE_LOG_BLOCK_SIZE ==
         OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE) {
       src += LOG_BLOCK_TRL_SIZE + LOG_BLOCK_HDR_SIZE;
