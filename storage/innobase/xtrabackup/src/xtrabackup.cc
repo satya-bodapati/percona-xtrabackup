@@ -175,6 +175,11 @@ bool xtrabackup_estimate_memory = false;
 
 bool xtrabackup_create_ib_logfile = false;
 
+/** User-facing flag for --lazy-redo-fetch. Default true (auto-detect).
+The actual activation (recv_lazy_fetch) is computed after innodb_init_param()
+based on redo log size vs --use-memory. */
+bool xtrabackup_lazy_redo_fetch = true;
+
 long xtrabackup_throttle = 0; /* 0:unlimited */
 lint io_ticket;
 os_event_t wait_throttle = NULL;
@@ -862,6 +867,7 @@ enum options_xtrabackup {
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_CHECK_TABLES,
+  OPT_XTRA_LAZY_REDO_FETCH,
 };
 
 struct my_option xb_client_options[] = {
@@ -913,6 +919,16 @@ struct my_option xb_client_options[] = {
      "the backup. The estimation happens during backup. (Default OFF)",
      (G_PTR *)&xtrabackup_estimate_memory, (G_PTR *)&xtrabackup_estimate_memory,
      0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"lazy-redo-fetch", OPT_XTRA_LAZY_REDO_FETCH,
+     "Enable lazy redo record body fetching during --prepare. When ON and "
+     "the copied redo log is larger than --use-memory, record bodies are "
+     "fetched from the redo log file on demand at apply time instead of being "
+     "copied to the recovery heap during parse. This eliminates multi-batch "
+     "tablespace page re-reads. Default: ON (auto-activated only when the "
+     "redo log exceeds --use-memory). "
+     "Use --lazy-redo-fetch=OFF to force the original behaviour.",
+     (G_PTR *)&xtrabackup_lazy_redo_fetch, (G_PTR *)&xtrabackup_lazy_redo_fetch,
+     0, GET_BOOL, OPT_ARG, 1, 0, 0, 0, 0, 0},
     {"throttle", OPT_XTRA_THROTTLE,
      "limit count of IO operations (pairs of read&write) per second to IOS "
      "values (for '--backup')",
@@ -7361,6 +7377,25 @@ skip_check:
   }
 
   srv_apply_log_only = (bool)xtrabackup_apply_log_only;
+
+  /* Activate lazy redo fetch when the copied redo log is larger than the
+  memory budget for recovery. Below that threshold the whole log fits in one
+  apply batch, every body would have been read sequentially along with the log
+  anyway, and the lazy path only adds reads. Above it the eager path needs
+  several apply batches, and a page named in more than one batch is read once
+  per batch -- that is the cost the lazy path removes.
+
+  innobase_log_file_size is the size of xtrabackup_logfile, set by
+  xtrabackup_init_temp_log(); srv_buf_pool_size is --use-memory after
+  alignment, set by innodb_init_param() above. */
+  recv_lazy_fetch =
+      xtrabackup_lazy_redo_fetch &&
+      ((ulonglong)innobase_log_file_size > (ulonglong)srv_buf_pool_size);
+  if (recv_lazy_fetch) {
+    xb::info() << "Lazy redo fetch enabled (redo " << innobase_log_file_size
+               << " B > use-memory " << srv_buf_pool_size
+               << " B): record bodies fetched on demand at apply time.";
+  }
 
   xb::info() << "Starting InnoDB instance for recovery.";
   xb::info() << "Using " << xtrabackup_use_memory
