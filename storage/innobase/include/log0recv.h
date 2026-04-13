@@ -722,6 +722,14 @@ number (FIL_PAGE_LSN) is in the future.  Initially false, and set by
 recv_recovery_from_checkpoint_start(). */
 extern bool recv_lsn_checks_on;
 
+#ifdef XTRABACKUP
+/** When true (xtrabackup --prepare with large redo log), skip copying record
+body bytes to heap in recv_add_to_hash_table(). Body bytes are fetched on
+demand from the redo log file inside recv_recover_page_func(), only for
+records whose start_lsn >= page_lsn. Always false outside xtrabackup. */
+extern bool recv_lazy_fetch;
+#endif /* XTRABACKUP */
+
 /** Size of the parsing buffer; it must accommodate RECV_SCAN_SIZE many
 times! */
 constexpr uint32_t RECV_PARSING_BUF_SIZE = 2 * 1024 * 1024;

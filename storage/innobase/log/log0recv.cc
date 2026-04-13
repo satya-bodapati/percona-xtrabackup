@@ -189,6 +189,13 @@ bool recv_is_making_a_backup = false;
 /** true when recovering from a backed up redo log file */
 bool recv_is_from_backup = false;
 
+#ifdef XTRABACKUP
+/** When true, skip copying redo record body bytes to heap during parse.
+Fetch body bytes from the redo log file on demand at apply time instead.
+Set before innodb_init() by xtrabackup_prepare_func(). */
+bool recv_lazy_fetch = false;
+#endif /* XTRABACKUP */
+
 /** The following counter is used to decide when to print info on
 log scan */
 static ulint recv_scan_print_counter;
@@ -2771,36 +2778,50 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
   UT_LIST_ADD_LAST(recv_addr->rec_list, recv);
 
-  recv_data_t **prev_field;
+#ifdef XTRABACKUP
+  if (recv_lazy_fetch) {
+    /* Lazy path: skip body copy. Body bytes are fetched from the redo log
+    file on demand inside recv_recover_page_func(), after confirming that
+    start_lsn >= page_lsn. Records for pages already up-to-date or in
+    dropped tablespaces pay zero I/O. */
+    recv->data = nullptr;
+  } else {
+#endif /* XTRABACKUP */
 
-  prev_field = &recv->data;
+    recv_data_t **prev_field;
 
-  /* Store the log record body in chunks of less than UNIV_PAGE_SIZE:
-  the heap grows into the buffer pool, and bigger chunks could not
-  be allocated */
+    prev_field = &recv->data;
 
-  while (rec_end > body) {
-    ulint len = rec_end - body;
+    /* Store the log record body in chunks of less than UNIV_PAGE_SIZE:
+    the heap grows into the buffer pool, and bigger chunks could not
+    be allocated */
 
-    if (len > RECV_DATA_BLOCK_SIZE) {
-      len = RECV_DATA_BLOCK_SIZE;
+    while (rec_end > body) {
+      ulint len = rec_end - body;
+
+      if (len > RECV_DATA_BLOCK_SIZE) {
+        len = RECV_DATA_BLOCK_SIZE;
+      }
+
+      recv_data_t *recv_data;
+
+      recv_data = static_cast<recv_data_t *>(
+          mem_heap_alloc(space->m_heap, sizeof(*recv_data) + len));
+
+      *prev_field = recv_data;
+
+      memcpy(recv_data + 1, body, len);
+
+      prev_field = &recv_data->next;
+
+      body += len;
     }
 
-    recv_data_t *recv_data;
+    *prev_field = nullptr;
 
-    recv_data = static_cast<recv_data_t *>(
-        mem_heap_alloc(space->m_heap, sizeof(*recv_data) + len));
-
-    *prev_field = recv_data;
-
-    memcpy(recv_data + 1, body, len);
-
-    prev_field = &recv_data->next;
-
-    body += len;
+#ifdef XTRABACKUP
   }
-
-  *prev_field = nullptr;
+#endif /* XTRABACKUP */
 }
 
 /** Copies the log record body from recv to buf.
@@ -2827,6 +2848,89 @@ static void recv_data_copy_to_buf(byte *buf, recv_t *recv) {
     recv_data = recv_data->next;
   }
 }
+
+#ifdef XTRABACKUP
+/** Read the body bytes of a lazy redo record from the redo log file.
+Called only when recv_lazy_fetch is true, from recv_recover_page_func(),
+after the start_lsn >= page_lsn check confirms the record needs apply.
+
+The redo record format is: [type (1 B) | space_id (compressed) |
+page_no (compressed) | body (recv->len B)].  recv->start_lsn is the
+LSN of the type byte.  Since LSN counts every raw byte in the file
+(including block headers/trailers), the body starts at:
+  body_start_lsn = recv_calc_lsn_on_data_add(start_lsn, hdr_len)
+where hdr_len = 1 + compressed_size(space_id) + compressed_size(page_no).
+
+The raw bytes read from the file include InnoDB log block headers (12 B)
+and trailers (4 B) every 512 B; this function strips them to produce
+exactly recv->len bytes of body data in out_buf.
+
+@param[out] out_buf   caller buffer of at least recv->len bytes
+@param[in]  recv      redo record with recv->data == nullptr
+@param[in]  space_id  tablespace id (for header length computation)
+@param[in]  page_no   page number (for header length computation) */
+static void recv_lazy_read_body(byte *out_buf, const recv_t *recv,
+                                space_id_t space_id, page_no_t page_no) {
+  ut_ad(recv_lazy_fetch);
+  ut_ad(recv->data == nullptr);
+  ut_ad(recv->len > 0);
+
+  /* Record header: type byte + compressed space_id + compressed page_no */
+  const ulint hdr_len = 1 + mach_get_compressed_size(space_id) +
+                        mach_get_compressed_size(page_no);
+
+  /* LSN at the first body byte */
+  const lsn_t body_start_lsn =
+      recv_calc_lsn_on_data_add(recv->start_lsn, hdr_len);
+  const lsn_t body_end_lsn = recv->end_lsn;
+
+  ut_a(body_end_lsn > body_start_lsn);
+
+  /* Raw byte count: includes any block header+trailer bytes within range */
+  const ulint raw_len = static_cast<ulint>(body_end_lsn - body_start_lsn);
+
+  byte *raw_buf = static_cast<byte *>(
+      ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, raw_len));
+
+  recv_read_log_seg(*log_sys, raw_buf, body_start_lsn, body_end_lsn);
+
+  /* Walk through the raw bytes, skipping log block headers and trailers,
+  to extract recv->len data bytes into out_buf. */
+  const byte *src = raw_buf;
+  byte *dst = out_buf;
+  ulint copied = 0;
+  lsn_t cur_lsn = body_start_lsn;
+
+  while (copied < recv->len) {
+    const ulint pos_in_block =
+        static_cast<ulint>(cur_lsn % OS_FILE_LOG_BLOCK_SIZE);
+
+    ut_ad(pos_in_block >= LOG_BLOCK_HDR_SIZE);
+    ut_ad(pos_in_block < OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE);
+
+    /* Data bytes remaining in the current block */
+    const ulint avail =
+        (OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE) - pos_in_block;
+    const ulint copy_len = std::min(avail, recv->len - copied);
+
+    memcpy(dst, src, copy_len);
+    dst += copy_len;
+    copied += copy_len;
+    src += copy_len;
+    cur_lsn += copy_len;
+
+    /* If we just consumed the last data byte in this block,
+    skip the block trailer (4 B) and the next block header (12 B). */
+    if (cur_lsn % OS_FILE_LOG_BLOCK_SIZE ==
+        OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE) {
+      src += LOG_BLOCK_TRL_SIZE + LOG_BLOCK_HDR_SIZE;
+      cur_lsn += LOG_BLOCK_TRL_SIZE + LOG_BLOCK_HDR_SIZE;
+    }
+  }
+
+  ut::free(raw_buf);
+}
+#endif /* XTRABACKUP */
 
 bool recv_page_is_brand_new(buf_block_t *block) {
   mutex_enter(&recv_sys->mutex);
@@ -3002,23 +3106,26 @@ void recv_recover_page_func(
 
     byte *buf = nullptr;
 
-    if (recv->len > RECV_DATA_BLOCK_SIZE) {
-      /* We have to copy the record body to a separate
-      buffer */
-
-      buf = static_cast<byte *>(
-          ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, recv->len));
-
-      recv_data_copy_to_buf(buf, recv);
-    } else if (recv->data != nullptr) {
-      buf = ((byte *)(recv->data)) + sizeof(recv_data_t);
-    } else {
-      /* Redo record that does not have a payload, such as
-       MLOG_UNDO_ERASE_END, MLOG_COMP_PAGE_CREATE, MLOG_INIT_FILE_PAGE2 etc.
-     */
-      ut_ad(recv->data == nullptr);
-      ut_ad(recv->len == 0);
+#ifdef XTRABACKUP
+    if (!recv_lazy_fetch) {
+#endif /* XTRABACKUP */
+      if (recv->len > RECV_DATA_BLOCK_SIZE) {
+        /* We have to copy the record body to a separate buffer */
+        buf = static_cast<byte *>(
+            ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, recv->len));
+        recv_data_copy_to_buf(buf, recv);
+      } else if (recv->data != nullptr) {
+        buf = ((byte *)(recv->data)) + sizeof(recv_data_t);
+      } else {
+        /* Redo record that does not have a payload, such as
+         MLOG_UNDO_ERASE_END, MLOG_COMP_PAGE_CREATE, MLOG_INIT_FILE_PAGE2 etc.
+       */
+        ut_ad(recv->data == nullptr);
+        ut_ad(recv->len == 0);
+      }
+#ifdef XTRABACKUP
     }
+#endif /* XTRABACKUP */
 
     if (recv->type == MLOG_INIT_FILE_PAGE) {
       page_lsn = page_newest_lsn;
@@ -3060,6 +3167,17 @@ void recv_recover_page_func(
                             " %s len " ULINTPF " page %u:%u",
                             recv->start_lsn, get_mlog_string(recv->type),
                             recv->len, recv_addr->space, recv_addr->page_no));
+#ifdef XTRABACKUP
+      /* Lazy path: fetch body bytes from the redo log file now that we
+      know this record needs to be applied. Only records with a payload
+      are fetched; zero-length records (MLOG_COMP_PAGE_CREATE etc.) have
+      recv->len == 0 and buf stays nullptr, which is correct. */
+      if (recv_lazy_fetch && recv->len > 0) {
+        buf = static_cast<byte *>(
+            ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, recv->len));
+        recv_lazy_read_body(buf, recv, recv_addr->space, recv_addr->page_no);
+      }
+#endif /* XTRABACKUP */
       /* Since buf can be a nullptr for record types without a payload we can
       end up with nullptr + 0 if we calc buf + recv->len. This is undefined
       behaviour. Avoid this by only calculating the end_ptr when there's
@@ -3089,7 +3207,15 @@ void recv_recover_page_func(
 #endif /* UNIV_HOTBACKUP */
     }
 
+#ifdef XTRABACKUP
+    /* Lazy path: buf is heap-allocated whenever recv->len > 0 and the
+    record was applied (start_lsn >= page_lsn). Free it if non-null.
+    Eager path: free only when a separate malloc was used (len > block). */
+    if (recv_lazy_fetch ? (buf != nullptr)
+                        : (recv->len > RECV_DATA_BLOCK_SIZE)) {
+#else
     if (recv->len > RECV_DATA_BLOCK_SIZE) {
+#endif /* XTRABACKUP */
       ut::free(buf);
     }
   }
