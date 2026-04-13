@@ -256,6 +256,42 @@ bytes. The helper `recv_lazy_read_body()` then strips block headers (12 B) and t
 (4 B) every 512 B to produce exactly `recv->len` data bytes. InnoDB log block API
 handles redo log encryption transparently — encrypted redo is not a blocker.
 
+### Redo Block Layout and `m_first_rec_group`
+
+Each 512-byte log block:
+
+```
+[bytes 0..11]   = LOG_BLOCK_HDR_SIZE (12 B framing)
+                   ├─ block_no (4)
+                   ├─ data_len (2)
+                   ├─ m_first_rec_group (2)   ← MTR-start offset (or 0)
+                   └─ checkpoint_no (4)
+[bytes 12..507] = data region (496 B of record stream)
+[bytes 508..511] = LOG_BLOCK_TRL_SIZE (4 B checksum)
+```
+
+`m_first_rec_group` is the offset of the first fresh-MTR start within the block,
+or 0 if the entire block is continuation bytes of an MTR that started earlier.
+It exists so a reader starting mid-log (crash recovery, parallel-parse thread
+boundaries) can find a safe MTR boundary to begin parsing.
+
+**Why lazy fetch ignores `m_first_rec_group`:** we are not picking a parse start
+point. The exact LSN of each record's body was recorded in `recv->start_lsn`
+during the initial single-threaded scan phase. At apply time we `pread` that
+exact LSN range back and strip block framing. The 12-byte block header —
+including `m_first_rec_group` — is unconditionally skipped as noise.
+
+**Continuation blocks and multi-block MTRs:** a large MTR (e.g. one touching
+many pages back-to-back before `MLOG_MULTI_REC_END`) writes records across many
+blocks; most of those blocks have `m_first_rec_group == 0`. A single record body
+may also span several blocks. Both cases require no special handling — the
+stripping loop copies the 496 data bytes of each block and skips 16 framing bytes
+at each boundary, regardless of whether the block carries a fresh MTR start.
+
+MTR boundary markers (`MLOG_MULTI_REC_END`, the multi-rec flag on the first
+record of an MTR) were consumed by the parse phase. They are irrelevant to
+fetching one record's body at apply time.
+
 ### CLI Flag
 
 ```
