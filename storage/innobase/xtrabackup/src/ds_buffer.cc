@@ -52,7 +52,8 @@ static int buffer_close(ds_file_t *file);
 static void buffer_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_buffer = {&buffer_init, &buffer_open,  &buffer_write,
-                              nullptr,      &buffer_close, &buffer_deinit};
+                              nullptr,      &buffer_close, &buffer_deinit,
+                              nullptr /* get_bytes_written not implemented */};
 
 /* Change the default buffer size */
 void ds_buffer_set_size(ds_ctxt_t *ctxt, size_t size) {
@@ -88,7 +89,7 @@ static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
   pipe_ctxt = ctxt->pipe_ctxt;
   xb_a(pipe_ctxt != NULL);
 
-  dst_file = ds_open(pipe_ctxt, path, mystat);
+  dst_file = ds_open_internal(pipe_ctxt, path, mystat);
   if (dst_file == NULL) {
     exit(EXIT_FAILURE);
   }

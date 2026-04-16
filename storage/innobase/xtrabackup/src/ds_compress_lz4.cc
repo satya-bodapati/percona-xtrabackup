@@ -69,9 +69,10 @@ static int compress_write(ds_file_t *file, const void *buf, size_t len);
 static int compress_close(ds_file_t *file);
 static void compress_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_compress_lz4 = {&compress_init,  &compress_open,
-                                    &compress_write, nullptr,
-                                    &compress_close, &compress_deinit};
+datasink_t
+    datasink_compress_lz4 = {&compress_init, &compress_open,  &compress_write,
+                             nullptr,        &compress_close, &compress_deinit,
+                             nullptr /* get_bytes_written not implemented */};
 
 static inline int write_uint32_le(ds_file_t *file, uint32_t n);
 
@@ -98,7 +99,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   /* Append the .lz4 extension to the filename */
   fn_format(new_name, path, "", ".lz4", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat);
+  ds_file_t *dest_file = ds_open_internal(dest_ctxt, new_name, mystat);
   if (dest_file == nullptr) {
     return nullptr;
   }

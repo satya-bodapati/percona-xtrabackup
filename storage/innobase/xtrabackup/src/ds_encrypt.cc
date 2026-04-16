@@ -95,7 +95,8 @@ static int encrypt_close(ds_file_t *file);
 static void encrypt_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_encrypt = {&encrypt_init, &encrypt_open,  &encrypt_write,
-                               nullptr,       &encrypt_close, &encrypt_deinit};
+                               nullptr,       &encrypt_close, &encrypt_deinit,
+                               nullptr /* get_bytes_written not implemented */};
 
 static uint encrypt_iv_len = 0;
 
@@ -160,7 +161,7 @@ static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
     used_name = path;
   }
 
-  crypt_file->dest_file = ds_open(dest_ctxt, used_name, mystat);
+  crypt_file->dest_file = ds_open_internal(dest_ctxt, used_name, mystat);
   if (crypt_file->dest_file == NULL) {
     msg("encrypt: ds_open(\"%s\") failed.\n", used_name);
     goto err;

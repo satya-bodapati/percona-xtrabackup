@@ -87,9 +87,10 @@ static int decompress_write(ds_file_t *file, const void *buf, size_t len);
 static int decompress_close(ds_file_t *file);
 static void decompress_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_decompress_zstd = {&decompress_init,  &decompress_open,
-                                       &decompress_write, nullptr,
-                                       &decompress_close, &decompress_deinit};
+datasink_t datasink_decompress_zstd = {
+    &decompress_init, &decompress_open,  &decompress_write,
+    nullptr,          &decompress_close, &decompress_deinit,
+    nullptr /* get_bytes_written not implemented */};
 
 static ds_ctxt_t *decompress_init(const char *root) {
   ds_ctxt_t *ctxt = new ds_ctxt_t;
@@ -119,7 +120,7 @@ static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
     return NULL;
   }
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat);
+  ds_file_t *dest_file = ds_open_internal(dest_ctxt, new_name, mystat);
   if (dest_file == NULL) {
     return NULL;
   }

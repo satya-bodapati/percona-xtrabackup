@@ -394,6 +394,42 @@ ds_ctxt_t *ds_meta = nullptr;
 ds_ctxt_t *ds_redo = nullptr;
 ds_ctxt_t *ds_uncompressed_data = nullptr;
 
+extern datasink_t datasink_local;
+extern datasink_t datasink_stdout;
+extern datasink_t datasink_fifo;
+
+/** Return the total raw (uncompressed) bytes that entered the backup
+pipelines, as accumulated by ds_write() / ds_write_sparse() when the
+head ctxts have been bound to xb_backup_metrics.  Only meaningful
+when --compress is used.
+@return total uncompressed byte count */
+unsigned long long get_uncompressed_backup_size() {
+  return xb_backup_metrics.get_bytes();
+}
+
+/** Return the total bytes written by the leaf (terminal) datasink of the
+main data pipeline.  Walks ds_data to its leaf (ds_local, ds_stdout, or
+ds_fifo) and reads its atomic byte counter.  This is the final on-disk size
+of the backup -- it equals the compressed size when --compress is used, and
+the uncompressed size otherwise.
+@return total byte count at the leaf, or 0 if unavailable */
+unsigned long long get_compressed_backup_size() {
+  const ds_ctxt_t *leaf = ds_leaf(ds_data);
+  if (leaf == nullptr || leaf->datasink->get_bytes_written == nullptr) {
+    xb::warn() << "Cannot determine backup size: "
+               << "leaf datasink does not support get_bytes_written";
+    return 0;
+  }
+
+  ut_ad((xtrabackup_stream && xtrabackup_fifo_streams > 1 &&
+         leaf->datasink == &datasink_fifo) ||
+        (xtrabackup_stream && xtrabackup_fifo_streams <= 1 &&
+         leaf->datasink == &datasink_stdout) ||
+        (!xtrabackup_stream && leaf->datasink == &datasink_local));
+
+  return leaf->datasink->get_bytes_written(leaf);
+}
+
 static long innobase_log_files_in_group_save;
 static char *srv_log_group_home_dir_save;
 static longlong innobase_log_file_size_save;
@@ -3593,6 +3629,40 @@ static void xtrabackup_init_datasinks(void) {
       }
     }
   }
+
+  if (xtrabackup_compress == XTRABACKUP_COMPRESS_NONE) {
+    ds_uncompressed_data = ds_data;
+  }
+
+  /* Raw (uncompressed) byte accounting is centralized in ds_write() and
+  ds_write_sparse().  Each head ctxt that feeds a backup pipeline is
+  bound to a ds_metrics instance; the framework calls metrics->add_bytes()
+  on every write.  Only enable accounting when --compress is used --
+  without compression the leaf byte count already equals the uncompressed
+  size, so the atomic RMW would be needless overhead.
+
+  Today all four heads point at the same global ds_metrics
+  (xb_backup_metrics), so get_uncompressed_backup_size() returns the
+  aggregate across data, uncompressed_data (bypass path for encrypted /
+  misc files), redo log, and delta metadata.  Per-pipeline metrics (e.g.
+  redo-only uncompressed size) can be added later by pointing a single
+  head at its own ds_metrics instance -- no framework change required.
+  New counters (file counts, pages, elapsed time, ...) are added as new
+  fields on ds_metrics; ds_ctxt_t is never touched. */
+  if (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
+    if (ds_data != nullptr) ds_data->metrics = &xb_backup_metrics;
+    if (ds_uncompressed_data != nullptr && ds_uncompressed_data != ds_data) {
+      ds_uncompressed_data->metrics = &xb_backup_metrics;
+    }
+    if (ds_redo != nullptr && ds_redo != ds_data &&
+        ds_redo != ds_uncompressed_data) {
+      ds_redo->metrics = &xb_backup_metrics;
+    }
+    if (ds_meta != nullptr && ds_meta != ds_data &&
+        ds_meta != ds_uncompressed_data && ds_meta != ds_redo) {
+      ds_meta->metrics = &xb_backup_metrics;
+    }
+  }
 }
 
 /************************************************************************
@@ -4579,10 +4649,6 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
 
-  if (!backup_finish(backup_ctxt)) {
-    exit(EXIT_FAILURE);
-  }
-
   if (xtrabackup_extra_lsndir) {
     char filename[FN_REFLEN];
 
@@ -4592,18 +4658,16 @@ void xtrabackup_backup_func(void) {
       xb::error() << "failed to write metadata to " << filename;
       exit(EXIT_FAILURE);
     }
-
-    sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
-    if (!xtrabackup_write_info(filename)) {
-      xb::error() << "failed to write info to " << filename;
-      exit(EXIT_FAILURE);
-    }
   }
 
   if (opt_lock_ddl_per_table) {
     mdl_unlock_all();
   }
 
+  /* Flush every backup output that goes through ds_data before sampling
+  backup_size in backup_finish().  xtrabackup_info is the only file that
+  must be written AFTER the sample (chicken-and-egg: the sampled value is
+  embedded in its content), so backup_finish() stays last. */
   Tablespace_map::instance().serialize(ds_data);
 
   if (ts_key_dumper.is_initialized()) {
@@ -4623,6 +4687,20 @@ void xtrabackup_backup_func(void) {
   }
 
   ts_key_dumper.finalize();
+
+  if (!backup_finish(backup_ctxt)) {
+    exit(EXIT_FAILURE);
+  }
+
+  if (xtrabackup_extra_lsndir) {
+    char filename[FN_REFLEN];
+
+    sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
+    if (!xtrabackup_write_info(filename)) {
+      xb::error() << "failed to write info to " << filename;
+      exit(EXIT_FAILURE);
+    }
+  }
 
   xtrabackup_destroy_datasinks();
 

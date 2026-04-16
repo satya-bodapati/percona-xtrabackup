@@ -80,6 +80,9 @@ extern ds_ctxt_t *ds_meta;
 extern ds_ctxt_t *ds_data;
 extern ds_ctxt_t *ds_uncompressed_data;
 
+unsigned long long get_uncompressed_backup_size();
+unsigned long long get_compressed_backup_size();
+
 extern pagetracking::xb_space_map *changed_page_tracking;
 
 extern ulint xtrabackup_rebuild_threads;

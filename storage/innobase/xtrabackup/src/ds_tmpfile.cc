@@ -53,7 +53,8 @@ static int tmpfile_close(ds_file_t *file);
 static void tmpfile_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_tmpfile = {&tmpfile_init, &tmpfile_open,  &tmpfile_write,
-                               nullptr,       &tmpfile_close, &tmpfile_deinit};
+                               nullptr,       &tmpfile_close, &tmpfile_deinit,
+                               nullptr /* get_bytes_written not implemented */};
 
 extern MY_TMPDIR mysql_tmpdir_list;
 
@@ -188,7 +189,8 @@ static void tmpfile_deinit(ds_ctxt_t *ctxt) {
     tmp_file->mystat.st_size = mystat.st_size;
     tmp_file->mystat.st_mtime = mystat.st_mtime;
 
-    dst_file = ds_open(pipe_ctxt, tmp_file->orig_path, &tmp_file->mystat);
+    dst_file =
+        ds_open_internal(pipe_ctxt, tmp_file->orig_path, &tmp_file->mystat);
     if (dst_file == NULL) {
       msg("error: could not stream a temporary file to "
           "'%s'\n",

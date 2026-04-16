@@ -52,9 +52,10 @@ static int compress_write(ds_file_t *file, const void *buf, size_t len);
 static int compress_close(ds_file_t *file);
 static void compress_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_compress_zstd = {&compress_init,  &compress_open,
-                                     &compress_write, nullptr,
-                                     &compress_close, &compress_deinit};
+datasink_t
+    datasink_compress_zstd = {&compress_init, &compress_open,  &compress_write,
+                              nullptr,        &compress_close, &compress_deinit,
+                              nullptr /* get_bytes_written not implemented */};
 
 static ds_ctxt_t *compress_init(const char *root) {
   ds_compress_ctxt_t *compress_ctxt = new ds_compress_ctxt_t;
@@ -80,7 +81,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   /* Append the .zst extension to the filename */
   fn_format(new_name, path, "", ".zst", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat);
+  ds_file_t *dest_file = ds_open_internal(dest_ctxt, new_name, mystat);
   if (dest_file == nullptr) {
     return nullptr;
   }
