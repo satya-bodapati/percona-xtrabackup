@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "ds_encrypt.h"
 #include "ds_fifo.h"
 #include "ds_local.h"
+#include "ds_statistics.h"
 #include "ds_stdout.h"
 #include "ds_tmpfile.h"
 #include "ds_xbstream.h"
@@ -86,6 +87,9 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
     case DS_TYPE_BUFFER:
       ds = &datasink_buffer;
       break;
+    case DS_TYPE_STATISTICS:
+      ds = &datasink_statistics;
+      break;
     default:
       msg("Unknown datasink type: %d\n", type);
       xb_ad(0);
@@ -95,6 +99,7 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
   ctxt = ds->init(root);
   if (ctxt != NULL) {
     ctxt->datasink = ds;
+    ctxt->pipe_ctxt = NULL;
   } else {
     msg("Error: failed to initialize datasink.\n");
     exit(EXIT_FAILURE);
@@ -160,4 +165,24 @@ Set the destination pipe for a datasink (only makes sense for compress and
 tmpfile). */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt) {
   ctxt->pipe_ctxt = pipe_ctxt;
+}
+
+ds_ctxt_t *ds_leaf(ds_ctxt_t *ctxt) {
+  while (ctxt && ctxt->pipe_ctxt) ctxt = ctxt->pipe_ctxt;
+  return ctxt;
+}
+
+const char *ds_type_to_str(datasink_t *ds) {
+  if (ds == &datasink_local) return "local";
+  if (ds == &datasink_stdout) return "stdout";
+  if (ds == &datasink_fifo) return "fifo";
+  if (ds == &datasink_xbstream) return "xbstream";
+  if (ds == &datasink_compress) return "compress(quicklz)";
+  if (ds == &datasink_compress_lz4) return "compress(lz4)";
+  if (ds == &datasink_compress_zstd) return "compress(zstd)";
+  if (ds == &datasink_encrypt) return "encrypt";
+  if (ds == &datasink_tmpfile) return "tmpfile";
+  if (ds == &datasink_buffer) return "buffer";
+  if (ds == &datasink_statistics) return "statistics";
+  return "unknown";
 }

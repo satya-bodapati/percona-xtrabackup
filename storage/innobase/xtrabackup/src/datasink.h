@@ -59,6 +59,7 @@ struct datasink_struct {
                       bool punch_hole_supported);
   int (*close)(ds_file_t *file);
   void (*deinit)(ds_ctxt_t *ctxt);
+  unsigned long long (*get_bytes_written)(ds_ctxt_t *ctxt);
 };
 
 /* Supported datasink types */
@@ -76,7 +77,8 @@ typedef enum {
   DS_TYPE_ENCRYPT,
   DS_TYPE_DECRYPT,
   DS_TYPE_TMPFILE,
-  DS_TYPE_BUFFER
+  DS_TYPE_BUFFER,
+  DS_TYPE_STATISTICS
 } ds_type_t;
 
 /************************************************************************
@@ -117,6 +119,10 @@ void ds_destroy(ds_ctxt_t *ctxt);
 Set the destination pipe for a datasink (only makes sense for compress and
 tmpfile). */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt);
+
+const char *ds_type_to_str(datasink_t *ds);
+
+ds_ctxt_t *ds_leaf(ds_ctxt_t *ctxt);
 
 #ifdef __cplusplus
 } /* extern "C" */

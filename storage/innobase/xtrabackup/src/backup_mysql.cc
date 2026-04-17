@@ -563,7 +563,6 @@ bool get_mysql_vars(MYSQL *connection) {
         my_strdup(PSI_NOT_INSTRUMENTED, innodb_directories_var, MYF(MY_FAE));
   }
 
-
   if (!check_if_param_set("innodb_log_file_size") && innodb_log_file_size_var) {
     char *endptr;
 
@@ -1743,6 +1742,11 @@ char *get_xtrabackup_info(MYSQL *connection) {
   format_time(history_start_time, buf_start_time, time_buf_size);
   format_time(history_end_time, buf_end_time, time_buf_size);
 
+  unsigned long long backup_size =
+      (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE)
+          ? get_compressed_backup_size()
+          : get_uncompressed_backup_size();
+
   ut_a(uuid);
   ut_a(server_version);
   char *result = NULL;
@@ -1766,7 +1770,8 @@ char *get_xtrabackup_info(MYSQL *connection) {
                      "incremental = %s\n"
                      "format = %s\n"
                      "compressed = %s\n"
-                     "encrypted = %s\n",
+                     "encrypted = %s\n"
+                     "backup_size = %llu\n",
                      uuid,                           /* uuid */
                      opt_history ? opt_history : "", /* name */
                      tool_name,                      /* tool_name */
@@ -1789,9 +1794,25 @@ char *get_xtrabackup_info(MYSQL *connection) {
                      xtrabackup_incremental ? "Y" : "N", /* incremental */
                      xb_stream_format_name[xtrabackup_stream_fmt], /* format */
                      xtrabackup_compress ? "compressed" : "N", /* compressed */
-                     xtrabackup_encrypt ? "Y" : "N");          /* encrypted */
+                     xtrabackup_encrypt ? "Y" : "N",           /* encrypted */
+                     backup_size);                             /* backup_size */
 
   ut_a(ret != 0);
+
+  if (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
+    unsigned long long uncompressed_size = get_uncompressed_backup_size();
+
+    char *tmp = NULL;
+    int ret2 = asprintf(&tmp, "%suncompressed_size = %llu\n", result,
+                        uncompressed_size);
+    if (ret2 < 0) {
+      xb::warn() << "Failed to append uncompressed_size to"
+                 << " xtrabackup_info: " << strerror(errno);
+    } else {
+      free(result);
+      result = tmp;
+    }
+  }
 
   free(server_version);
   return result;

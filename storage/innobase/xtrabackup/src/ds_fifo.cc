@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <my_thread_local.h>
 #include <mysql/service_mysql_alloc.h>
 #include <mysys_err.h>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include "common.h"
@@ -35,6 +36,7 @@ struct ds_fifo_ctxt_t {
   std::unordered_map<std::string, File> FIFO_list;
   /* Mutex protecting FIFO list */
   std::mutex fifo_mutex;
+  std::atomic<unsigned long long> bytes_written{0};
 
   /* Add a new pair of fullpath and fd to FIFO_list */
   void populate_list(std::string fullpath, File fd) {
@@ -82,9 +84,15 @@ static ds_file_t *fifo_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat);
 static int fifo_write(ds_file_t *file, const void *buf, size_t len);
 static int fifo_close(ds_file_t *file);
 static void fifo_deinit(ds_ctxt_t *ctxt);
+static unsigned long long fifo_get_bytes_written(ds_ctxt_t *ctxt);
 
-datasink_t datasink_fifo = {&fifo_init, &fifo_open,  &fifo_write,
-                            nullptr,    &fifo_close, &fifo_deinit};
+datasink_t datasink_fifo = {&fifo_init,
+                            &fifo_open,
+                            &fifo_write,
+                            nullptr,
+                            &fifo_close,
+                            &fifo_deinit,
+                            &fifo_get_bytes_written};
 
 static void cleanup_on_error(const char *root, ds_fifo_ctxt_t *ctxt) {
   std::string path;
@@ -107,6 +115,7 @@ and the fifo files
 NULL in case of error. */
 static ds_ctxt_t *fifo_init(const char *root) {
   ds_fifo_ctxt_t *fifo_context = new ds_fifo_ctxt_t;
+  fifo_context->bytes_written.store(0, std::memory_order_relaxed);
   File fd;
   ds_ctxt_t *ctxt = new ds_ctxt_t;
   char fullpath[FN_REFLEN];
@@ -180,10 +189,13 @@ static ds_file_t *fifo_open(ds_ctxt_t *ctxt,
 }
 
 static int fifo_write(ds_file_t *file, const void *buf, size_t len) {
-  File fd = ((ds_fifo_file_t *)file->ptr)->fd;
+  auto fifo_file = (ds_fifo_file_t *)file->ptr;
+  File fd = fifo_file->fd;
 
   if (!my_write(fd, static_cast<const uchar *>(buf), len,
                 MYF(MY_WME | MY_NABP))) {
+    fifo_file->fifo_context->bytes_written.fetch_add(len,
+                                                     std::memory_order_relaxed);
     posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
     return 0;
   }
@@ -207,4 +219,9 @@ static void fifo_deinit(ds_ctxt_t *ctxt) {
   delete fifo_context;
   my_free(ctxt->root);
   delete ctxt;
+}
+
+static unsigned long long fifo_get_bytes_written(ds_ctxt_t *ctxt) {
+  return ((ds_fifo_ctxt_t *)ctxt->ptr)
+      ->bytes_written.load(std::memory_order_relaxed);
 }

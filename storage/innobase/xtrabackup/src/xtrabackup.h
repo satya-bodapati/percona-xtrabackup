@@ -78,6 +78,11 @@ extern char *innobase_buffer_pool_filename;
 extern ds_ctxt_t *ds_meta;
 extern ds_ctxt_t *ds_data;
 extern ds_ctxt_t *ds_uncompressed_data;
+extern ds_ctxt_t *ds_stats_data;
+extern ds_ctxt_t *ds_stats_uncomp;
+
+unsigned long long get_uncompressed_backup_size();
+unsigned long long get_compressed_backup_size();
 
 extern pagetracking::xb_space_map *changed_page_tracking;
 

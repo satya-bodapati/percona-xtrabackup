@@ -93,6 +93,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   ds_encrypt.cc
   ds_fifo.cc
   ds_local.cc
+  ds_statistics.cc
   ds_stdout.cc
   ds_tmpfile.cc
   ds_xbstream.cc
@@ -175,6 +176,7 @@ MYSQL_ADD_EXECUTABLE(xbstream
   ds_buffer.cc
   ds_local.cc
   ds_stdout.cc
+  ds_statistics.cc
   ds_decompress.cc
   ds_decrypt.cc
   ds_decompress_lz4.cc
@@ -227,6 +229,7 @@ MYSQL_ADD_EXECUTABLE(xbcrypt
   ds_encrypt.cc
   ds_decrypt.cc
   ds_local.cc
+  ds_statistics.cc
   ds_stdout.cc
   )
 

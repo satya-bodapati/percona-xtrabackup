@@ -388,6 +388,27 @@ ds_ctxt_t *ds_data = nullptr;
 ds_ctxt_t *ds_meta = nullptr;
 ds_ctxt_t *ds_redo = nullptr;
 ds_ctxt_t *ds_uncompressed_data = nullptr;
+ds_ctxt_t *ds_stats_data = nullptr;
+ds_ctxt_t *ds_stats_uncomp = nullptr;
+
+unsigned long long get_uncompressed_backup_size() {
+  unsigned long long size = 0;
+  if (ds_stats_data && ds_stats_data->datasink->get_bytes_written)
+    size = ds_stats_data->datasink->get_bytes_written(ds_stats_data);
+  if (ds_stats_uncomp && ds_stats_uncomp->datasink->get_bytes_written)
+    size += ds_stats_uncomp->datasink->get_bytes_written(ds_stats_uncomp);
+  return size;
+}
+
+unsigned long long get_compressed_backup_size() {
+  ds_ctxt_t *leaf = ds_leaf(ds_stats_data);
+  if (leaf == nullptr || leaf->datasink->get_bytes_written == nullptr) {
+    xb::warn() << "Cannot determine compressed backup size: "
+               << "leaf datasink does not support get_bytes_written";
+    return 0;
+  }
+  return leaf->datasink->get_bytes_written(leaf);
+}
 
 static long innobase_log_files_in_group_save;
 static char *srv_log_group_home_dir_save;
@@ -3360,6 +3381,23 @@ static void xtrabackup_init_datasinks(void) {
         ds_redo = ds_data = ds;
       }
     }
+  }
+
+  /* Statistics datasink at the head of each data pipeline to count
+     raw (uncompressed) bytes entering the pipeline. */
+  ds_stats_data = ds_create(xtrabackup_target_dir, DS_TYPE_STATISTICS);
+  xtrabackup_add_datasink(ds_stats_data);
+  ds_set_pipe(ds_stats_data, ds_data);
+  ds_data = ds_stats_data;
+
+  if (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
+    ds_stats_uncomp = ds_create(xtrabackup_target_dir, DS_TYPE_STATISTICS);
+    xtrabackup_add_datasink(ds_stats_uncomp);
+    ds_set_pipe(ds_stats_uncomp, ds_uncompressed_data);
+    ds_uncompressed_data = ds_stats_uncomp;
+  } else {
+    ds_uncompressed_data = ds_data;
+    ds_stats_uncomp = nullptr;
   }
 }
 
