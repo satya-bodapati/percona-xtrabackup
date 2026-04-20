@@ -821,7 +821,7 @@ bool TablespaceKeyDumper::initialize() {
   MY_STAT stat_info;
   memset(&stat_info, 0, sizeof(MY_STAT));
 
-  m_stream = ds_open(m_ds_ctxt, XTRABACKUP_KEYS_FILE, &stat_info);
+  m_stream = ds_tracked_open(m_ds_ctxt, XTRABACKUP_KEYS_FILE, &stat_info);
   if (!m_stream) {
     xb::error() << "Error writing " << XTRABACKUP_KEYS_FILE
                 << ": failed to create file.";

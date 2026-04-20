@@ -20,6 +20,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 #include "datasink.h"
 #include <my_base.h>
+#include <atomic>
+#include <cstdint>
 #include "common.h"
 #include "ds_buffer.h"
 #include "ds_compress.h"
@@ -36,6 +38,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "ds_tmpfile.h"
 #include "ds_xbstream.h"
 #include "msg.h"
+
+/** Global aggregate metrics for the backup pipelines.  Incremented by
+ds_write() / ds_write_sparse() whenever the file's metrics pointer is
+non-null.  ds_tracked_open() (xtrabackup.cc) calls
+ds_track_metrics() on each top-level backup ds_file_t when --compress
+is in effect. */
+xb_metrics xb_backup_metrics;
 
 /************************************************************************
 Create a datasink of the specified type */
@@ -95,6 +104,7 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
   ctxt = ds->init(root);
   if (ctxt != NULL) {
     ctxt->datasink = ds;
+    ctxt->pipe_ctxt = NULL;
   } else {
     msg("Error: failed to initialize datasink.\n");
     exit(EXIT_FAILURE);
@@ -104,22 +114,20 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
 }
 
 /************************************************************************
-Open a datasink file */
+Open a datasink file.  Pure dispatcher.  Each *_open() initializes the
+framework-owned fields on its freshly allocated ds_file_t via
+ds_init_file() (see datasink.h). */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
-  ds_file_t *file;
-
-  file = ctxt->datasink->open(ctxt, path, stat);
-  if (file != NULL) {
-    file->datasink = ctxt->datasink;
-  }
-
-  return file;
+  return ctxt->datasink->open(ctxt, path, stat);
 }
 
 /************************************************************************
 Write to a datasink file.
 @return 0 on success, 1 on error. */
 int ds_write(ds_file_t *file, const void *buf, size_t len) {
+  if (file->metrics != nullptr) {
+    file->metrics->add_uncomp_size(len);
+  }
   return file->datasink->write(file, buf, len);
 }
 
@@ -140,6 +148,14 @@ int ds_write_sparse(ds_file_t *file, const void *buf, size_t len,
                     size_t sparse_map_size, const ds_sparse_chunk_t *sparse_map,
                     bool punch_hole_supported) {
   if (file->datasink->write_sparse != nullptr) {
+    /* Count the packed payload only: holes do not occupy disk. */
+    if (file->metrics != nullptr) {
+      size_t packed_len = 0;
+      for (size_t i = 0; i < sparse_map_size; i++) {
+        packed_len += sparse_map[i].len;
+      }
+      file->metrics->add_uncomp_size(packed_len);
+    }
     return file->datasink->write_sparse(file, buf, len, sparse_map_size,
                                         sparse_map, punch_hole_supported);
   }
@@ -160,4 +176,26 @@ Set the destination pipe for a datasink (only makes sense for compress and
 tmpfile). */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt) {
   ctxt->pipe_ctxt = pipe_ctxt;
+}
+
+/** Walk a datasink pipeline to its terminal node by following pipe_ctxt.
+@return the leaf ctxt, or ctxt itself when it has no pipe_ctxt. */
+const ds_ctxt_t *ds_leaf(const ds_ctxt_t *ctxt) {
+  while (ctxt && ctxt->pipe_ctxt) ctxt = ctxt->pipe_ctxt;
+  return ctxt;
+}
+
+/** Human-readable name for a datasink vtable pointer. */
+const char *ds_type_to_str(const datasink_t *ds) {
+  if (ds == &datasink_local) return "local";
+  if (ds == &datasink_stdout) return "stdout";
+  if (ds == &datasink_fifo) return "fifo";
+  if (ds == &datasink_xbstream) return "xbstream";
+  if (ds == &datasink_compress) return "compress(quicklz)";
+  if (ds == &datasink_compress_lz4) return "compress(lz4)";
+  if (ds == &datasink_compress_zstd) return "compress(zstd)";
+  if (ds == &datasink_encrypt) return "encrypt";
+  if (ds == &datasink_tmpfile) return "tmpfile";
+  if (ds == &datasink_buffer) return "buffer";
+  return "unknown";
 }

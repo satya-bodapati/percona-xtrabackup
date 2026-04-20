@@ -55,6 +55,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <chrono>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -377,7 +378,7 @@ bool backup_file_print(const char *filename, const char *message, int len) {
   stat.st_mtime = time(nullptr);
   stat.st_size = len;
 
-  dstfile = ds_open(ds_data, filename, &stat);
+  dstfile = ds_tracked_open(ds_data, filename, &stat);
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << filename;
     goto error;
@@ -576,7 +577,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
 
   strncpy(dst_name, cursor.rel_path, sizeof(dst_name));
 
-  dstfile = ds_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo);
+  dstfile =
+      ds_tracked_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo);
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
     goto error;
@@ -1594,6 +1596,19 @@ bool backup_start(Backup_context &context) {
   return (true);
 }
 
+static std::string human_readable(unsigned long long bytes) {
+  char buf[64];
+  if (bytes >= 1ULL << 30)
+    snprintf(buf, sizeof(buf), "%.2f GiB", (double)bytes / (1ULL << 30));
+  else if (bytes >= 1ULL << 20)
+    snprintf(buf, sizeof(buf), "%.2f MiB", (double)bytes / (1ULL << 20));
+  else if (bytes >= 1ULL << 10)
+    snprintf(buf, sizeof(buf), "%.2f KiB", (double)bytes / (1ULL << 10));
+  else
+    snprintf(buf, sizeof(buf), "%llu bytes", bytes);
+  return buf;
+}
+
 /* Finsh the backup. Release all locks. Write down backup metadata.
 @return true if success. */
 bool backup_finish(Backup_context &context) {
@@ -1648,6 +1663,28 @@ bool backup_finish(Backup_context &context) {
 
   if (!write_xtrabackup_info(mysql_connection)) {
     return (false);
+  }
+
+  {
+    unsigned long long backup_size = get_compressed_backup_size();
+
+    xb::info() << "Backup size: " << human_readable(backup_size) << " ("
+               << backup_size << " bytes)";
+
+    if (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
+      unsigned long long uncompressed_backup_size =
+          get_uncompressed_backup_size();
+
+      if (backup_size > 0 && uncompressed_backup_size > 0) {
+        xb::info() << "Uncompressed size: "
+                   << human_readable(uncompressed_backup_size) << " ("
+                   << uncompressed_backup_size << " bytes)";
+
+        double ratio = (double)uncompressed_backup_size / (double)backup_size;
+        xb::info() << "Compression ratio: " << std::fixed
+                   << std::setprecision(2) << ratio << "x";
+      }
+    }
   }
 
   return (true);

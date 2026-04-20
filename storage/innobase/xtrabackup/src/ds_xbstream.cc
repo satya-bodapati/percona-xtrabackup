@@ -60,9 +60,11 @@ static int xbstream_write_sparse(ds_file_t *file, const void *buf, size_t len,
 static int xbstream_close(ds_file_t *file);
 static void xbstream_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_xbstream = {&xbstream_init,  &xbstream_open,
-                                &xbstream_write, &xbstream_write_sparse,
-                                &xbstream_close, &xbstream_deinit};
+datasink_t
+    datasink_xbstream = {&xbstream_init,  &xbstream_open,
+                         &xbstream_write, &xbstream_write_sparse,
+                         &xbstream_close, &xbstream_deinit,
+                         nullptr /* get_bytes_written not implemented */};
 
 static ssize_t my_xbstream_write_callback(xb_wstream_file_t *f
                                           __attribute__((unused)),
@@ -163,6 +165,7 @@ static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
   file->ptr = stream_file;
   file->path = stream_ctxt->dest_file->path;
 
+  ds_init_file(file, ctxt);
   return file;
 
 err:

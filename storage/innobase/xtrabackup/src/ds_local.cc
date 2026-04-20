@@ -30,14 +30,23 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <linux/falloc.h>
 #endif
 
+#include <atomic>
+
 #include "common.h"
 #include "datasink.h"
 #include "file_utils.h"
+#include "msg.h"
 
 #define PUNCH_HOLE_PLACEHOLDER_FILE "xtrabackup_punch_hole"
+
+typedef struct {
+  std::atomic<unsigned long long> bytes_written{0};
+} ds_local_ctxt_t;
+
 typedef struct {
   File fd;
   size_t last_seek;  // to track last page sparse_file
+  ds_local_ctxt_t *local_ctxt;
 } ds_local_file_t;
 
 static ds_ctxt_t *local_init(const char *root);
@@ -50,9 +59,15 @@ static int local_write_sparse(ds_file_t *file, const void *buf, size_t len,
                               bool punch_hole_supported);
 static int local_close(ds_file_t *file);
 static void local_deinit(ds_ctxt_t *ctxt);
+static unsigned long long local_get_bytes_written(const ds_ctxt_t *ctxt);
 
-datasink_t datasink_local = {&local_init,         &local_open,  &local_write,
-                             &local_write_sparse, &local_close, &local_deinit};
+datasink_t datasink_local = {&local_init,
+                             &local_open,
+                             &local_write,
+                             &local_write_sparse,
+                             &local_close,
+                             &local_deinit,
+                             &local_get_bytes_written};
 
 /**
   Checks if punch hole via fallocate is supported
@@ -97,6 +112,8 @@ static ds_ctxt_t *local_init(const char *root) {
   ctxt = static_cast<ds_ctxt_t *>(
       my_malloc(PSI_NOT_INSTRUMENTED, sizeof(ds_ctxt_t), MYF(MY_FAE)));
 
+  ds_local_ctxt_t *local_ctxt = new ds_local_ctxt_t{};
+  ctxt->ptr = local_ctxt;
   ctxt->root = my_strdup(PSI_NOT_INSTRUMENTED, root, MYF(MY_FAE));
 
   is_fallocate_punch_hole_supported(ctxt);
@@ -139,12 +156,14 @@ static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
 
   local_file->fd = fd;
   local_file->last_seek = 0;
+  local_file->local_ctxt = (ds_local_ctxt_t *)ctxt->ptr;
 
   file->path = (char *)local_file + sizeof(ds_local_file_t);
   memcpy(file->path, fullpath, path_len);
 
   file->ptr = local_file;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 
@@ -155,6 +174,8 @@ static int local_write(ds_file_t *file, const void *buf, size_t len) {
 
   if (!my_write(fd, static_cast<const uchar *>(buf), len,
                 MYF(MY_WME | MY_NABP))) {
+    local_file->local_ctxt->bytes_written.fetch_add(len,
+                                                    std::memory_order_relaxed);
     posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
     return 0;
   }
@@ -201,6 +222,9 @@ static int local_write_sparse(ds_file_t *file, const void *buf, size_t len,
   } else
     local_file->last_seek = 0;
 
+  local_file->local_ctxt->bytes_written.fetch_add(len,
+                                                  std::memory_order_relaxed);
+
   return 0;
 }
 
@@ -221,6 +245,11 @@ static int local_close(ds_file_t *file) {
     if (rc != 0) {
       return 1;
     }
+    /* This 1 byte was written outside local_write/local_write_sparse, so
+    leaf->bytes_written would not see it.  Account for it now so the leaf
+    total stays byte-perfect vs the size on disk. */
+    local_file->local_ctxt->bytes_written.fetch_add(1,
+                                                    std::memory_order_relaxed);
   }
 
   my_free(file);
@@ -231,6 +260,14 @@ static int local_close(ds_file_t *file) {
 }
 
 static void local_deinit(ds_ctxt_t *ctxt) {
+  auto *local_ctxt = (ds_local_ctxt_t *)ctxt->ptr;
+  local_ctxt->bytes_written.store(0, std::memory_order_relaxed);
+  delete local_ctxt;
   my_free(ctxt->root);
   my_free(ctxt);
+}
+
+static unsigned long long local_get_bytes_written(const ds_ctxt_t *ctxt) {
+  return static_cast<const ds_local_ctxt_t *>(ctxt->ptr)->bytes_written.load(
+      std::memory_order_relaxed);
 }
