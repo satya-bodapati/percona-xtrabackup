@@ -97,6 +97,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "common.h"
 #include "datasink.h"
+#include "datasink_head.h"
 #include "xtrabackup_version.h"
 
 #include "backup_copy.h"
@@ -394,6 +395,42 @@ ds_ctxt_t *ds_meta = nullptr;
 ds_ctxt_t *ds_redo = nullptr;
 ds_ctxt_t *ds_uncompressed_data = nullptr;
 
+extern datasink_t datasink_local;
+extern datasink_t datasink_stdout;
+extern datasink_t datasink_fifo;
+
+/** Return the total raw (uncompressed) bytes that entered the backup
+pipelines, as accumulated by ds_write() / ds_write_sparse() when the
+head ctxts have been bound to xb_backup_metrics.  Only meaningful
+when --compress is used.
+@return total uncompressed byte count */
+unsigned long long get_uncompressed_backup_size() {
+  return xb_backup_metrics.get_bytes();
+}
+
+/** Return the total bytes written by the leaf (terminal) datasink of the
+main data pipeline.  Walks ds_data to its leaf (ds_local, ds_stdout, or
+ds_fifo) and reads its atomic byte counter.  This is the final on-disk size
+of the backup -- it equals the compressed size when --compress is used, and
+the uncompressed size otherwise.
+@return total byte count at the leaf, or 0 if unavailable */
+unsigned long long get_compressed_backup_size() {
+  const ds_ctxt_t *leaf = ds_leaf(ds_data);
+  if (leaf == nullptr || leaf->datasink->get_bytes_written == nullptr) {
+    xb::warn() << "Cannot determine backup size: "
+               << "leaf datasink does not support get_bytes_written";
+    return 0;
+  }
+
+  ut_ad((xtrabackup_stream && xtrabackup_fifo_streams > 1 &&
+         leaf->datasink == &datasink_fifo) ||
+        (xtrabackup_stream && xtrabackup_fifo_streams <= 1 &&
+         leaf->datasink == &datasink_stdout) ||
+        (!xtrabackup_stream && leaf->datasink == &datasink_local));
+
+  return leaf->datasink->get_bytes_written(leaf);
+}
+
 static long innobase_log_files_in_group_save;
 static char *srv_log_group_home_dir_save;
 static longlong innobase_log_file_size_save;
@@ -534,7 +571,9 @@ static std::vector<dict_table_t *> mysql_ibd_tables;
 
 /* Simple datasink creation tracking...add datasinks in the reverse order you
 want them destroyed. */
-#define XTRABACKUP_MAX_DATASINKS 10
+/* 10 underlying ctxts (compress + buffer + encrypt + leaf for two
+pipelines plus tmpfile) plus 4 head ctxts on top, with a small margin. */
+#define XTRABACKUP_MAX_DATASINKS 16
 static ds_ctxt_t *datasinks[XTRABACKUP_MAX_DATASINKS];
 static uint actual_datasinks = 0;
 static inline void xtrabackup_add_datasink(ds_ctxt_t *ds) {
@@ -3593,6 +3632,93 @@ static void xtrabackup_init_datasinks(void) {
       }
     }
   }
+
+  if (xtrabackup_compress == XTRABACKUP_COMPRESS_NONE) {
+    ds_uncompressed_data = ds_data;
+  }
+
+  /* === Insert head ctxts at the top of every backup pipeline ===
+
+  Up to this point ds_data / ds_redo / ds_meta / ds_uncompressed_data
+  point at whatever ctxt happened to be at the top of each chain
+  (compress_lz4_ctxt, encrypt_ctxt, ds_local, ds_xbstream, tmpfile, ...
+  any of which may be aliased to one another -- e.g. on a no-compress
+  no-encrypt local backup the four pointers all point at the SAME
+  ds_local ctxt; on --compress=lz4 ds_uncompressed_data points at the
+  pre-compress level which is the inner buffer/local of ds_data's
+  chain).  That aliasing made it impossible to attach per-head state
+  (metrics, soon a per-pipeline manifest) without polluting the shared
+  underlying ctxt and creating double-counting.
+
+  Wrap each role in a head ctxt: a thin pass-through whose only job is
+  to (a) own per-head state (today: ctxt->metrics; future: per-head
+  manifest, role-tagged logging, per-pipeline file ctx), (b) be the
+  one place callers see, and (c) dispatch ds_open() to the real
+  pipeline via head_open() which returns the inner stage's file
+  unchanged.  Per-byte writes never touch the head -- see
+  datasink_head.h.
+
+  fs_support_punch_hole is a leaf property (only ds_local sets it).
+  Surface it on the head so backup_copy.cc -- which reads
+  ds_data->fs_support_punch_hole AFTER init_datasinks -- still sees
+  the leaf's value through the new head wrapping. */
+  ds_ctxt_t *real_data = ds_data;
+  ds_ctxt_t *real_redo = ds_redo;
+  ds_ctxt_t *real_meta = ds_meta;
+  ds_ctxt_t *real_uncompressed = ds_uncompressed_data;
+
+  ds_ctxt_t *head_data = ds_create_head(xtrabackup_target_dir, DS_HEAD_DATA);
+  ds_set_pipe(head_data, real_data);
+  head_data->fs_support_punch_hole = ds_leaf(real_data)->fs_support_punch_hole;
+  xtrabackup_add_datasink(head_data);
+
+  ds_ctxt_t *head_redo = ds_create_head(xtrabackup_target_dir, DS_HEAD_REDO);
+  ds_set_pipe(head_redo, real_redo);
+  head_redo->fs_support_punch_hole = ds_leaf(real_redo)->fs_support_punch_hole;
+  xtrabackup_add_datasink(head_redo);
+
+  ds_ctxt_t *head_meta = ds_create_head(xtrabackup_target_dir, DS_HEAD_META);
+  ds_set_pipe(head_meta, real_meta);
+  head_meta->fs_support_punch_hole = ds_leaf(real_meta)->fs_support_punch_hole;
+  xtrabackup_add_datasink(head_meta);
+
+  ds_ctxt_t *head_uncompressed =
+      ds_create_head(xtrabackup_target_dir, DS_HEAD_UNCOMPRESSED_DATA);
+  ds_set_pipe(head_uncompressed, real_uncompressed);
+  head_uncompressed->fs_support_punch_hole =
+      ds_leaf(real_uncompressed)->fs_support_punch_hole;
+  xtrabackup_add_datasink(head_uncompressed);
+
+  ds_data = head_data;
+  ds_redo = head_redo;
+  ds_meta = head_meta;
+  ds_uncompressed_data = head_uncompressed;
+
+  /* Raw (uncompressed) byte accounting.  ds_write / ds_write_sparse
+  fire metrics->add_bytes() whenever the file's metrics pointer is
+  non-null.  head_open() copies head_ctxt->metrics onto the returned
+  file, so binding metrics on the head is what arms the counter for
+  every file opened through that head.
+
+  Heads are unique by construction (4 distinct ctxts), so the legacy
+  "ds_X != ds_Y" dedup checks are no longer needed -- each head can
+  be bound independently with no risk of double-binding the same
+  underlying ctxt.
+
+  Today all four heads share xb_backup_metrics, so
+  get_uncompressed_backup_size() reports the aggregate across data,
+  uncompressed_data (bypass path), redo, and delta metadata --
+  identical to pre-refactor semantics.  Per-pipeline breakdowns can
+  be added later by pointing a single head at its own ds_metrics
+  instance (e.g. head_redo->metrics = &xb_redo_metrics).  Counters
+  (file counts, pages, elapsed time, ...) are added as new fields on
+  ds_metrics; ds_ctxt_t is never touched. */
+  if (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
+    ds_data->metrics = &xb_backup_metrics;
+    ds_redo->metrics = &xb_backup_metrics;
+    ds_meta->metrics = &xb_backup_metrics;
+    ds_uncompressed_data->metrics = &xb_backup_metrics;
+  }
 }
 
 /************************************************************************
@@ -4579,10 +4705,6 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
 
-  if (!backup_finish(backup_ctxt)) {
-    exit(EXIT_FAILURE);
-  }
-
   if (xtrabackup_extra_lsndir) {
     char filename[FN_REFLEN];
 
@@ -4592,18 +4714,16 @@ void xtrabackup_backup_func(void) {
       xb::error() << "failed to write metadata to " << filename;
       exit(EXIT_FAILURE);
     }
-
-    sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
-    if (!xtrabackup_write_info(filename)) {
-      xb::error() << "failed to write info to " << filename;
-      exit(EXIT_FAILURE);
-    }
   }
 
   if (opt_lock_ddl_per_table) {
     mdl_unlock_all();
   }
 
+  /* Flush every backup output that goes through ds_data before sampling
+  backup_size in backup_finish().  xtrabackup_info is the only file that
+  must be written AFTER the sample (chicken-and-egg: the sampled value is
+  embedded in its content), so backup_finish() stays last. */
   Tablespace_map::instance().serialize(ds_data);
 
   if (ts_key_dumper.is_initialized()) {
@@ -4623,6 +4743,20 @@ void xtrabackup_backup_func(void) {
   }
 
   ts_key_dumper.finalize();
+
+  if (!backup_finish(backup_ctxt)) {
+    exit(EXIT_FAILURE);
+  }
+
+  if (xtrabackup_extra_lsndir) {
+    char filename[FN_REFLEN];
+
+    sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
+    if (!xtrabackup_write_info(filename)) {
+      xb::error() << "failed to write info to " << filename;
+      exit(EXIT_FAILURE);
+    }
+  }
 
   xtrabackup_destroy_datasinks();
 

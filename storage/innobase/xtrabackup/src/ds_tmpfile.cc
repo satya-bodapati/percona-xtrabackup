@@ -53,7 +53,8 @@ static int tmpfile_close(ds_file_t *file);
 static void tmpfile_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_tmpfile = {&tmpfile_init, &tmpfile_open,  &tmpfile_write,
-                               nullptr,       &tmpfile_close, &tmpfile_deinit};
+                               nullptr,       &tmpfile_close, &tmpfile_deinit,
+                               nullptr /* get_bytes_written not implemented */};
 
 extern MY_TMPDIR mysql_tmpdir_list;
 
@@ -131,6 +132,7 @@ static ds_file_t *tmpfile_open(ds_ctxt_t *ctxt, const char *path,
   tmpfile_ctxt->file_list = list_add(tmpfile_ctxt->file_list, &tmp_file->list);
   tmpfile_ctxt->mutex.unlock();
 
+  ds_init_file(file, ctxt);
   return file;
 }
 
