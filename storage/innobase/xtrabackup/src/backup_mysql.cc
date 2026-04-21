@@ -1848,7 +1848,7 @@ char *get_xtrabackup_info(MYSQL *connection) {
   format_time(history_start_time, buf_start_time, time_buf_size);
   format_time(history_end_time, buf_end_time, time_buf_size);
 
-  unsigned long long backup_size = get_compressed_backup_size();
+  unsigned long long backup_size = get_final_backup_size();
 
   ut_a(uuid);
   ut_a(server_version);

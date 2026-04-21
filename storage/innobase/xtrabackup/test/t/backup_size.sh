@@ -38,90 +38,11 @@ require_zstd
 require_lz4
 
 ############################################################################
-# Helpers
+# Helpers (get_field, file_size, sum_file_bytes, find_info_file,
+# assert_positive, assert_no_field, assert_eq, assert_target_strict,
+# assert_stream_strict, assert_decompressed_strict) are sourced from
+# inc/common.sh above.
 ############################################################################
-get_field()      { grep "^$2 = " "$1" | awk '{print $3}'; }
-file_size()      { stat -c '%s' "$1"; }
-sum_file_bytes() { find "$1" -type f -printf '%s\n' | awk '{s+=$1} END{print s+0}'; }
-
-# Locate xtrabackup_info[.lz4|.zst|.qp|.xbcrypt|.lz4.xbcrypt|...]
-find_info_file() {
-  local dir=$1 ext f
-  for ext in "" .lz4 .zst .qp .xbcrypt .lz4.xbcrypt .zst.xbcrypt .qp.xbcrypt ; do
-    f="$dir/xtrabackup_info$ext"
-    if [ -f "$f" ]; then echo "$f"; return 0; fi
-  done
-  die "no xtrabackup_info* found under $dir"
-}
-
-assert_positive() {
-  local val=$1 label=$2
-  if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -le 0 ]; then
-    die "$label: expected positive integer, got '$val'"
-  fi
-}
-
-assert_no_field() {
-  local file=$1 field=$2
-  if grep -q "^$field = " "$file" ; then
-    die "$field should not be present in $file"
-  fi
-}
-
-assert_eq() {
-  local actual=$1 expected=$2 label=$3
-  if [ -z "$actual" ];   then die "$label: actual is empty";   fi
-  if [ -z "$expected" ]; then die "$label: expected is empty"; fi
-  if [ "$actual" -ne "$expected" ]; then
-    die "$label: actual=$actual expected=$expected diff=$((actual - expected))"
-  fi
-  vlog "$label: $actual (EXACT)"
-}
-
-# Strict invariant A for target-dir backups.  bs is read from --extra-
-# lsndir's xtrabackup_info, which is sampled AFTER the target's
-# xtrabackup_info has already been streamed into the leaf, so bs already
-# accounts for every byte on disk.
-assert_target_strict() {
-  local dir=$1 bs=$2 label=$3
-  local total=$(sum_file_bytes "$dir")
-  assert_eq "$bs" "$total" \
-    "$label A: backup_size($bs) == sum_file_bytes($dir)"
-}
-
-# Strict invariant A' for stream backups.  The .xbs is the entirety of the
-# stdout the leaf wrote, including xbstream chunk wrapping for every file
-# (xtrabackup_info included).  bs from extra-lsndir is the post-write
-# sample, so bs == .xbs file size.
-assert_stream_strict() {
-  local xbs=$1 bs=$2 label=$3
-  local xbs_size=$(file_size "$xbs")
-  assert_eq "$bs" "$xbs_size" \
-    "$label A': backup_size($bs) == size of $(basename $xbs) ($xbs_size)"
-}
-
-# Strict invariant B (only with --compress).  Decrypt (if needed) and
-# --decompress in place, drop the original .xbcrypt/.lz4/.zst leftovers,
-# then check uncompressed_backup_size.  uncompressed_backup_size is sampled from the
-# extra-lsndir copy AFTER xtrabackup_info has flowed through the metric-
-# bound head ds_data, so it already includes the plaintext info bytes.
-assert_decompressed_strict() {
-  local dir=$1 us=$2 label=$3 enc_key=$4
-  if [ -n "$enc_key" ]; then
-    xtrabackup --decrypt=AES256 --encrypt-key="$enc_key" --target-dir="$dir" \
-        2>/dev/null || die "$label: --decrypt failed"
-    find "$dir" -name '*.xbcrypt' -delete
-  fi
-  xtrabackup --decompress --target-dir="$dir" 2>/dev/null \
-      || die "$label: --decompress failed"
-  find "$dir" -name '*.lz4' -delete
-  find "$dir" -name '*.zst' -delete
-  find "$dir" -name '*.qp'  -delete
-
-  local total=$(sum_file_bytes "$dir")
-  assert_eq "$us" "$total" \
-    "$label B: uncompressed_backup_size($us) == sum_file_bytes(decompressed $dir)"
-}
 
 start_server --innodb_file_per_table
 

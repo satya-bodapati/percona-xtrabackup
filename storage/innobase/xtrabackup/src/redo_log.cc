@@ -478,7 +478,8 @@ bool Redo_Log_Writer::create_logfile(const char *name) {
   MY_STAT stat_info;
 
   memset(&stat_info, 0, sizeof(MY_STAT));
-  log_file = ds_tracked_open(ds_redo, XB_LOG_FILENAME, &stat_info);
+  log_file = ds_tracked_open(ds_redo, XB_LOG_FILENAME, &stat_info,
+                             xb_active_metrics());
 
   if (log_file == NULL) {
     xb::error() << "failed to open the target stream for "

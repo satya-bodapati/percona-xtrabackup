@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "datasink.h"
 #include <my_base.h>
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include "common.h"
 #include "ds_buffer.h"
@@ -41,9 +42,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 /** Global aggregate metrics for the backup pipelines.  Incremented by
 ds_write() / ds_write_sparse() whenever the file's metrics pointer is
-non-null.  ds_tracked_open() (xtrabackup.cc) calls
-ds_track_metrics() on each top-level backup ds_file_t when --compress
-is in effect. */
+non-null.  Armed at top-level backup open sites via ds_tracked_open()
+with xb_active_metrics() (xtrabackup.h), which returns &xb_backup_metrics
+when --compress is active and nullptr otherwise. */
 xb_metrics xb_backup_metrics;
 
 /************************************************************************
@@ -116,9 +117,24 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
 /************************************************************************
 Open a datasink file.  Pure dispatcher.  Each *_open() initializes the
 framework-owned fields on its freshly allocated ds_file_t via
-ds_init_file() (see datasink.h). */
+ds_init_file() (see datasink.h).  The debug assertion catches any
+*_open implementation that forgets to call ds_init_file(): ds_write /
+ds_close would later chase a NULL datasink/ctxt and crash with no
+clue about the root cause. */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
-  return ctxt->datasink->open(ctxt, path, stat);
+  ds_file_t *file = ctxt->datasink->open(ctxt, path, stat);
+  assert(file == nullptr ||
+         (file->datasink != nullptr && file->ctxt != nullptr));
+  return file;
+}
+
+/** ds_open() + conditional ds_track_metrics(), in one call.  See the
+declaration in datasink.h for when to prefer this over a raw ds_open(). */
+ds_file_t *ds_tracked_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                           xb_metrics *metrics) {
+  ds_file_t *file = ds_open(ctxt, path, stat);
+  ds_track_metrics(file, metrics);
+  return file;
 }
 
 /************************************************************************
@@ -183,19 +199,4 @@ void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt) {
 const ds_ctxt_t *ds_leaf(const ds_ctxt_t *ctxt) {
   while (ctxt && ctxt->pipe_ctxt) ctxt = ctxt->pipe_ctxt;
   return ctxt;
-}
-
-/** Human-readable name for a datasink vtable pointer. */
-const char *ds_type_to_str(const datasink_t *ds) {
-  if (ds == &datasink_local) return "local";
-  if (ds == &datasink_stdout) return "stdout";
-  if (ds == &datasink_fifo) return "fifo";
-  if (ds == &datasink_xbstream) return "xbstream";
-  if (ds == &datasink_compress) return "compress(quicklz)";
-  if (ds == &datasink_compress_lz4) return "compress(lz4)";
-  if (ds == &datasink_compress_zstd) return "compress(zstd)";
-  if (ds == &datasink_encrypt) return "encrypt";
-  if (ds == &datasink_tmpfile) return "tmpfile";
-  if (ds == &datasink_buffer) return "buffer";
-  return "unknown";
 }

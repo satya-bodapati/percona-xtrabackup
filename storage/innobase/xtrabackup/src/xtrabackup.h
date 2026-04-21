@@ -81,7 +81,7 @@ extern ds_ctxt_t *ds_data;
 extern ds_ctxt_t *ds_uncompressed_data;
 
 unsigned long long get_uncompressed_backup_size();
-unsigned long long get_compressed_backup_size();
+unsigned long long get_final_backup_size();
 
 extern pagetracking::xb_space_map *changed_page_tracking;
 
@@ -106,6 +106,16 @@ extern char *xtrabackup_databases_exclude;
 
 extern xtrabackup_compress_t xtrabackup_compress;
 extern bool xtrabackup_encrypt;
+
+/** Metrics pointer to pass to ds_tracked_open() for top-level backup
+files on the xtrabackup side.  Returns &xb_backup_metrics when
+--compress is active (so pre-compression bytes are accumulated into
+uncompressed_backup_size) and nullptr otherwise (tracking disabled;
+backup_size already equals the uncompressed size in that case). */
+inline xb_metrics *xb_active_metrics() {
+  return xtrabackup_compress != XTRABACKUP_COMPRESS_NONE ? &xb_backup_metrics
+                                                         : nullptr;
+}
 
 extern bool xtrabackup_backup;
 extern bool xtrabackup_prepare;

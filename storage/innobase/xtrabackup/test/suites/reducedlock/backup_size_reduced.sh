@@ -12,23 +12,26 @@
 
 require_debug_pxb_version
 
+# get_field <info_file> <field>
+#   Read one "<field> = <value>" line out of an xtrabackup_info file and
+#   echo the value (third whitespace-separated token).
+#   $1 info_file - path to xtrabackup_info
+#   $2 field     - name of the field to look up
 get_field() {
   local info_file=$1 field=$2
   grep "^$field = " "$info_file" | awk '{print $3}'
 }
 
-assert_positive() {
-  local val=$1 label=$2
-  if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -le 0 ]; then
-    die "$label: expected positive integer, got '$val'"
-  fi
-}
-
-# Strict byte-perfect check: backup_size recorded in xtrabackup_info must
-# equal the actual sum of file sizes under the target directory (no
-# tolerance).  Uses the --extra-lsndir copy of xtrabackup_info because it
-# is written AFTER the target's xtrabackup_info has flowed through to the
-# leaf, so the sampled value already accounts for every byte on disk.
+# assert_target_strict <dir> <bs> <label>
+#   Strict byte-perfect check: backup_size recorded in xtrabackup_info
+#   must equal the actual sum of file sizes under <dir> (no tolerance).
+#   Uses the --extra-lsndir copy of xtrabackup_info because it is written
+#   AFTER the target's xtrabackup_info has flowed through to the leaf,
+#   so bs already accounts for every byte on disk (including
+#   xtrabackup_info itself).
+#   $1 dir   - target-dir of the backup being validated
+#   $2 bs    - backup_size value read from extra-lsndir/xtrabackup_info
+#   $3 label - human-readable prefix for die/vlog messages
 assert_target_strict() {
   local dir=$1 bs=$2 label=$3
   local total
@@ -76,7 +79,6 @@ kill -SIGCONT $xb_pid
 run_cmd wait $job_pid
 
 bs=$(get_field "$topdir/lsndir_reduced/xtrabackup_info" backup_size)
-assert_positive "$bs" "reduced-lock backup_size"
 
 if grep -q "^uncompressed_backup_size = " "$topdir/lsndir_reduced/xtrabackup_info" ; then
   die "uncompressed_backup_size should not be present without --compress"

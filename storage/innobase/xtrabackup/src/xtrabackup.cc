@@ -404,25 +404,10 @@ unsigned long long get_uncompressed_backup_size() {
   return xb_backup_metrics.get_uncomp_size();
 }
 
-/** ds_open() for backup-side top-level streams.  When --compress is in
-effect, enables per-file byte tracking into xb_backup_metrics so
-ds_write() / ds_write_sparse() accumulate raw (pre-compression) bytes
-into uncompressed_backup_size.  Use at every top-level backup open on
-ds_data / ds_redo / ds_meta / ds_uncompressed_data; pipeline-internal
-wrappers keep calling ds_open() directly, so each logical byte is
-counted exactly once at the top of the chain. */
-ds_file_t *ds_tracked_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
-  ds_file_t *file = ds_open(ctxt, path, stat);
-  if (file != nullptr && xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
-    ds_track_metrics(file, &xb_backup_metrics);
-  }
-  return file;
-}
-
 /** Total bytes written by the leaf datasink of the main data pipeline.
 This is the final on-disk size of the backup: post-compression when
 --compress is used, identical to the uncompressed size otherwise. */
-unsigned long long get_compressed_backup_size() {
+unsigned long long get_final_backup_size() {
   const ds_ctxt_t *leaf = ds_leaf(ds_data);
   if (leaf == nullptr || leaf->datasink->get_bytes_written == nullptr) {
     xb::warn() << "Cannot determine backup size: "
@@ -2799,7 +2784,8 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  stream = ds_tracked_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat);
+  stream = ds_tracked_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat,
+                           xb_active_metrics());
   if (stream == NULL) {
     xb::error() << "cannot open output stream for "
                 << XTRABACKUP_METADATA_FILENAME;
@@ -2916,7 +2902,7 @@ bool xb_write_delta_metadata(const char *filename,
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  f = ds_tracked_open(ds_meta, filename, &mystat);
+  f = ds_tracked_open(ds_meta, filename, &mystat, xb_active_metrics());
   if (f == NULL) {
     xb::error() << "cannot open output stream for " << filename;
     return (false);
@@ -3286,9 +3272,11 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
 
   /* do not compress encrypted tablespaces */
   if (cursor.is_encrypted) {
-    dstfile = ds_tracked_open(ds_uncompressed_data, dst_name, &cursor.statinfo);
+    dstfile = ds_tracked_open(ds_uncompressed_data, dst_name, &cursor.statinfo,
+                              xb_active_metrics());
   } else {
-    dstfile = ds_tracked_open(ds_data, dst_name, &cursor.statinfo);
+    dstfile = ds_tracked_open(ds_data, dst_name, &cursor.statinfo,
+                              xb_active_metrics());
   }
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;

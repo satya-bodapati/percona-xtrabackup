@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #ifndef XB_DATASINK_H
 #define XB_DATASINK_H
 
+#include <my_compiler.h>
 #include <my_dir.h>
 #include <atomic>
 #include <cstdint>
@@ -41,10 +42,10 @@ pick their own primitive without changing the write path.  Not a
 datasink -- lives alongside ds_file_t and is referenced by an
 optional pointer on each file. */
 struct xb_metrics {
-  void add_uncomp_size(uint64_t n) {
+  ALWAYS_INLINE void add_uncomp_size(uint64_t n) {
     uncomp_size_.fetch_add(n, std::memory_order_relaxed);
   }
-  uint64_t get_uncomp_size() const {
+  ALWAYS_INLINE uint64_t get_uncomp_size() const {
     return uncomp_size_.load(std::memory_order_relaxed);
   }
 
@@ -122,7 +123,10 @@ ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
 /** Initialize framework-owned fields on a freshly allocated ds_file_t.
 Every *_open() implementation must call this once before returning the
 file.  Most *_open implementations my_malloc() the ds_file_t (no
-MY_ZEROFILL), so the struct's default member initializers do not run. */
+MY_ZEROFILL), so the struct's default member initializers do not run
+-- skipping this call would leave datasink/ctxt/metrics as garbage.
+ds_open() has a debug assertion (datasink.cc) that catches *_open
+implementations that forget to call this. */
 static inline void ds_init_file(ds_file_t *file, ds_ctxt_t *ctxt) {
   file->datasink = ctxt->datasink;
   file->ctxt = ctxt;
@@ -170,21 +174,19 @@ Set the destination pipe for a datasink (only makes sense for compress and
 tmpfile). */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt);
 
-const char *ds_type_to_str(const datasink_t *ds);
-
 const ds_ctxt_t *ds_leaf(const ds_ctxt_t *ctxt);
 
-/** Open a top-level backup output file.  Same as ds_open() but, when
---compress is in effect, also calls ds_track_metrics(file,
-&xb_backup_metrics) so writes to this file accumulate pre-compression
-bytes into the global counter.  Use at backup-side top-level ds_open
-sites on ds_data / ds_redo / ds_meta / ds_uncompressed_data;
-pipeline-internal opens inside wrappers keep calling ds_open()
-directly so each logical byte is counted exactly once.
-
-Defined only in the xtrabackup binary (refers to xtrabackup_compress);
-standalone tools (xbstream, xbcrypt) must not call this. */
-ds_file_t *ds_tracked_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
+/** Open a top-level backup output file and, if metrics is non-null,
+start accumulating the raw byte count of every ds_write() /
+ds_write_sparse() on this file into *metrics.  Equivalent to ds_open()
+followed by ds_track_metrics(file, metrics).  Use at backup-side
+top-level ds_open sites on ds_data / ds_redo / ds_meta /
+ds_uncompressed_data; pipeline-internal opens inside wrappers keep
+calling ds_open() directly so each logical byte is counted exactly
+once.  Callers pass nullptr for metrics when tracking is not wanted
+(e.g., non-compress backups where backup_size == uncompressed). */
+ds_file_t *ds_tracked_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                           xb_metrics *metrics);
 
 #ifdef __cplusplus
 } /* extern "C" */
