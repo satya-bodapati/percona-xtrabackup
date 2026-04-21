@@ -94,8 +94,10 @@ static int encrypt_write(ds_file_t *file, const void *buf, size_t len);
 static int encrypt_close(ds_file_t *file);
 static void encrypt_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_encrypt = {&encrypt_init, &encrypt_open,  &encrypt_write,
-                               nullptr,       &encrypt_close, &encrypt_deinit};
+datasink_t datasink_encrypt = {&encrypt_init,  &encrypt_open,
+                               &encrypt_write, nullptr, /* write_sparse */
+                               &encrypt_close, &encrypt_deinit,
+                               nullptr /* get_bytes_written not implemented */};
 
 static uint encrypt_iv_len = 0;
 

@@ -3610,6 +3610,24 @@ static void xtrabackup_destroy_datasinks(void) {
   ds_redo = NULL;
 }
 
+/** Walk ds_data's pipeline to the leaf and return its aggregate
+bytes_written counter.  Used by the xtrabackup_info writer and the
+backup-complete log line to report the final on-disk size byte-
+perfect.
+@return total bytes written to the destination, or 0 if the leaf has
+        not been created yet or does not implement get_bytes_written. */
+unsigned long long get_final_backup_size() {
+  if (ds_data == nullptr) return 0;
+  const ds_ctxt_t *leaf = ds_leaf(ds_data);
+  if (leaf == nullptr || leaf->datasink == nullptr ||
+      leaf->datasink->get_bytes_written == nullptr) {
+    xb::warn() << "get_final_backup_size(): leaf datasink has no "
+                  "get_bytes_written implementation; reporting 0";
+    return 0;
+  }
+  return leaf->datasink->get_bytes_written(leaf);
+}
+
 #define SRV_N_PENDING_IOS_PER_THREAD OS_AIO_N_PENDING_IOS_PER_THREAD
 #define SRV_MAX_N_PENDING_SYNC_IOS 100
 
@@ -4579,6 +4597,31 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
 
+  /* Emit the tablespace map and transition-key dumps BEFORE
+  backup_finish() writes xtrabackup_info.  backup_finish() calls
+  get_final_backup_size() to embed backup_size in xtrabackup_info;
+  running these serializers first guarantees the leaf's byte counter
+  has already seen every other byte that flows through ds_data. */
+  Tablespace_map::instance().serialize(ds_data);
+
+  if (ts_key_dumper.is_initialized()) {
+    if (!ts_key_dumper.dump_from_spaces(false)) {
+      xb::error() << "Couldn't dump transition key for all tablespaces.";
+    }
+
+    if (!ts_key_dumper.dump_from_redo()) {
+      xb::error() << "Couldn't dump transition key for all tablespaces found"
+                  << " from redo log";
+    }
+
+    if (!ts_key_dumper.dump_from_encryption_infos()) {
+      xb::error() << "Couldn't dump transition key for all tablespaces found"
+                  << " from encryption_info vector ";
+    }
+  }
+
+  ts_key_dumper.finalize();
+
   if (!backup_finish(backup_ctxt)) {
     exit(EXIT_FAILURE);
   }
@@ -4603,26 +4646,6 @@ void xtrabackup_backup_func(void) {
   if (opt_lock_ddl_per_table) {
     mdl_unlock_all();
   }
-
-  Tablespace_map::instance().serialize(ds_data);
-
-  if (ts_key_dumper.is_initialized()) {
-    if (!ts_key_dumper.dump_from_spaces(false)) {
-      xb::error() << "Couldn't dump transition key for all tablespaces.";
-    }
-
-    if (!ts_key_dumper.dump_from_redo()) {
-      xb::error() << "Couldn't dump transition key for all tablespaces found"
-                  << " from redo log";
-    }
-
-    if (!ts_key_dumper.dump_from_encryption_infos()) {
-      xb::error() << "Couldn't dump transition key for all tablespaces found"
-                  << " from encryption_info vector ";
-    }
-  }
-
-  ts_key_dumper.finalize();
 
   xtrabackup_destroy_datasinks();
 

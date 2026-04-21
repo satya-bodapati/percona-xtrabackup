@@ -52,8 +52,10 @@ static int tmpfile_write(ds_file_t *file, const void *buf, size_t len);
 static int tmpfile_close(ds_file_t *file);
 static void tmpfile_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_tmpfile = {&tmpfile_init, &tmpfile_open,  &tmpfile_write,
-                               nullptr,       &tmpfile_close, &tmpfile_deinit};
+datasink_t datasink_tmpfile = {&tmpfile_init,  &tmpfile_open,
+                               &tmpfile_write, nullptr, /* write_sparse */
+                               &tmpfile_close, &tmpfile_deinit,
+                               nullptr /* get_bytes_written not implemented */};
 
 extern MY_TMPDIR mysql_tmpdir_list;
 

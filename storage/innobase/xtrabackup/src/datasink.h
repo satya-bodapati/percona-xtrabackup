@@ -59,6 +59,11 @@ struct datasink_struct {
                       bool punch_hole_supported);
   int (*close)(ds_file_t *file);
   void (*deinit)(ds_ctxt_t *ctxt);
+  /** Query the total number of bytes this datasink has written to its
+  destination so far.  Only implemented by leaf datasinks (ds_local,
+  ds_stdout, ds_fifo) that actually put bytes on disk; wrapper
+  datasinks set this to nullptr. */
+  unsigned long long (*get_bytes_written)(const ds_ctxt_t *ctxt);
 };
 
 /* Supported datasink types */
@@ -117,6 +122,11 @@ void ds_destroy(ds_ctxt_t *ctxt);
 Set the destination pipe for a datasink (only makes sense for compress and
 tmpfile). */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt);
+
+/** Walk the pipe_ctxt chain to its terminal (leaf) node.
+@param[in] ctxt  any node in a datasink pipeline
+@return the leaf ctxt (same as @p ctxt if it has no pipe_ctxt). */
+const ds_ctxt_t *ds_leaf(const ds_ctxt_t *ctxt);
 
 #ifdef __cplusplus
 } /* extern "C" */

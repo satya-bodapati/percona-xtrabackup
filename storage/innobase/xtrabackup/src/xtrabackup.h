@@ -287,6 +287,12 @@ bool check_if_param_set(const char *param);
 
 void xtrabackup_backup_func(void);
 
+/** @return total bytes the leaf datasink has written to disk so far.
+Walks ds_data's pipeline to the terminal datasink and reads its
+aggregate byte counter.  Returns 0 (with a warning) when the leaf does
+not implement the get_bytes_written() vtable slot. */
+unsigned long long get_final_backup_size();
+
 bool xb_get_one_option(int optid,
                        const struct my_option *opt __attribute__((unused)),
                        char *argument);

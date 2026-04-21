@@ -95,6 +95,16 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
   ctxt = ds->init(root);
   if (ctxt != NULL) {
     ctxt->datasink = ds;
+    /* Per-datasink init() routines use my_malloc() which does not zero
+    memory, so fields not explicitly assigned by init() (notably
+    pipe_ctxt and fs_support_punch_hole) can hold garbage.  Normalize
+    them here so every caller sees a clean ds_ctxt_t regardless of
+    which leaf/wrapper produced it.  In particular ds_leaf() relies on
+    pipe_ctxt == nullptr at the terminal node to stop walking, and
+    callers that query fs_support_punch_hole on non-local leaves
+    (stdout/fifo/xbstream) must see a sane default. */
+    ctxt->pipe_ctxt = nullptr;
+    ctxt->fs_support_punch_hole = false;
   } else {
     msg("Error: failed to initialize datasink.\n");
     exit(EXIT_FAILURE);
@@ -160,4 +170,13 @@ Set the destination pipe for a datasink (only makes sense for compress and
 tmpfile). */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt) {
   ctxt->pipe_ctxt = pipe_ctxt;
+}
+
+/** Walk a datasink pipeline to its terminal node by following
+pipe_ctxt.
+@param[in] ctxt  any node in a pipeline
+@return the leaf ctxt, or @p ctxt itself when it has no pipe_ctxt. */
+const ds_ctxt_t *ds_leaf(const ds_ctxt_t *ctxt) {
+  while (ctxt && ctxt->pipe_ctxt) ctxt = ctxt->pipe_ctxt;
+  return ctxt;
 }
