@@ -12,35 +12,7 @@
 
 require_debug_pxb_version
 
-# get_field <info_file> <field>
-#   Read one "<field> = <value>" line out of an xtrabackup_info file and
-#   echo the value (third whitespace-separated token).
-#   $1 info_file - path to xtrabackup_info
-#   $2 field     - name of the field to look up
-get_field() {
-  local info_file=$1 field=$2
-  grep "^$field = " "$info_file" | awk '{print $3}'
-}
-
-# assert_target_strict <dir> <bs> <label>
-#   Strict byte-perfect check: backup_size recorded in xtrabackup_info
-#   must equal the actual sum of file sizes under <dir> (no tolerance).
-#   Uses the --extra-lsndir copy of xtrabackup_info because it is written
-#   AFTER the target's xtrabackup_info has flowed through to the leaf,
-#   so bs already accounts for every byte on disk (including
-#   xtrabackup_info itself).
-#   $1 dir   - target-dir of the backup being validated
-#   $2 bs    - backup_size value read from extra-lsndir/xtrabackup_info
-#   $3 label - human-readable prefix for die/vlog messages
-assert_target_strict() {
-  local dir=$1 bs=$2 label=$3
-  local total
-  total=$(find "$dir" -type f -printf '%s\n' | awk '{s+=$1} END{print s+0}')
-  if [ "$bs" -ne "$total" ]; then
-    die "$label: backup_size($bs) != sum_file_bytes($dir)=$total, diff=$((bs - total))"
-  fi
-  vlog "$label: backup_size=$bs (EXACT)"
-}
+# get_field / assert_target_strict are sourced from inc/common.sh.
 
 start_server
 

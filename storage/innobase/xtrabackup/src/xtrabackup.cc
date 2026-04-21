@@ -398,15 +398,18 @@ extern datasink_t datasink_local;
 extern datasink_t datasink_stdout;
 extern datasink_t datasink_fifo;
 
-/** Total raw (pre-compression) bytes accounted by xb_backup_metrics.
-Only meaningful when --compress is used. */
+/** See xtrabackup.h.
+@return total raw bytes accumulated by xb_backup_metrics. */
 unsigned long long get_uncompressed_backup_size() {
   return xb_backup_metrics.get_uncomp_size();
 }
 
-/** Total bytes written by the leaf datasink of the main data pipeline.
-This is the final on-disk size of the backup: post-compression when
---compress is used, identical to the uncompressed size otherwise. */
+/** See xtrabackup.h.  Walks ds_data to its leaf with ds_leaf() and
+reads the leaf's get_bytes_written counter.  Emits xb::warn and
+returns 0 when the leaf cannot be found or does not implement
+get_bytes_written (e.g., during a prepare run where the main data
+pipeline was never constructed).
+@return leaf byte counter value, or 0 on missing pipeline. */
 unsigned long long get_final_backup_size() {
   const ds_ctxt_t *leaf = ds_leaf(ds_data);
   if (leaf == nullptr || leaf->datasink->get_bytes_written == nullptr) {
@@ -2785,7 +2788,7 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
   mystat.st_mtime = time(nullptr);
 
   stream = ds_tracked_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat,
-                           xb_active_metrics());
+                           xb_get_metrics());
   if (stream == NULL) {
     xb::error() << "cannot open output stream for "
                 << XTRABACKUP_METADATA_FILENAME;
@@ -2902,7 +2905,7 @@ bool xb_write_delta_metadata(const char *filename,
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  f = ds_tracked_open(ds_meta, filename, &mystat, xb_active_metrics());
+  f = ds_tracked_open(ds_meta, filename, &mystat, xb_get_metrics());
   if (f == NULL) {
     xb::error() << "cannot open output stream for " << filename;
     return (false);
@@ -3273,10 +3276,10 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
   /* do not compress encrypted tablespaces */
   if (cursor.is_encrypted) {
     dstfile = ds_tracked_open(ds_uncompressed_data, dst_name, &cursor.statinfo,
-                              xb_active_metrics());
+                              xb_get_metrics());
   } else {
-    dstfile = ds_tracked_open(ds_data, dst_name, &cursor.statinfo,
-                              xb_active_metrics());
+    dstfile =
+        ds_tracked_open(ds_data, dst_name, &cursor.statinfo, xb_get_metrics());
   }
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;

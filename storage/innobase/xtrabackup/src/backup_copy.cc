@@ -378,7 +378,7 @@ bool backup_file_print(const char *filename, const char *message, int len) {
   stat.st_mtime = time(nullptr);
   stat.st_size = len;
 
-  dstfile = ds_tracked_open(ds_data, filename, &stat, xb_active_metrics());
+  dstfile = ds_tracked_open(ds_data, filename, &stat, xb_get_metrics());
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << filename;
     goto error;
@@ -578,7 +578,7 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   strncpy(dst_name, cursor.rel_path, sizeof(dst_name));
 
   dstfile = ds_tracked_open(datasink, trim_dotslash(dst_file_path),
-                            &cursor.statinfo, xb_active_metrics());
+                            &cursor.statinfo, xb_get_metrics());
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
     goto error;
@@ -1687,10 +1687,10 @@ bool backup_finish(Backup_context &context) {
         cannot be zero. */
         ut_ad(uncompressed_backup_size > 0);
         if (uncompressed_backup_size == 0) {
-          xb::warn() << "Uncompressed size reporting failed: metrics counter"
-                        " is 0 despite --compress";
+          xb::warn() << "Uncompressed backup size reporting failed: metrics"
+                        " counter is 0 despite --compress";
         } else {
-          xb::info() << "Uncompressed size: "
+          xb::info() << "Uncompressed backup size: "
                      << human_readable(uncompressed_backup_size) << " ("
                      << uncompressed_backup_size << " bytes)";
 

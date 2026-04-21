@@ -80,7 +80,14 @@ extern ds_ctxt_t *ds_meta;
 extern ds_ctxt_t *ds_data;
 extern ds_ctxt_t *ds_uncompressed_data;
 
+/** @return total raw (pre-compression) bytes accumulated by
+xb_backup_metrics across all top-level tracked opens this run.  Only
+meaningful when --compress is used. */
 unsigned long long get_uncompressed_backup_size();
+
+/** @return total bytes written by the leaf of the main data pipeline.
+Equals the post-compression size under --compress and equals the
+uncompressed size otherwise. */
 unsigned long long get_final_backup_size();
 
 extern pagetracking::xb_space_map *changed_page_tracking;
@@ -108,11 +115,13 @@ extern xtrabackup_compress_t xtrabackup_compress;
 extern bool xtrabackup_encrypt;
 
 /** Metrics pointer to pass to ds_tracked_open() for top-level backup
-files on the xtrabackup side.  Returns &xb_backup_metrics when
---compress is active (so pre-compression bytes are accumulated into
-uncompressed_backup_size) and nullptr otherwise (tracking disabled;
-backup_size already equals the uncompressed size in that case). */
-inline xb_metrics *xb_active_metrics() {
+files on the xtrabackup side.  Tracking is only useful when --compress
+is active, because without compression the logical bytes equal what
+the leaf writes anyway -- the leaf's own byte counter (queried by
+get_final_backup_size()) already holds the same number.
+@return &xb_backup_metrics when --compress is active, nullptr
+        otherwise (tracking disabled). */
+inline xb_metrics *xb_get_metrics() {
   return xtrabackup_compress != XTRABACKUP_COMPRESS_NONE ? &xb_backup_metrics
                                                          : nullptr;
 }

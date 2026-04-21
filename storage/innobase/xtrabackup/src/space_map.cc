@@ -209,7 +209,7 @@ bool Tablespace_map::serialize(ds_ctxt_t *ds) const {
   mystat.st_mtime = time(nullptr);
 
   const char *path = XBTS_FILE_NAME;
-  ds_file_t *stream = ds_tracked_open(ds, path, &mystat, xb_active_metrics());
+  ds_file_t *stream = ds_tracked_open(ds, path, &mystat, xb_get_metrics());
   if (stream == NULL) {
     xb::error() << "cannot open output stream for " << path;
     return (false);

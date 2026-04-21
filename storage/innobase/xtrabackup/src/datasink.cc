@@ -43,12 +43,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 /** Global aggregate metrics for the backup pipelines.  Incremented by
 ds_write() / ds_write_sparse() whenever the file's metrics pointer is
 non-null.  Armed at top-level backup open sites via ds_tracked_open()
-with xb_active_metrics() (xtrabackup.h), which returns &xb_backup_metrics
+with xb_get_metrics() (xtrabackup.h), which returns &xb_backup_metrics
 when --compress is active and nullptr otherwise. */
 xb_metrics xb_backup_metrics;
 
-/************************************************************************
-Create a datasink of the specified type */
+/** See datasink.h for contract.
+@param[in] root  root path / destination the datasink writes into
+@param[in] type  which datasink to instantiate
+@return a datasink context, or nullptr for unknown type. */
 ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
   datasink_t *ds;
   ds_ctxt_t *ctxt;
@@ -114,13 +116,16 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
   return ctxt;
 }
 
-/************************************************************************
-Open a datasink file.  Pure dispatcher.  Each *_open() initializes the
-framework-owned fields on its freshly allocated ds_file_t via
-ds_init_file() (see datasink.h).  The debug assertion catches any
-*_open implementation that forgets to call ds_init_file(): ds_write /
-ds_close would later chase a NULL datasink/ctxt and crash with no
-clue about the root cause. */
+/** Pure dispatcher.  Each *_open() initializes the framework-owned
+fields on its freshly allocated ds_file_t via ds_init_file() (see
+datasink.h).  The debug assertion catches any *_open implementation
+that forgets to call ds_init_file(): ds_write / ds_close would later
+chase a NULL datasink/ctxt and crash with no clue about the root
+cause.
+@param[in] ctxt  pipeline to open through
+@param[in] path  path relative to the pipeline root
+@param[in] stat  size/mode hints for downstream datasinks
+@return newly opened file, or nullptr on error. */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
   ds_file_t *file = ctxt->datasink->open(ctxt, path, stat);
   assert(file == nullptr ||
@@ -128,8 +133,13 @@ ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
   return file;
 }
 
-/** ds_open() + conditional ds_track_metrics(), in one call.  See the
-declaration in datasink.h for when to prefer this over a raw ds_open(). */
+/** ds_open() + ds_track_metrics(), in one call.  See the declaration
+in datasink.h for when to prefer this over a raw ds_open().
+@param[in]     ctxt     pipeline to open through
+@param[in]     path     path relative to the pipeline root
+@param[in]     stat     size/mode hints for downstream datasinks
+@param[in,out] metrics  metrics instance to bind; nullptr disables tracking
+@return newly opened file, or nullptr on error. */
 ds_file_t *ds_tracked_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
                            xb_metrics *metrics) {
   ds_file_t *file = ds_open(ctxt, path, stat);
@@ -137,8 +147,11 @@ ds_file_t *ds_tracked_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
   return file;
 }
 
-/************************************************************************
-Write to a datasink file.
+/** Write a contiguous buffer through the owning datasink's write slot.
+Adds @p len to file->metrics when tracking is bound.
+@param[in,out] file  ds_file_t previously returned by ds_open
+@param[in]     buf   bytes to write
+@param[in]     len   number of bytes at @p buf
 @return 0 on success, 1 on error. */
 int ds_write(ds_file_t *file, const void *buf, size_t len) {
   if (file->metrics != nullptr) {
@@ -147,9 +160,9 @@ int ds_write(ds_file_t *file, const void *buf, size_t len) {
   return file->datasink->write(file, buf, len);
 }
 
-/************************************************************************
-Check if sparse files are supported.
-@return 1 if yes. */
+/** Check whether @p file's datasink supports sparse writes.
+@param[in] file  file to probe
+@return 1 if write_sparse is implemented, 0 otherwise. */
 int ds_is_sparse_write_supported(ds_file_t *file) {
   if (file->datasink->write_sparse != nullptr) {
     return 1;
@@ -157,8 +170,16 @@ int ds_is_sparse_write_supported(ds_file_t *file) {
   return 0;
 }
 
-/************************************************************************
-Write sparse chunk if supported.
+/** Forward a sparse chunk through the owning datasink's write_sparse
+slot.  Adds the sum of sparse_map[i].len (the packed payload, holes
+excluded) to file->metrics when tracking is bound.
+@param[in,out] file                  ds_file_t previously returned by ds_open
+@param[in]     buf                   packed buffer containing the data bytes
+@param[in]     len                   size of @p buf
+@param[in]     sparse_map_size       number of entries in @p sparse_map
+@param[in]     sparse_map            per-chunk (skip, len)
+@param[in]     punch_hole_supported  true if the destination filesystem
+                                     can physically punch holes
 @return 0 on success, 1 on error. */
 int ds_write_sparse(ds_file_t *file, const void *buf, size_t len,
                     size_t sparse_map_size, const ds_sparse_chunk_t *sparse_map,
@@ -178,24 +199,26 @@ int ds_write_sparse(ds_file_t *file, const void *buf, size_t len,
   return 1;
 }
 
-/************************************************************************
-Close a datasink file.
-@return 0 on success, 1, on error. */
+/** Close a datasink file.
+@param[in,out] file  ds_file_t previously returned by ds_open
+@return 0 on success, 1 on error. */
 int ds_close(ds_file_t *file) { return file->datasink->close(file); }
 
-/************************************************************************
-Destroy a datasink handle */
+/** Destroy a datasink handle.
+@param[in,out] ctxt  datasink ctxt returned by ds_create / ds_set_pipe */
 void ds_destroy(ds_ctxt_t *ctxt) { ctxt->datasink->deinit(ctxt); }
 
-/************************************************************************
-Set the destination pipe for a datasink (only makes sense for compress and
-tmpfile). */
+/** Wire @p ctxt's output into @p pipe_ctxt.
+@param[in,out] ctxt       wrapper datasink context
+@param[in,out] pipe_ctxt  next-stage datasink the wrapper writes into */
 void ds_set_pipe(ds_ctxt_t *ctxt, ds_ctxt_t *pipe_ctxt) {
   ctxt->pipe_ctxt = pipe_ctxt;
 }
 
-/** Walk a datasink pipeline to its terminal node by following pipe_ctxt.
-@return the leaf ctxt, or ctxt itself when it has no pipe_ctxt. */
+/** Walk a datasink pipeline to its terminal node by following
+pipe_ctxt.
+@param[in] ctxt  any node in a pipeline
+@return the leaf ctxt, or @p ctxt itself when it has no pipe_ctxt. */
 const ds_ctxt_t *ds_leaf(const ds_ctxt_t *ctxt) {
   while (ctxt && ctxt->pipe_ctxt) ctxt = ctxt->pipe_ctxt;
   return ctxt;

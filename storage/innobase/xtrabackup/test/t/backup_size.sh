@@ -100,7 +100,7 @@ us3=$(get_field "$topdir/lsn3/xtrabackup_info" uncompressed_backup_size)
 assert_positive "$bs3" "scen3 backup_size"
 assert_positive "$us3" "scen3 uncompressed_backup_size"
 grep -q "Backup size:"       $topdir/log3 || die "scen3: missing 'Backup size:' in log"
-grep -q "Uncompressed size:" $topdir/log3 || die "scen3: missing 'Uncompressed size:' in log"
+grep -q "Uncompressed backup size:" $topdir/log3 || die "scen3: missing 'Uncompressed backup size:' in log"
 grep -q "Compression ratio:" $topdir/log3 || die "scen3: missing 'Compression ratio:' in log"
 
 assert_target_strict      "$topdir/backup3" "$bs3" "scen3 (compress target)"
