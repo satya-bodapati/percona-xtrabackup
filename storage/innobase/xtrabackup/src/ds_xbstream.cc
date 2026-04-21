@@ -165,6 +165,7 @@ static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
   file->ptr = stream_file;
   file->path = stream_ctxt->dest_file->path;
 
+  ds_init_file(file, ctxt);
   return file;
 
 err:

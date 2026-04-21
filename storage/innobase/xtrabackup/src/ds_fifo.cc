@@ -36,7 +36,7 @@ struct ds_fifo_ctxt_t {
   std::unordered_map<std::string, File> FIFO_list;
   /* Mutex protecting FIFO list */
   std::mutex fifo_mutex;
-  /* Aggregate bytes written through this ctxt across all FIFO files. */
+  /* Total bytes written through this datasink, for backup size reporting. */
   std::atomic<unsigned long long> bytes_written{0};
 
   /* Add a new pair of fullpath and fd to FIFO_list */
@@ -87,9 +87,13 @@ static int fifo_close(ds_file_t *file);
 static void fifo_deinit(ds_ctxt_t *ctxt);
 static unsigned long long fifo_get_bytes_written(const ds_ctxt_t *ctxt);
 
-datasink_t datasink_fifo = {&fifo_init,  &fifo_open,   &fifo_write,
-                            nullptr, /* write_sparse */
-                            &fifo_close, &fifo_deinit, &fifo_get_bytes_written};
+datasink_t datasink_fifo = {&fifo_init,
+                            &fifo_open,
+                            &fifo_write,
+                            nullptr,
+                            &fifo_close,
+                            &fifo_deinit,
+                            &fifo_get_bytes_written};
 
 static void cleanup_on_error(const char *root, ds_fifo_ctxt_t *ctxt) {
   std::string path;
@@ -181,11 +185,12 @@ static ds_file_t *fifo_open(ds_ctxt_t *ctxt,
 
   file->ptr = fifo_file;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 
 static int fifo_write(ds_file_t *file, const void *buf, size_t len) {
-  auto *fifo_file = (ds_fifo_file_t *)file->ptr;
+  auto fifo_file = (ds_fifo_file_t *)file->ptr;
   File fd = fifo_file->fd;
 
   if (!my_write(fd, static_cast<const uchar *>(buf), len,
@@ -212,12 +217,12 @@ static int fifo_close(ds_file_t *file) {
 static void fifo_deinit(ds_ctxt_t *ctxt) {
   ds_fifo_ctxt_t *fifo_context = (ds_fifo_ctxt_t *)ctxt->ptr;
   assert(fifo_context->FIFO_list.size() == xtrabackup_fifo_streams);
+  fifo_context->bytes_written.store(0, std::memory_order_relaxed);
   delete fifo_context;
   my_free(ctxt->root);
   delete ctxt;
 }
 
-/** @see local_get_bytes_written -- same contract for the FIFO leaf. */
 static unsigned long long fifo_get_bytes_written(const ds_ctxt_t *ctxt) {
   return static_cast<const ds_fifo_ctxt_t *>(ctxt->ptr)->bytes_written.load(
       std::memory_order_relaxed);

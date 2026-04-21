@@ -55,6 +55,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <chrono>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -377,7 +378,7 @@ bool backup_file_print(const char *filename, const char *message, int len) {
   stat.st_mtime = time(nullptr);
   stat.st_size = len;
 
-  dstfile = ds_open(ds_data, filename, &stat);
+  dstfile = ds_tracked_open(ds_data, filename, &stat, xb_get_metrics());
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << filename;
     goto error;
@@ -576,7 +577,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
 
   strncpy(dst_name, cursor.rel_path, sizeof(dst_name));
 
-  dstfile = ds_open(datasink, trim_dotslash(dst_file_path), &cursor.statinfo);
+  dstfile = ds_tracked_open(datasink, trim_dotslash(dst_file_path),
+                            &cursor.statinfo, xb_get_metrics());
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
     goto error;
@@ -1594,10 +1596,14 @@ bool backup_start(Backup_context &context) {
   return (true);
 }
 
-/** Report the final on-disk backup_size to the error log.  A successful
-backup always produces on-disk output, so the leaf counter must be
-non-zero here.  ut_ad is a no-op in release; warn + skip on release to
-avoid hiding a silent reporting failure. */
+/** Report the final on-disk backup_size and, under --compress, the
+logical uncompressed_backup_size and compression ratio, to the error
+log.  A successful backup must have produced on-disk output, so the
+leaf counter must be non-zero; under --compress at least one top-level
+ds_tracked_open() must have armed metrics, so the uncompressed counter
+must be non-zero too.  A zero value therefore indicates a silent
+reporting bug: assert in debug, warn and skip in release to avoid
+emitting misleading numbers (e.g. "Compression ratio: inf"). */
 static void report_backup_size() {
   const unsigned long long backup_size = get_final_backup_size();
 
@@ -1610,6 +1616,28 @@ static void report_backup_size() {
   xb::info() << "Backup size: "
              << xtrabackup::utils::human_readable(backup_size) << " ("
              << backup_size << " bytes)";
+
+  if (xtrabackup_compress == XTRABACKUP_COMPRESS_NONE) {
+    return;
+  }
+
+  const unsigned long long uncompressed_backup_size =
+      get_uncompressed_backup_size();
+
+  ut_ad(uncompressed_backup_size > 0);
+  if (uncompressed_backup_size == 0) {
+    xb::warn() << "Uncompressed backup size reporting failed: metrics"
+                  " counter is 0 despite --compress";
+    return;
+  }
+
+  xb::info() << "Uncompressed backup size: "
+             << xtrabackup::utils::human_readable(uncompressed_backup_size)
+             << " (" << uncompressed_backup_size << " bytes)";
+
+  const double ratio = (double)uncompressed_backup_size / (double)backup_size;
+  xb::info() << "Compression ratio: " << std::fixed << std::setprecision(2)
+             << ratio << "x";
 }
 
 /* Finsh the backup. Release all locks. Write down backup metadata.

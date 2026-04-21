@@ -394,6 +394,39 @@ ds_ctxt_t *ds_meta = nullptr;
 ds_ctxt_t *ds_redo = nullptr;
 ds_ctxt_t *ds_uncompressed_data = nullptr;
 
+extern datasink_t datasink_local;
+extern datasink_t datasink_stdout;
+extern datasink_t datasink_fifo;
+
+/** See xtrabackup.h.
+@return total raw bytes accumulated by xb_backup_metrics. */
+unsigned long long get_uncompressed_backup_size() {
+  return xb_backup_metrics.get_uncomp_size();
+}
+
+/** See xtrabackup.h.  Walks ds_data to its leaf with ds_leaf() and
+reads the leaf's get_bytes_written counter.  Emits xb::warn and
+returns 0 when the leaf cannot be found or does not implement
+get_bytes_written (e.g., during a prepare run where the main data
+pipeline was never constructed).
+@return leaf byte counter value, or 0 on missing pipeline. */
+unsigned long long get_final_backup_size() {
+  const ds_ctxt_t *leaf = ds_leaf(ds_data);
+  if (leaf == nullptr || leaf->datasink->get_bytes_written == nullptr) {
+    xb::warn() << "Cannot determine backup size: "
+               << "leaf datasink does not support get_bytes_written";
+    return 0;
+  }
+
+  ut_ad((xtrabackup_stream && xtrabackup_fifo_streams > 1 &&
+         leaf->datasink == &datasink_fifo) ||
+        (xtrabackup_stream && xtrabackup_fifo_streams <= 1 &&
+         leaf->datasink == &datasink_stdout) ||
+        (!xtrabackup_stream && leaf->datasink == &datasink_local));
+
+  return leaf->datasink->get_bytes_written(leaf);
+}
+
 static long innobase_log_files_in_group_save;
 static char *srv_log_group_home_dir_save;
 static longlong innobase_log_file_size_save;
@@ -2754,7 +2787,8 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  stream = ds_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat);
+  stream = ds_tracked_open(ds_ctxt, XTRABACKUP_METADATA_FILENAME, &mystat,
+                           xb_get_metrics());
   if (stream == NULL) {
     xb::error() << "cannot open output stream for "
                 << XTRABACKUP_METADATA_FILENAME;
@@ -2871,7 +2905,7 @@ bool xb_write_delta_metadata(const char *filename,
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
-  f = ds_open(ds_meta, filename, &mystat);
+  f = ds_tracked_open(ds_meta, filename, &mystat, xb_get_metrics());
   if (f == NULL) {
     xb::error() << "cannot open output stream for " << filename;
     return (false);
@@ -3241,9 +3275,11 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
 
   /* do not compress encrypted tablespaces */
   if (cursor.is_encrypted) {
-    dstfile = ds_open(ds_uncompressed_data, dst_name, &cursor.statinfo);
+    dstfile = ds_tracked_open(ds_uncompressed_data, dst_name, &cursor.statinfo,
+                              xb_get_metrics());
   } else {
-    dstfile = ds_open(ds_data, dst_name, &cursor.statinfo);
+    dstfile =
+        ds_tracked_open(ds_data, dst_name, &cursor.statinfo, xb_get_metrics());
   }
   if (dstfile == NULL) {
     xb::error() << "cannot open the destination stream for " << dst_name;
@@ -3593,6 +3629,10 @@ static void xtrabackup_init_datasinks(void) {
       }
     }
   }
+
+  if (xtrabackup_compress == XTRABACKUP_COMPRESS_NONE) {
+    ds_uncompressed_data = ds_data;
+  }
 }
 
 /************************************************************************
@@ -3608,24 +3648,6 @@ static void xtrabackup_destroy_datasinks(void) {
   ds_data = NULL;
   ds_meta = NULL;
   ds_redo = NULL;
-}
-
-/** Walk ds_data's pipeline to the leaf and return its aggregate
-bytes_written counter.  Used by the xtrabackup_info writer and the
-backup-complete log line to report the final on-disk size byte-
-perfect.
-@return total bytes written to the destination, or 0 if the leaf has
-        not been created yet or does not implement get_bytes_written. */
-unsigned long long get_final_backup_size() {
-  if (ds_data == nullptr) return 0;
-  const ds_ctxt_t *leaf = ds_leaf(ds_data);
-  if (leaf == nullptr || leaf->datasink == nullptr ||
-      leaf->datasink->get_bytes_written == nullptr) {
-    xb::warn() << "get_final_backup_size(): leaf datasink has no "
-                  "get_bytes_written implementation; reporting 0";
-    return 0;
-  }
-  return leaf->datasink->get_bytes_written(leaf);
 }
 
 #define SRV_N_PENDING_IOS_PER_THREAD OS_AIO_N_PENDING_IOS_PER_THREAD
@@ -4597,11 +4619,34 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
 
-  /* Emit the tablespace map and transition-key dumps BEFORE
-  backup_finish() writes xtrabackup_info.  backup_finish() calls
-  get_final_backup_size() to embed backup_size in xtrabackup_info;
-  running these serializers first guarantees the leaf's byte counter
-  has already seen every other byte that flows through ds_data. */
+  if (xtrabackup_extra_lsndir) {
+    char filename[FN_REFLEN];
+
+    sprintf(filename, "%s/%s", xtrabackup_extra_lsndir,
+            XTRABACKUP_METADATA_FILENAME);
+    if (!xtrabackup_write_metadata(filename)) {
+      xb::error() << "failed to write metadata to " << filename;
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  if (opt_lock_ddl_per_table) {
+    mdl_unlock_all();
+  }
+
+  /* Reorder for backup_size reporting: Tablespace_map::serialize() and
+  the ts_key_dumper flush were previously run AFTER backup_finish().
+  backup_finish() embeds the sampled leaf byte count (backup_size) into
+  xtrabackup_info, so any ds_data output produced after the sample is
+  not reflected in the recorded size.  Moving these two blocks before
+  backup_finish() closes that gap: both flush their files through
+  ds_close(), which drains through to the leaf, so by the time
+  backup_finish() samples get_bytes_written() the counter already
+  includes the Tablespace map and the keyring dump.
+
+  The xtrabackup_info write under xtrabackup_extra_lsndir stays AFTER
+  backup_finish() -- it is a second copy of the already-sampled file
+  and adds no ds_data bytes itself. */
   Tablespace_map::instance().serialize(ds_data);
 
   if (ts_key_dumper.is_initialized()) {
@@ -4629,22 +4674,11 @@ void xtrabackup_backup_func(void) {
   if (xtrabackup_extra_lsndir) {
     char filename[FN_REFLEN];
 
-    sprintf(filename, "%s/%s", xtrabackup_extra_lsndir,
-            XTRABACKUP_METADATA_FILENAME);
-    if (!xtrabackup_write_metadata(filename)) {
-      xb::error() << "failed to write metadata to " << filename;
-      exit(EXIT_FAILURE);
-    }
-
     sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
     if (!xtrabackup_write_info(filename)) {
       xb::error() << "failed to write info to " << filename;
       exit(EXIT_FAILURE);
     }
-  }
-
-  if (opt_lock_ddl_per_table) {
-    mdl_unlock_all();
   }
 
   xtrabackup_destroy_datasinks();

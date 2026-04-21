@@ -627,7 +627,6 @@ bool get_mysql_vars(MYSQL *connection) {
         my_strdup(PSI_NOT_INSTRUMENTED, innodb_directories_var, MYF(MY_FAE));
   }
 
-
   if (!check_if_param_set("innodb_log_file_size") && innodb_log_file_size_var) {
     char *endptr;
 
@@ -1849,12 +1848,7 @@ char *get_xtrabackup_info(MYSQL *connection) {
   format_time(history_start_time, buf_start_time, time_buf_size);
   format_time(history_end_time, buf_end_time, time_buf_size);
 
-  /* Sample the leaf's bytes_written counter now, right before
-  xtrabackup_info is itself written to ds_data.  Everything that was
-  meant to flow through ds_data for this backup is already accounted
-  for at this point (see the reorder in xtrabackup.cc's backup finish
-  flow). */
-  const unsigned long long backup_size = get_final_backup_size();
+  unsigned long long backup_size = get_final_backup_size();
 
   ut_a(uuid);
   ut_a(server_version);
@@ -1910,9 +1904,25 @@ char *get_xtrabackup_info(MYSQL *connection) {
                xtrabackup_encrypt ? "Y" : "N",               /* encrypted */
                ddl_lock_type_to_str(static_cast<lock_ddl_type_t>(opt_lock_ddl))
                    .c_str(), /* lock-ddl */
-               backup_size);
+               backup_size); /* backup_size */
 
   ut_a(ret != 0);
+
+  if (xtrabackup_compress != XTRABACKUP_COMPRESS_NONE) {
+    unsigned long long uncompressed_backup_size =
+        get_uncompressed_backup_size();
+
+    char *tmp = NULL;
+    int ret2 = asprintf(&tmp, "%suncompressed_backup_size = %llu\n", result,
+                        uncompressed_backup_size);
+    if (ret2 < 0) {
+      xb::warn() << "Failed to append uncompressed_backup_size to"
+                 << " xtrabackup_info: " << strerror(errno);
+    } else {
+      free(result);
+      result = tmp;
+    }
+  }
 
   free(server_version);
   return result;

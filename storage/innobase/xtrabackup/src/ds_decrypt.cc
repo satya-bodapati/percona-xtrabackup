@@ -83,7 +83,6 @@ struct decrypt_thread_ctxt_t {
 
 class Xbcrypt_stream {
  public:
-
   void reset() { stream.reset(); }
 
   void set_buffer(const char *buf, size_t len) { stream.add_buffer(buf, len); }
@@ -121,9 +120,8 @@ static int decrypt_write(ds_file_t *file, const void *buf, size_t len);
 static int decrypt_close(ds_file_t *file);
 static void decrypt_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_decrypt = {&decrypt_init,  &decrypt_open,
-                               &decrypt_write, nullptr, /* write_sparse */
-                               &decrypt_close, &decrypt_deinit,
+datasink_t datasink_decrypt = {&decrypt_init, &decrypt_open,  &decrypt_write,
+                               nullptr,       &decrypt_close, &decrypt_deinit,
                                nullptr /* get_bytes_written not implemented */};
 
 static ds_ctxt_t *decrypt_init(const char *root) {
@@ -190,6 +188,7 @@ static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
   file->ptr = crypt_file;
   file->path = crypt_file->dest_file->path;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 

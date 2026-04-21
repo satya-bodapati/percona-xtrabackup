@@ -80,6 +80,16 @@ extern ds_ctxt_t *ds_meta;
 extern ds_ctxt_t *ds_data;
 extern ds_ctxt_t *ds_uncompressed_data;
 
+/** @return total raw (pre-compression) bytes accumulated by
+xb_backup_metrics across all top-level tracked opens this run.  Only
+meaningful when --compress is used. */
+unsigned long long get_uncompressed_backup_size();
+
+/** @return total bytes written by the leaf of the main data pipeline.
+Equals the post-compression size under --compress and equals the
+uncompressed size otherwise. */
+unsigned long long get_final_backup_size();
+
 extern pagetracking::xb_space_map *changed_page_tracking;
 
 extern ulint xtrabackup_rebuild_threads;
@@ -103,6 +113,18 @@ extern char *xtrabackup_databases_exclude;
 
 extern xtrabackup_compress_t xtrabackup_compress;
 extern bool xtrabackup_encrypt;
+
+/** Metrics pointer to pass to ds_tracked_open() for top-level backup
+files on the xtrabackup side.  Tracking is only useful when --compress
+is active, because without compression the logical bytes equal what
+the leaf writes anyway -- the leaf's own byte counter (queried by
+get_final_backup_size()) already holds the same number.
+@return &xb_backup_metrics when --compress is active, nullptr
+        otherwise (tracking disabled). */
+inline xb_metrics *xb_get_metrics() {
+  return xtrabackup_compress != XTRABACKUP_COMPRESS_NONE ? &xb_backup_metrics
+                                                         : nullptr;
+}
 
 extern bool xtrabackup_backup;
 extern bool xtrabackup_prepare;
@@ -286,12 +308,6 @@ Check if parameter is set in defaults file or via command line argument
 bool check_if_param_set(const char *param);
 
 void xtrabackup_backup_func(void);
-
-/** @return total bytes the leaf datasink has written to disk so far.
-Walks ds_data's pipeline to the terminal datasink and reads its
-aggregate byte counter.  Returns 0 (with a warning) when the leaf does
-not implement the get_bytes_written() vtable slot. */
-unsigned long long get_final_backup_size();
 
 bool xb_get_one_option(int optid,
                        const struct my_option *opt __attribute__((unused)),

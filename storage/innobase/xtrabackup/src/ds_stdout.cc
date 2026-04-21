@@ -22,12 +22,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <mysql/service_mysql_alloc.h>
 #include <mysys_err.h>
 #include <atomic>
+
 #include "common.h"
 #include "datasink.h"
 
-/** Per-destination leaf counter -- see ds_local_ctxt_t for the same
-pattern.  Every ds_file_t opened against a given stdout ctxt shares
-this aggregate. */
 typedef struct {
   std::atomic<unsigned long long> bytes_written{0};
 } ds_stdout_ctxt_t;
@@ -45,10 +43,13 @@ static int stdout_close(ds_file_t *file);
 static void stdout_deinit(ds_ctxt_t *ctxt);
 static unsigned long long stdout_get_bytes_written(const ds_ctxt_t *ctxt);
 
-datasink_t datasink_stdout = {
-    &stdout_init,  &stdout_open,   &stdout_write,
-    nullptr, /* write_sparse */
-    &stdout_close, &stdout_deinit, &stdout_get_bytes_written};
+datasink_t datasink_stdout = {&stdout_init,
+                              &stdout_open,
+                              &stdout_write,
+                              nullptr,
+                              &stdout_close,
+                              &stdout_deinit,
+                              &stdout_get_bytes_written};
 
 static ds_ctxt_t *stdout_init(const char *root) {
   ds_ctxt_t *ctxt;
@@ -63,7 +64,7 @@ static ds_ctxt_t *stdout_init(const char *root) {
   return ctxt;
 }
 
-static ds_file_t *stdout_open(ds_ctxt_t *ctxt __attribute__((unused)),
+static ds_file_t *stdout_open(ds_ctxt_t *ctxt,
                               const char *path __attribute__((unused)),
                               MY_STAT *mystat __attribute__((unused))) {
   ds_stdout_file_t *stdout_file;
@@ -90,11 +91,12 @@ static ds_file_t *stdout_open(ds_ctxt_t *ctxt __attribute__((unused)),
 
   file->ptr = stdout_file;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 
 static int stdout_write(ds_file_t *file, const void *buf, size_t len) {
-  auto *stdout_file = (ds_stdout_file_t *)file->ptr;
+  auto stdout_file = (ds_stdout_file_t *)file->ptr;
   File fd = stdout_file->fd;
 
   if (!my_write(fd, static_cast<const uchar *>(buf), len,
@@ -122,7 +124,6 @@ static void stdout_deinit(ds_ctxt_t *ctxt) {
   my_free(ctxt);
 }
 
-/** @see local_get_bytes_written -- same contract for the stdout leaf. */
 static unsigned long long stdout_get_bytes_written(const ds_ctxt_t *ctxt) {
   return static_cast<const ds_stdout_ctxt_t *>(ctxt->ptr)->bytes_written.load(
       std::memory_order_relaxed);

@@ -35,12 +35,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "datasink.h"
 #include "file_utils.h"
+#include "msg.h"
 
 #define PUNCH_HOLE_PLACEHOLDER_FILE "xtrabackup_punch_hole"
 
-/** Per-destination leaf counter.  Shared by every ds_file_t that
-local_open() allocates against a given ds_ctxt_t, so summing the bytes
-written through any file reaches the leaf's aggregate total. */
 typedef struct {
   std::atomic<unsigned long long> bytes_written{0};
 } ds_local_ctxt_t;
@@ -165,6 +163,7 @@ static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
 
   file->ptr = local_file;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 
@@ -223,7 +222,6 @@ static int local_write_sparse(ds_file_t *file, const void *buf, size_t len,
   } else
     local_file->last_seek = 0;
 
-  /* Count only the packed payload bytes; holes do not occupy disk. */
   local_file->local_ctxt->bytes_written.fetch_add(len,
                                                   std::memory_order_relaxed);
 
@@ -269,10 +267,6 @@ static void local_deinit(ds_ctxt_t *ctxt) {
   my_free(ctxt);
 }
 
-/** Total bytes written through this destination across every ds_file_t
-opened on @p ctxt.
-@param[in] ctxt  the ds_local context to query
-@return aggregate bytes that hit disk so far. */
 static unsigned long long local_get_bytes_written(const ds_ctxt_t *ctxt) {
   return static_cast<const ds_local_ctxt_t *>(ctxt->ptr)->bytes_written.load(
       std::memory_order_relaxed);

@@ -85,12 +85,8 @@ static int decompress_close(ds_file_t *file);
 static void decompress_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_decompress = {
-    &decompress_init,
-    &decompress_open,
-    &decompress_write,
-    nullptr, /* write_sparse */
-    &decompress_close,
-    &decompress_deinit,
+    &decompress_init, &decompress_open,  &decompress_write,
+    nullptr,          &decompress_close, &decompress_deinit,
     nullptr /* get_bytes_written not implemented */};
 
 static int decompress_process_metadata(ds_decompress_file_t *file,
@@ -166,6 +162,7 @@ static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
   file->ptr = decomp_file;
   file->path = dest_file->path;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 

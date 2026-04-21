@@ -69,11 +69,10 @@ static int compress_write(ds_file_t *file, const void *buf, size_t len);
 static int compress_close(ds_file_t *file);
 static void compress_deinit(ds_ctxt_t *ctxt);
 
-datasink_t datasink_compress_lz4 = {
-    &compress_init,  &compress_open,
-    &compress_write, nullptr, /* write_sparse */
-    &compress_close, &compress_deinit,
-    nullptr /* get_bytes_written not implemented */};
+datasink_t
+    datasink_compress_lz4 = {&compress_init, &compress_open,  &compress_write,
+                             nullptr,        &compress_close, &compress_deinit,
+                             nullptr /* get_bytes_written not implemented */};
 
 static inline int write_uint32_le(ds_file_t *file, uint32_t n);
 
@@ -116,6 +115,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   file->ptr = comp_file;
   file->path = dest_file->path;
 
+  ds_init_file(file, ctxt);
   return file;
 }
 
