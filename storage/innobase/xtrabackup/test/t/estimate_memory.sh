@@ -100,31 +100,26 @@ total_memory=$((redo_memory + (redo_frames * 16384))) #bytes
 # of the two so the gate matches what xtrabackup will actually see.
 mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
 mem_free_kb=$(awk  '/^MemFree:/      {print $2}' /proc/meminfo)
-# Default to 0 so awk-failure / missing field cannot accidentally make
-# the ternary below pick a non-empty positive value.
-mem_avail_kb=${mem_avail_kb:-0}
-mem_free_kb=${mem_free_kb:-0}
 free_memory=$(( mem_avail_kb < mem_free_kb ? mem_avail_kb : mem_free_kb )) #kb
 free_memory_bytes=$((free_memory * 1024)) #bytes
 free_memory_1_pct=$((free_memory_bytes  * 1 / 100)) #bytes
 free_memory_99_pct=$((free_memory_bytes  * 99 / 100)) #bytes
+# PXB-3770 diagnostics: log what the gate is seeing so we can tell, on
+# the next Jenkins failure, whether the gate let the test through with
+# bogus inputs or whether MemFree collapsed only after the gate passed.
 vlog "gate inputs: mem_avail_kb=${mem_avail_kb}, mem_free_kb=${mem_free_kb},"
 vlog "             free_memory_bytes=${free_memory_bytes}"
 vlog "             free_memory_99_pct=${free_memory_99_pct}, total_memory=${total_memory}"
 
-# Require a 2x headroom rather than 1x: on shared CI boxes MemFree can
-# collapse in the few seconds between this check and xtrabackup actually
-# calling sysinfo(), tripping PXB-3770. With 2x we still skip cleanly
-# in that race.
-if [[ "${free_memory_99_pct}" -lt "$((total_memory * 2))" ]];
+if [[ "${free_memory_99_pct}" -lt "${total_memory}" ]];
 then
-  vlog "Skipping full memory workload test as 99% of free memory" \
-       "is below 2x required by pxb"
+  vlog "Skipping full memory workload test as 99% of free memory is lower than required by pxb"
 else
-  # Snapshot MemFree right before invoking xtrabackup so that, if the
-  # binary still sees Free memory: 0, we can tell whether MemFree
-  # genuinely collapsed under us or whether sysinfo()/MemFree disagree
-  # on this Jenkins box.
+  # PXB-3770 diagnostics: snapshot MemFree right before invoking
+  # xtrabackup. If the binary still reports "Free memory: 0" while
+  # this snapshot shows MemFree high, we know sysinfo() and
+  # /proc/meminfo disagree on this box. If the snapshot also shows 0,
+  # MemFree genuinely collapsed between the gate and now.
   vlog "MemFree just before --use-free-memory-pct=99 prepare:" \
        "$(awk '/^MemFree:|^MemAvailable:/ {print $1, $2, $3}' /proc/meminfo \
               | tr '\n' ' ')"
