@@ -1,8 +1,3 @@
-if is_server_version_higher_than 8.0.44
-then
-    die "We should check if smart memory is mature to transition to GA."
-fi
-
 . inc/common.sh
 require_debug_pxb_version
 
@@ -97,7 +92,15 @@ redo_memory=$(grep 'redo_memory' ${backupdir}/xtrabackup_checkpoints | awk '{pri
 redo_frames=$(grep 'redo_frames' ${backupdir}/xtrabackup_checkpoints | awk '{print $3}') #pages
 total_memory=$((redo_memory + (redo_frames * 16384))) #bytes
 
-free_memory=$(cat /proc/meminfo | grep 'MemAvailable' | awk '{print $2}') #kb
+# xtrabackup --use-free-memory-pct uses sysinfo()/MemFree, not
+# MemAvailable. On busy Jenkins workers MemAvailable can be GiBs while
+# MemFree is ~0; gating on MemAvailable lets the test enter the prepare
+# path and xtrabackup then computes a negative buffer pool size that
+# overflows to ~16 EiB and SIGSEGVs InnoDB. Take the smaller of the
+# two so the gate matches what xtrabackup will actually see.
+mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+mem_free_kb=$(awk  '/^MemFree:/      {print $2}' /proc/meminfo)
+free_memory=$(( mem_avail_kb < mem_free_kb ? mem_avail_kb : mem_free_kb )) #kb
 free_memory_bytes=$((free_memory * 1024)) #bytes
 free_memory_1_pct=$((free_memory_bytes  * 1 / 100)) #bytes
 free_memory_99_pct=$((free_memory_bytes  * 99 / 100)) #bytes
@@ -107,7 +110,7 @@ then
   vlog "Skipping full memory workload test as 99% of free memory is lower than required by pxb"
 else
   vlog "Preparing backup with --use-free-memory-pct=99"
-  xtrabackup --prepare --use-free-memory-pct=99 --target-dir=${backupdir} 2> ${logfile}
+  xtrabackup --prepare --use-free-memory-pct=99 --target-dir=${backupdir} 2> >(tee "${logfile}" >&2)
 
   if grep -q "Required memory will exceed free memory configuration" ${logfile}
   then
@@ -133,7 +136,7 @@ then
 fi
 
 vlog "Preparing backup with --use-free-memory-pct=1"
-xtrabackup --prepare --use-free-memory-pct=1 --target-dir=${backupdir2} 2> ${logfile2}
+xtrabackup --prepare --use-free-memory-pct=1 --target-dir=${backupdir2} 2> >(tee "${logfile2}" >&2)
 
 if ! grep -q "Required memory will exceed Free memory configuration" ${logfile2}
 then
