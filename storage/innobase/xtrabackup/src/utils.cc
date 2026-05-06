@@ -23,11 +23,21 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <mach/mach_host.h>
 #include <sys/sysctl.h>
 #else
-#ifdef HAVE_PROCPS_V3
+/* Pick the procps headers based on what cmake/procps.cmake detected.
+ * Be explicit about each supported version: an unrecognised / missing
+ * macro should be a loud compile error rather than silently falling
+ * into the V4 branch. To add support for a future procps version,
+ * extend cmake/procps.cmake to define HAVE_PROCPS_V<N> and add a
+ * matching #elif branch both here and in meminfo_kb() below. */
+#if defined(HAVE_PROCPS_V3)
 #include <proc/sysinfo.h>
-#else
+#elif defined(HAVE_PROCPS_V4)
 #include <libproc2/meminfo.h>
-#endif                                     // HAVE_PROCPS_V3
+#else
+#error \
+    "xtrabackup utils.cc: no supported procps version detected." \
+    " Define HAVE_PROCPS_V3 (libprocps) or HAVE_PROCPS_V4 (libproc2) ; see cmake/procps.cmake."
+#endif
 #endif                                     // __APPLE__
 #include <boost/uuid/uuid.hpp>             // uuid class
 #include <boost/uuid/uuid_generators.hpp>  // generators
@@ -143,35 +153,77 @@ unsigned long host_free_memory() {
   }
   return 0;
 }
-#else
-unsigned long host_total_memory() {
-#ifdef HAVE_PROCPS_V3
+#else /* !__APPLE__ - Linux / procps */
+
+/* meminfo_kind selects which /proc/meminfo field to retrieve. The
+ * version-specific implementation of meminfo_kb() below maps it to
+ * the appropriate procps API call.
+ *
+ * Per-version code is intentionally confined to meminfo_kb(); the
+ * public host_total_memory() / host_free_memory() entry points stay
+ * version-agnostic. Adding support for a new procps version (e.g. a
+ * future V5) means adding one #elif branch to meminfo_kb() and
+ * nothing else. */
+enum class meminfo_kind { total, available };
+
+#if defined(HAVE_PROCPS_V3)
+/* libprocps (procps-ng 3.x). meminfo() seeds the kb_main_* globals
+ * from /proc/meminfo; we then read whichever one the caller asked
+ * for. */
+static unsigned long meminfo_kb(meminfo_kind kind) {
   meminfo();
-  return kb_main_total * 1024;
-#else
-  struct meminfo_info *mem_info;
+  return (kind == meminfo_kind::total) ? kb_main_total : kb_main_available;
+}
+#elif defined(HAVE_PROCPS_V4)
+/* libproc2 (procps-ng 4.x).
+ *
+ * MEMINFO_GET() / procps_meminfo_get() do NOT seed the cache by
+ * themselves; they return whatever is currently stored in the
+ * meminfo_info struct, and a freshly allocated struct holds zeroes.
+ * Calling MEMINFO_GET() right after procps_meminfo_new() therefore
+ * silently returns 0 - this is the trigger half of PXB-3770
+ * (--use-free-memory-pct=N then computes 0% available, feeds 0 into
+ * buf_pool_size_align_down(), unsigned-underflows the buffer pool
+ * size, and SIGSEGVs InnoDB).
+ *
+ * procps_meminfo_select() is the documented "fresh-read, batch-fetch"
+ * primitive of libproc2; it performs an internal /proc/meminfo read
+ * and returns a stack with results in the order requested. It is the
+ * V4 analogue of what the V3 path does via meminfo() before reading
+ * the kb_main_* globals.
+ *
+ * Returns the requested item in kB, or 0 on failure. */
+static unsigned long meminfo_kb(meminfo_kind kind) {
+  struct meminfo_info *mem_info = nullptr;
   if (procps_meminfo_new(&mem_info) < 0) {
     return 0;
   }
+  enum meminfo_item items[] = {(kind == meminfo_kind::total)
+                                   ? MEMINFO_MEM_TOTAL
+                                   : MEMINFO_MEM_AVAILABLE};
+  struct meminfo_stack *stack = procps_meminfo_select(mem_info, items, 1);
+  unsigned long kb = (stack != nullptr) ? stack->head[0].result.ul_int : 0;
+  procps_meminfo_unref(&mem_info);
+  return kb;
+}
+#else
+/* Belt-and-braces: the include block above already errors out for
+ * unknown procps versions, but make the failure trigger at this
+ * point too - if someone copies this file or splits the includes
+ * apart, the helper still won't silently disappear. */
+#error \
+    "xtrabackup utils.cc: no supported procps version detected." \
+    " Define HAVE_PROCPS_V3 (libprocps) or HAVE_PROCPS_V4 (libproc2) ; see cmake/procps.cmake."
+#endif
 
-  return MEMINFO_GET(mem_info, MEMINFO_MEM_TOTAL, ul_int) * 1024;
-#endif  // HAVE_PROCPS_V3
+unsigned long host_total_memory() {
+  return meminfo_kb(meminfo_kind::total) * 1024;
 }
 
 unsigned long host_free_memory() {
-#ifdef HAVE_PROCPS_V3
-  meminfo();
-  return kb_main_available * 1024;
-#else
-  struct meminfo_info *mem_info;
-  if (procps_meminfo_new(&mem_info) < 0) {
-    return 0;
-  }
-
-  return MEMINFO_GET(mem_info, MEMINFO_MEM_AVAILABLE, ul_int) * 1024;
-#endif  // HAVE_PROCPS_V3
+  return meminfo_kb(meminfo_kind::available) * 1024;
 }
-#endif
+#endif /* __APPLE__ */
 
 std::string generate_uuid() {
   boost::uuids::uuid uuid = gen();
