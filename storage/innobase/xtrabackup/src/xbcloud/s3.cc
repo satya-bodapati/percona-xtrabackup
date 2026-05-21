@@ -431,7 +431,7 @@ bool S3_client::create_bucket(const std::string &name) {
   return true;
 }
 
-bool S3_client::probe_api_version_and_lookup(const std::string &bucket, const std::string &backup) {
+bool S3_client::probe_api_version_and_lookup(const std::string &bucket) {
   for (auto lookup : {LOOKUP_DNS, LOOKUP_PATH}) {
     if (bucket_lookup != LOOKUP_AUTO && bucket_lookup != lookup) {
       continue;
@@ -454,8 +454,7 @@ bool S3_client::probe_api_version_and_lookup(const std::string &bucket, const st
       bucket_lookup = lookup;
       api_version = version;
 
-      bool exists;
-      if (object_exists(bucket.c_str(), backup.c_str(), exists)) {
+      if (probe_endpoint(bucket)) {
         msg_ts("%s: Successfully connected.\n", my_progname);
         return true;
       }
@@ -475,33 +474,61 @@ bool S3_client::probe_api_version_and_lookup(const std::string &bucket, const st
   return false;
 }
 
-bool S3_client::bucket_exists(const std::string &name, bool &exists) {
+/*
+  Probe whether the configured (signature version, lookup style, endpoint)
+  combination can reach the S3 service for the given bucket.
+
+  Unlike bucket_exists() the probe is intentionally tolerant of permission
+  errors: a caller that has, e.g., s3:PutObject on the bucket prefix but
+  not s3:ListBucket must still be able to upload backups. AWS CLI and
+  rclone do not pre-flight bucket existence either; the first PutObject
+  will surface a missing bucket clearly via NoSuchBucket. The probe only
+  needs to confirm the request signature was accepted by an S3 endpoint,
+  so we treat any well-formed S3 response (including AccessDenied) as
+  success and only fall through on transport errors or signature/key
+  errors that call for trying the next (lookup, signature-version)
+  combination.
+
+  Treated as probe success:
+    HTTP 2xx                          bucket reachable and accessible
+    HTTP 404                          bucket reachable, absent (or hidden by
+                                      AWS anti-enumeration behaviour)
+    HTTP 403 + any S3 error code
+      EXCEPT SignatureDoesNotMatch
+      and    InvalidAccessKeyId       signature accepted, caller just lacks
+                                      bucket-level read permission
+
+  Treated as probe failure (try next combo, then give up):
+    transport error (DNS / TCP / TLS)
+    HTTP 403 with SignatureDoesNotMatch or InvalidAccessKeyId
+    HTTP 5xx, HTTP 4xx other than 403 / 404
+*/
+bool S3_client::probe_endpoint(const std::string &name) {
   Http_request req(Http_request::HEAD, protocol, hostname(name),
                    bucketname(name) + "/");
   signer->sign_request(hostname(name), name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
-    return false;
-  }
+  if (!http_client->make_request(req, resp)) return false;
 
-  if (resp.ok()) {
-    exists = true;
-    return true;
-  }
+  if (resp.ok() || resp.http_code() == 404) return true;
 
-  if (resp.http_code() == 404) {
-    exists = false;
-    return true;
+  if (resp.http_code() == 403) {
+    S3_response s3_resp;
+    s3_resp.parse_http_response(resp);
+    const std::string &ec = s3_resp.error_code();
+    if (ec != "SignatureDoesNotMatch" && ec != "InvalidAccessKeyId") {
+      return true;
+    }
   }
 
   return false;
 }
 
-bool S3_client::object_exists(const std::string &bucket, const std::string &name, bool &exists) {
-  Http_request req(Http_request::HEAD, protocol, hostname(bucket),
-                   bucketname(bucket) + "/" + name);
-  signer->sign_request(hostname(bucket), bucket, req, time(0));
+bool S3_client::bucket_exists(const std::string &name, bool &exists) {
+  Http_request req(Http_request::HEAD, protocol, hostname(name),
+                   bucketname(name) + "/");
+  signer->sign_request(hostname(name), name, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {

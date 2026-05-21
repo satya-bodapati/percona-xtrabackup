@@ -1511,7 +1511,7 @@ int main(int argc, char **argv) {
     container_name = opt_s3_bucket;
 
     if (!reinterpret_cast<S3_object_store *>(object_store.get())
-             ->probe_api_version_and_lookup(container_name, backup_name)) {
+             ->probe_api_version_and_lookup(container_name)) {
       return EXIT_FAILURE;
     }
     if (ec2_instance->get_is_ec2_instance_with_profile()) {
@@ -1548,7 +1548,7 @@ int main(int argc, char **argv) {
     container_name = opt_google_bucket;
 
     if (!reinterpret_cast<S3_object_store *>(object_store.get())
-             ->probe_api_version_and_lookup(container_name, backup_name)) {
+             ->probe_api_version_and_lookup(container_name)) {
       return EXIT_FAILURE;
     }
   } else if (opt_storage == AZURE) {

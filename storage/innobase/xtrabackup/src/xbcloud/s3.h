@@ -227,15 +227,21 @@ class S3_client {
 
   void set_api_version(s3_api_version_t version) { api_version = version; }
 
-  bool probe_api_version_and_lookup(const std::string &bucket, const std::string &backup);
+  bool probe_api_version_and_lookup(const std::string &bucket);
 
+ private:
+  /* Permission-tolerant probe used internally by probe_api_version_and_lookup.
+     Returns true when the request signature was accepted by an S3 endpoint
+     (any 2xx, 404, or 403 whose S3 error code is not SignatureDoesNotMatch /
+     InvalidAccessKeyId). See implementation comment for the full contract. */
+  bool probe_endpoint(const std::string &name);
+
+ public:
   bool delete_object(const std::string &bucket, const std::string &name);
 
   bool create_bucket(const std::string &name);
 
   bool bucket_exists(const std::string &name, bool &exists);
-
-  bool object_exists(const std::string &bucket, const std::string &name, bool &exists);
 
   bool upload_object(const std::string &bucket, const std::string &name,
                      const Http_buffer &contents);
@@ -305,8 +311,8 @@ class S3_object_store : public Object_store {
   void set_ec2_instance(std::shared_ptr<S3_ec2_instance> instance) {
     s3_client.set_ec2_instance(instance);
   }
-  bool probe_api_version_and_lookup(const std::string &bucket, const std::string &backup) {
-    return s3_client.probe_api_version_and_lookup(bucket, backup);
+  bool probe_api_version_and_lookup(const std::string &bucket) {
+    return s3_client.probe_api_version_and_lookup(bucket);
   }
   virtual bool create_container(const std::string &name) override {
     return s3_client.create_bucket(name);
