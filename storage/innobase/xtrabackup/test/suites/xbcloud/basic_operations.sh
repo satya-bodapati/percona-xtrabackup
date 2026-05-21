@@ -4,6 +4,7 @@ is_xbcloud_credentials_set
 start_server --innodb_file_per_table
 
 write_credentials
+prepare_xbcloud_bucket
 
 load_dbase_schema sakila
 load_dbase_data sakila
