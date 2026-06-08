@@ -144,7 +144,7 @@ make them consecutive on disk if possible. From the other file segment
 we allocate pages for the non-leaf levels of the tree.
 */
 
-#ifdef UNIV_BTR_DEBUG
+#if defined(UNIV_BTR_DEBUG) || defined(XTRABACKUP)
 /** Checks a file segment header within a B-tree root page.
  @return true if valid */
 static bool btr_root_fseg_validate(
@@ -153,12 +153,22 @@ static bool btr_root_fseg_validate(
 {
   ulint offset = mach_read_from_2(seg_header + FSEG_HDR_OFFSET);
 
+#ifdef XTRABACKUP
+  /* In xtrabackup --check-tables we report corruption instead of crashing.
+     A root file-segment header that names a different tablespace, or whose
+     in-page offset is out of range, indicates a corrupted root page. */
+  if (mach_read_from_4(seg_header + FSEG_HDR_SPACE) != space ||
+      offset < FIL_PAGE_DATA || offset > UNIV_PAGE_SIZE - FIL_PAGE_DATA_END) {
+    return false;
+  }
+#else
   ut_a(mach_read_from_4(seg_header + FSEG_HDR_SPACE) == space);
   ut_a(offset >= FIL_PAGE_DATA);
   ut_a(offset <= UNIV_PAGE_SIZE - FIL_PAGE_DATA_END);
+#endif /* XTRABACKUP */
   return true;
 }
-#endif /* UNIV_BTR_DEBUG */
+#endif /* UNIV_BTR_DEBUG || XTRABACKUP */
 
 /** Gets the root node of a tree and x- or s-latches it.
  @return root page, x- or s-latched */
@@ -176,7 +186,10 @@ buf_block_t *btr_root_block_get(
       btr_block_get(page_id, page_size, mode, UT_LOCATION_HERE, index, mtr);
 
   btr_assert_not_corrupted(block, index);
-#ifdef UNIV_BTR_DEBUG
+  /* In xtrabackup --check-tables we report corruption instead of crashing:
+     the root file-segment headers are validated (and reported) in
+     btr_validate_index(), so do not abort here on a corrupt header. */
+#if defined(UNIV_BTR_DEBUG) && !defined(XTRABACKUP)
   if (!dict_index_is_ibuf(index)) {
     const page_t *root = buf_block_get_frame(block);
 
@@ -185,7 +198,7 @@ buf_block_t *btr_root_block_get(
     ut_a(btr_root_fseg_validate(FIL_PAGE_DATA + PAGE_BTR_SEG_TOP + root,
                                 space_id));
   }
-#endif /* UNIV_BTR_DEBUG */
+#endif /* UNIV_BTR_DEBUG && !XTRABACKUP */
 
   return (block);
 }
@@ -4842,6 +4855,17 @@ bool btr_validate_index(
     for (auto offset : {PAGE_BTR_SEG_LEAF, PAGE_BTR_SEG_TOP}) {
       const fseg_header_t *const seg_header = root + PAGE_HEADER + offset;
 #ifdef XTRABACKUP
+      /* Validate FSEG_HDR_SPACE / offset first: a header naming the wrong
+         tablespace would otherwise trip an assertion deeper in the inode
+         lookup. */
+      if (!btr_root_fseg_validate(seg_header, space_id)) {
+        ib::error() << "B-tree corruption: root page of index " << index->name()
+                    << " has a file-segment header that does not belong to"
+                       " this tablespace (bad FSEG_HDR_SPACE or offset)";
+        mtr_commit(&mtr);
+        fil_space_release(space);
+        return false;
+      }
       if (!fseg_root_header_validate(seg_header, space_id, page_size, &mtr)) {
         ib::error() << "B-tree corruption: root page of index " << index->name()
                     << " has an invalid file-segment header"
