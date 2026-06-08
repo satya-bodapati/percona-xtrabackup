@@ -1499,6 +1499,17 @@ bool fil_node_open_file(fil_node_t *file);
 @param[in] node file to close. */
 void fil_node_close_file(fil_node_t *node);
 
+/** When true, Fil_shard::do_io() must never extend a tablespace to satisfy a
+read whose page number falls outside the current file bounds.  Set only for
+the duration of the xtrabackup --check-tables phase, which is strictly
+read-only: an out-of-bounds page number there comes from corrupt page data
+being validated (a bad sibling/child/segment pointer), not from a file that
+xtrabackup copied short and that legitimately needs extending during redo
+apply (see PXB-1819).  Refusing to extend keeps --check-tables from modifying
+the backup and turns the bogus read into an error instead of a multi-terabyte
+file growth. */
+extern bool fil_check_tables_no_extend;
+
 #endif /* XTRABACKUP */
 /** Opens all log files and system tablespace data files.
 They stay open until the database server shutdown. This should be called
