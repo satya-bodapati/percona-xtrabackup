@@ -4819,8 +4819,12 @@ bool btr_validate_index(
 
   mtr_t mtr;
 
-#ifdef UNIV_DEBUG
-  /* Check the FSEG_NOT_FULL_N_USED field stored in the segment inode. */
+#if defined(UNIV_DEBUG) || defined(XTRABACKUP)
+  /* Check the FSEG_NOT_FULL_N_USED field stored in the segment inode.
+     Under xtrabackup --check-tables this block also validates the two root
+     file-segment headers so that a corrupt FSEG_HDR_PAGE_NO -- which would
+     otherwise abort in fseg_inode_get() (ut_a(inode)) -- is reported as
+     corruption and the index check fails cleanly. */
   {
     const space_id_t space_id = dict_index_get_space(index);
 
@@ -4837,17 +4841,29 @@ bool btr_validate_index(
 
     for (auto offset : {PAGE_BTR_SEG_LEAF, PAGE_BTR_SEG_TOP}) {
       const fseg_header_t *const seg_header = root + PAGE_HEADER + offset;
+#ifdef XTRABACKUP
+      if (!fseg_root_header_validate(seg_header, space_id, page_size, &mtr)) {
+        ib::error() << "B-tree corruption: root page of index " << index->name()
+                    << " has an invalid file-segment header"
+                       " (bad FSEG_HDR_PAGE_NO or segment inode)";
+        mtr_commit(&mtr);
+        fil_space_release(space);
+        return false;
+      }
+#endif /* XTRABACKUP */
+#ifdef UNIV_DEBUG
       fseg_inode_t *inode =
           fseg_inode_get(seg_header, space_id, page_size, &mtr);
       File_segment_inode fsi(space_id, page_size, inode, &mtr);
       ut_ad(fsi.verify_not_full_n_used());
+#endif /* UNIV_DEBUG */
     }
 
     mtr_commit(&mtr);
 
     fil_space_release(space);
   }
-#endif /* UNIV_DEBUG */
+#endif /* UNIV_DEBUG || XTRABACKUP */
 
   mtr_start(&mtr);
 
