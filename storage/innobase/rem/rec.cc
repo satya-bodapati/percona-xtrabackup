@@ -42,6 +42,9 @@ external tools. */
 #include "rem/rec.h"
 #include "rem0lrec.h"
 #include "rem0rec.h"
+#ifdef XTRABACKUP
+#include "page0page.h"
+#endif /* XTRABACKUP */
 
 /** Initialize offset for each field in a new style record.
 @param[in]      rec     physical record
@@ -410,6 +413,54 @@ ulint *rec_get_offsets(const rec_t *rec, const dict_index_t *index,
   rec_init_offsets(rec, index, offsets);
   return (offsets);
 }
+
+#ifdef XTRABACKUP
+bool rec_validate_page_chain(const page_t *page) {
+  /* Only COMPACT pages use the REC_NEW_STATUS bits and the relative "next"
+  links checked here.  SDI pages and modern tables are always COMPACT; for the
+  legacy REDUNDANT format we skip this structural pre-check. */
+  if (!page_is_comp(page)) {
+    return true;
+  }
+
+  const rec_t *rec = page + PAGE_NEW_INFIMUM;
+  if (rec_get_status(rec) != REC_STATUS_INFIMUM) {
+    return false;
+  }
+
+  /* Walk infimum -> ... -> supremum.  rec_get_next_offs() returns a
+  page-bounded offset and does not assert under XTRABACKUP, and
+  rec_get_status() only reads masked status bits, so every step stays inside
+  the page and cannot abort -- unlike rec_get_offsets(), which the SDI scan
+  and page_validate() would otherwise call on these records.  The loop is
+  bounded by MAX_REC_PER_PAGE so a corrupt next-link that loops or never
+  reaches supremum terminates instead of spinning. */
+  for (ulint steps = 0; steps <= MAX_REC_PER_PAGE; ++steps) {
+    const ulint next = rec_get_next_offs(rec, true);
+
+    /* The next record must start within the user-record area (at or after
+    supremum) and leave room for a record header. */
+    if (next < PAGE_NEW_SUPREMUM ||
+        next + REC_N_NEW_EXTRA_BYTES >= UNIV_PAGE_SIZE) {
+      return false;
+    }
+
+    rec = page + next;
+
+    const ulint status = rec_get_status(rec);
+    if (status == REC_STATUS_SUPREMUM) {
+      return true; /* reached the end of the chain cleanly */
+    }
+    if (status != REC_STATUS_ORDINARY && status != REC_STATUS_NODE_PTR) {
+      /* INFIMUM mid-chain, or an out-of-range (4..7) status: corrupt. */
+      return false;
+    }
+  }
+
+  /* Did not terminate at supremum within the bound: looping/broken chain. */
+  return false;
+}
+#endif /* XTRABACKUP */
 
 /** The following function determines the offsets to each field
  in the record.  It can reuse a previously allocated array. */

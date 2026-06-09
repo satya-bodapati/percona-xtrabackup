@@ -40,16 +40,19 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "api0api.h"
 #include "api0misc.h"
+#include "btr0btr.h"
 #include "btr0pcur.h"
 #include "dict0crea.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
 #include "dict0priv.h"
+#include "fil0fil.h"
 #include "fsp0fsp.h"
 #include "ha_prototypes.h"
 #include "lob0lob.h"
 #include "lock0lock.h"
 #include "lock0types.h"
+#include "rem0rec.h"
 
 #include "ddl0ddl.h"
 #include "dict0sdi-decompress.h"
@@ -2892,6 +2895,40 @@ dberr_t ib_sdi_get_keys(uint32_t tablespace_id, ib_sdi_vector_t *ib_sdi_vector,
   if (err != DB_SUCCESS) {
     return (err);
   }
+
+#ifdef XTRABACKUP
+  /* During xtrabackup --check-tables (read-only), structurally validate the
+     SDI index root page before scanning it.  The scan below
+     (ib_cursor_first -> row_search_mvcc -> rec_get_offsets) would otherwise
+     abort (rec.cc ut_error) on a record whose REC_STATUS is corrupt.  This
+     turns such corruption into a clean DB_CORRUPTION the dictionary loader
+     reports, instead of crashing. */
+  if (fil_check_tables_no_extend) {
+    ib_cursor_t *cursor = (ib_cursor_t *)ib_crsr;
+    dict_index_t *sdi_index = cursor->prebuilt->index;
+
+    if (sdi_index != nullptr) {
+      mtr_t mtr;
+      mtr_start(&mtr);
+      const page_size_t page_size(dict_table_page_size(sdi_index->table));
+      buf_block_t *root_block =
+          btr_block_get(page_id_t(sdi_index->space, sdi_index->page), page_size,
+                        RW_S_LATCH, UT_LOCATION_HERE, sdi_index, &mtr);
+      const bool sane =
+          root_block != nullptr &&
+          rec_validate_page_chain(buf_block_get_frame(root_block));
+      mtr_commit(&mtr);
+
+      if (!sane) {
+        ib::error() << "check-tables: SDI root page of tablespace "
+                    << tablespace_id
+                    << " has an invalid record chain; cannot safely read SDI.";
+        ib_cursor_close(ib_crsr);
+        return DB_CORRUPTION;
+      }
+    }
+  }
+#endif /* XTRABACKUP */
 
   ib_cursor_stmt_begin(ib_crsr);
   err = ib_cursor_first(ib_crsr);
