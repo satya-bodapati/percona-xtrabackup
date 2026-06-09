@@ -4958,6 +4958,23 @@ bool btr_validate_index(
 
   bool ok = true;
   page_t *root = btr_root_get(index, &mtr);
+
+#ifdef XTRABACKUP
+  /* In xtrabackup --check-tables we report corruption instead of crashing.
+     If the root page's FIL_PAGE_TYPE has been corrupted to a non-index type
+     (e.g. FIL_PAGE_TYPE_ALLOCATED), the father-pointer search done during
+     level validation would abort in btr_cur_search_to_nth_level()
+     (ut_ad(fil_page_index_page_check(page))).  Detect it up front and fail
+     the index check cleanly instead. */
+  if (!fil_page_index_page_check(root)) {
+    ib::error() << "B-tree corruption: root page of index " << index->name()
+                << " has a non-index FIL_PAGE_TYPE (" << fil_page_get_type(root)
+                << ")";
+    mtr_commit(&mtr);
+    return false;
+  }
+#endif /* XTRABACKUP */
+
   ulint n = btr_page_get_level(root);
 
   for (ulint i = 0; i <= n; ++i) {
