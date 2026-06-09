@@ -2878,6 +2878,40 @@ dberr_t ib_sdi_set(uint32_t tablespace_id, const ib_sdi_key_t *ib_sdi_key,
   return (err);
 }
 
+#ifdef XTRABACKUP
+dberr_t ib_sdi_validate(uint32_t tablespace_id, void *thd) {
+  if (fsp_has_sdi(tablespace_id) != DB_SUCCESS) {
+    /* Tablespace has no SDI -- nothing to validate. */
+    return (DB_SUCCESS);
+  }
+
+  ib_trx_t ib_trx = ib_trx_begin(IB_TRX_READ_COMMITTED, false, false, thd);
+
+  ib_crsr_t ib_crsr = nullptr;
+  dberr_t err = ib_sdi_open_table(tablespace_id, ib_trx, &ib_crsr);
+
+  bool ok = true;
+  if (err == DB_SUCCESS) {
+    /* ib_sdi_open_table() built the in-memory SDI dict_index_t for us (with
+       its real root page); validate the whole SDI B-tree through
+       btr_validate_index() -> page_validate(), which is crash-safe under
+       XTRABACKUP and reports corruption instead of aborting. */
+    ib_cursor_t *cursor = (ib_cursor_t *)ib_crsr;
+    dict_index_t *sdi_index = cursor->prebuilt->index;
+    ok = (sdi_index == nullptr) || btr_validate_index(sdi_index, ib_trx, false);
+    ib_cursor_close(ib_crsr);
+  }
+
+  ib_trx_commit(ib_trx);
+  ib_trx_release(ib_trx);
+
+  if (err != DB_SUCCESS) {
+    return (err);
+  }
+  return (ok ? DB_SUCCESS : DB_CORRUPTION);
+}
+#endif /* XTRABACKUP */
+
 /** Get the SDI keys in a tablespace into vector.
 @param[in]      tablespace_id   tablespace id
 @param[in,out]  ib_sdi_vector   vector to hold objects with tablespace types
@@ -2896,39 +2930,9 @@ dberr_t ib_sdi_get_keys(uint32_t tablespace_id, ib_sdi_vector_t *ib_sdi_vector,
     return (err);
   }
 
-#ifdef XTRABACKUP
-  /* During xtrabackup --check-tables (read-only), structurally validate the
-     SDI index root page before scanning it.  The scan below
-     (ib_cursor_first -> row_search_mvcc -> rec_get_offsets) would otherwise
-     abort (rec.cc ut_error) on a record whose REC_STATUS is corrupt.  This
-     turns such corruption into a clean DB_CORRUPTION the dictionary loader
-     reports, instead of crashing. */
-  if (fil_check_tables_no_extend) {
-    ib_cursor_t *cursor = (ib_cursor_t *)ib_crsr;
-    dict_index_t *sdi_index = cursor->prebuilt->index;
-
-    if (sdi_index != nullptr) {
-      mtr_t mtr;
-      mtr_start(&mtr);
-      const page_size_t page_size(dict_table_page_size(sdi_index->table));
-      buf_block_t *root_block =
-          btr_block_get(page_id_t(sdi_index->space, sdi_index->page), page_size,
-                        RW_S_LATCH, UT_LOCATION_HERE, sdi_index, &mtr);
-      const bool sane =
-          root_block != nullptr &&
-          rec_validate_page_chain(buf_block_get_frame(root_block));
-      mtr_commit(&mtr);
-
-      if (!sane) {
-        ib::error() << "check-tables: SDI root page of tablespace "
-                    << tablespace_id
-                    << " has an invalid record chain; cannot safely read SDI.";
-        ib_cursor_close(ib_crsr);
-        return DB_CORRUPTION;
-      }
-    }
-  }
-#endif /* XTRABACKUP */
+  /* Note: xtrabackup --check-tables validates the SDI index up front, once
+     per tablespace, via btr_validate_index() in check_tables_thread_func();
+     so a corrupt SDI is reported before this read path is reached. */
 
   ib_cursor_stmt_begin(ib_crsr);
   err = ib_cursor_first(ib_crsr);

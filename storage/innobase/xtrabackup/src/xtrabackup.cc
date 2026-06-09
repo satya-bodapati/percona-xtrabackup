@@ -45,6 +45,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <my_rnd.h>
 #include <mysql_version.h>
 #include <mysqld.h>
+#include "api0api.h"
 #include "log0files_io.h"
 #include "log0types.h"
 #include "row0quiesce.h"
@@ -6804,6 +6805,20 @@ static void check_tables_thread_func(data_thread_ctxt_t *ctxt) {
     fil_space_t *space = node->space;
 
     if (!fsp_is_ibd_tablespace(space->id)) {
+      continue;
+    }
+
+    /* Validate the SDI index of this tablespace once, before reading it to
+       load the dictionary: a corrupt SDI would otherwise crash the SDI scan
+       (ib_sdi_get_keys -> ... -> rec_get_offsets).  ib_sdi_validate() runs the
+       whole SDI B-tree through btr_validate_index() -> page_validate(), the
+       same crash-safe per-page validator used for user indexes. */
+    if (ib_sdi_validate(space->id, thd) != DB_SUCCESS) {
+      xb::error() << "SDI index of tablespace " << space->name
+                  << " is corrupted.";
+      mutex_enter(ctxt->count_mutex);
+      *(ctxt->error) = true;
+      mutex_exit(ctxt->count_mutex);
       continue;
     }
 

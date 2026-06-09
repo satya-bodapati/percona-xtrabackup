@@ -4331,29 +4331,6 @@ static bool btr_validate_level(
     ut_a(block->page.id.space() == index->space);
 #endif /* XTRABACKUP */
 
-#ifdef XTRABACKUP
-    /* In xtrabackup --check-tables we report corruption instead of crashing.
-       A non-index FIL_PAGE_TYPE on any page of the tree means this is not a
-       valid B-tree page.  Catch it here, while the page is current at its own
-       level: a corrupt internal (non-leaf) page would otherwise abort the
-       father-pointer search in btr_cur_search_to_nth_level()
-       (ut_ad(fil_page_index_page_check(page))), and a corrupt leaf would
-       silently pass because nothing else validates its page type.  Levels are
-       validated top-down with break-on-failure (btr_validate_index), so
-       reporting here also stops lower levels from descending through a bad
-       internal page.  The root is additionally checked in btr_validate_index()
-       before this loop. */
-    if (!fil_page_index_page_check(page)) {
-      btr_validate_report1(index, level, block);
-      ib::error() << "B-tree corruption: page " << block->page.id.page_no()
-                  << " (level " << level << ") has a non-index FIL_PAGE_TYPE ("
-                  << fil_page_get_type(page) << ") in index " << index->name();
-      ret = false;
-      right_page_no = FIL_NULL;
-      goto node_ptr_fails;
-    }
-#endif /* XTRABACKUP */
-
     DBUG_EXECUTE_IF("check_table_wrong_index_id", {
       thread_local bool injected = false;
       if (!injected && btr_page_get_index_id(page) == index->id) {
@@ -4368,22 +4345,34 @@ static bool btr_validate_level(
 
       ib::warn(ER_IB_MSG_40) << "Page is marked as free";
       ret = false;
-
-    } else if (btr_page_get_index_id(page) != index->id) {
-      ib::error(ER_IB_MSG_41) << "Page index id " << btr_page_get_index_id(page)
-                              << " != data dictionary index id " << index->id;
-
-      ret = false;
+#ifdef XTRABACKUP
+      /* A free page in the index is corruption; don't traverse it further. */
+      right_page_no = FIL_NULL;
+      goto node_ptr_fails;
+#endif /* XTRABACKUP */
 
     } else if (!page_validate(page, index, true, blob_map)) {
+      /* page_validate() is the single per-page validator.  Under XTRABACKUP
+         it also performs the page-type, index-id and record-chain checks, so
+         it never aborts on a corrupt page; on failure we stop traversing this
+         level because the father-pointer search and sibling record compares
+         below would otherwise parse a page already known to be corrupt. */
       btr_validate_report1(index, level, block);
       ret = false;
+#ifdef XTRABACKUP
+      right_page_no = FIL_NULL;
+      goto node_ptr_fails;
+#endif /* XTRABACKUP */
 
     } else if (level == 0 && !btr_index_page_validate(block, index)) {
       /* We are on level 0. Check that the records have the right
       number of fields, and field lengths are right. */
 
       ret = false;
+#ifdef XTRABACKUP
+      right_page_no = FIL_NULL;
+      goto node_ptr_fails;
+#endif /* XTRABACKUP */
     }
 
 #ifdef XTRABACKUP
