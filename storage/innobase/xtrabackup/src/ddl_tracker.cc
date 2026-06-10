@@ -939,17 +939,68 @@ static bool truncate_suffix(std::string suffix, std::string &path) {
   return (true);
 }
 
+/** Build the deterministic temporary `db/table` space name used to stage a
+tablespace out of the way during a batch of `.ren` renames. The name is keyed
+by space_id, which is globally unique within the backup, so two staged
+tablespaces can never collide with each other or with any real table name. The
+schema (`db`) is taken from the destination so the temp file lands in a
+directory that is guaranteed to exist.
+@param[in] dest_space_name  destination space name in `db/table` form
+@param[in] space_id         tablespace id (the `.ren` file name)
+@return temporary space name in `db/#ren_tmp_<space_id>` form */
+static std::string ren_tmp_space_name(const std::string &dest_space_name,
+                                      space_id_t space_id) {
+  std::string tmp_table = "#ren_tmp_" + std::to_string(space_id);
+  size_t slash = dest_space_name.find_last_of('/');
+  if (slash == std::string::npos) {
+    return tmp_table;
+  }
+  return dest_space_name.substr(0, slash + 1) + tmp_table;
+}
+
+/** Rename the live tablespace @p space_id (found by its current path) to
+@p new_space_name. Reads the current path from the fil catalog so the call is
+correct regardless of where a previous (possibly crashed) run left the file.
+@param[in] space_id        tablespace id
+@param[in] new_space_name  target space name in `db/table` form
+@return true on success */
+static bool ren_rename_space(space_id_t space_id,
+                             const std::string &new_space_name) {
+  char *cur_name = nullptr, *cur_path = nullptr;
+  bool res = fil_space_read_name_and_filepath(space_id, &cur_name, &cur_path);
+  auto guard = create_scope_guard([&]() {
+    if (cur_name != nullptr) ut::free(cur_name);
+    if (cur_path != nullptr) ut::free(cur_path);
+  });
+
+  if (!res || !os_file_exists(cur_path)) {
+    xb::error() << "ren_rename_space: tablespace with space_id " << space_id
+                << " not found while renaming to " << new_space_name;
+    return false;
+  }
+
+  if (fil_rename_tablespace(space_id, cur_path, new_space_name.c_str(),
+                            nullptr) != DB_SUCCESS) {
+    xb::error() << "ren_rename_space: cannot rename space_id " << space_id
+                << " (" << cur_path << ") to " << new_space_name;
+    return false;
+  }
+  return true;
+}
+
 /**
- * Handles RENAME DDL that happened during the backup taken in reduced mode
- * by processing the file with `.ren` extension.
- * example input: `schema/10.ren` file with file content = `schema/new_name.ibd`
- *        result: tablespace with space_id=10 will be renamed to
- * `schema/new_name.ibd`.
- * @param[in] entry		datadir entry
+ * Collector callback for `.ren` markers. Parses and validates one marker, and
+ * appends it to the batch supplied through @p data. The renames themselves are
+ * applied later by prepare_handle_ren_files_batch().
+ * example input: `schema/10.ren` with content = `schema/new_name.ibd`
+ * @param[in]     entry datadir entry for the `.ren` file
+ * @param[in,out] data  pointer to std::vector<ren_batch_entry_t>
  * @return true on success
  */
-bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
+bool prepare_handle_ren_files(const datadir_entry_t &entry, void *data) {
   if (entry.is_empty_dir) return true;
+
+  auto *batch = static_cast<std::vector<ren_batch_entry_t> *>(data);
 
   std::string ren_file_name = entry.file_name;
   std::string ren_path = entry.path;
@@ -957,7 +1008,12 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
   Fil_path::normalize(ren_path);
   // trim .ren
   truncate_suffix(EXT_REN, ren_file_name);
-  space_id_t source_space_id = std::stoi(ren_file_name);
+
+  ren_batch_entry_t e;
+  e.source_space_id = std::stoi(ren_file_name);
+  e.ren_path = ren_path;
+  e.datadir = entry.datadir;
+  e.needs_ibd_rename = false;
 
   auto result = parse_ren_file(ren_path);
   if (!result) {
@@ -966,7 +1022,7 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
   }
 
   int version = result->first;
-  std::string ren_file_content(result->second);
+  e.ren_file_content = result->second;
 
   if (version != REN_FILE_VERSION) {
     xb::error() << "Unexpected ren file version in " << ren_path
@@ -976,17 +1032,18 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
   }
 
   // trim .ibd
-  std::string dest_space_name = ren_file_content;
-  truncate_suffix(EXT_IBD, dest_space_name);
+  e.dest_space_name = e.ren_file_content;
+  truncate_suffix(EXT_IBD, e.dest_space_name);
 
-  char *dest_path = Fil_path::make_ibd_from_table_name(dest_space_name);
+  char *dest_path = Fil_path::make_ibd_from_table_name(e.dest_space_name);
   auto dest_path_free_guard = create_scope_guard([&]() {
     if (dest_path != nullptr) {
       ut::free(dest_path);
     }
   });
+  e.dest_path = dest_path;
 
-  fil_space_t *fil_space = fil_space_get(source_space_id);
+  fil_space_t *fil_space = fil_space_get(e.source_space_id);
 
   if (fil_space != nullptr) {
     char *source_path = nullptr, *source_space_name = nullptr;
@@ -1008,25 +1065,14 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
       return false;
     }
 
-    // space_id.ren is already with the desired name. Nothing to do.
-    if (source_path != nullptr && dest_path != nullptr &&
-        strcmp(source_path, dest_path) == 0) {
+    // space_id.ren is already with the desired name. The `.ibd` does not need
+    // to move, but the marker (and any incremental .delta/.meta) is still
+    // processed below.
+    if (strcmp(source_path, e.dest_path.c_str()) == 0) {
       xb::info() << "prepare_handle_ren_files: ren_file: " << ren_path
-                 << " already has desired file name: " << dest_path
-                 << " source path is: " << source_path;
-      return true;
-    }
-
-    ut_ad(!os_file_exists(dest_path));
-
-    xb::info() << "prepare_handle_ren_files: renaming " << fil_space->name
-               << " to " << dest_space_name;
-
-    if (!fil_rename_tablespace(fil_space->id, source_path,
-                               dest_space_name.c_str(), NULL)) {
-      xb::error() << "prepare_handle_ren_files: Cannot rename "
-                  << fil_space->name << " to " << dest_space_name;
-      return false;
+                 << " already has desired file name: " << e.dest_path;
+    } else {
+      e.needs_ibd_rename = true;
     }
   } else {
     // In case source file doesn't exist we check if destination file is already
@@ -1034,10 +1080,11 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
     // error
     // in case of incrementals, the original file might be present as .delta
     // So ignore the debug check for incrementals.
-    if (!os_file_exists(dest_path) && !xtrabackup_incremental) {
+    if (!os_file_exists(e.dest_path.c_str()) && !xtrabackup_incremental) {
       xb::error() << "prepare_handle_ren_files: Tablespace with space_id "
-                  << source_space_id << " is not found."
-                  << " Destination path " << dest_path << " is also not found ";
+                  << e.source_space_id << " is not found."
+                  << " Destination path " << e.dest_path
+                  << " is also not found ";
       xb::error() << "The incremental meta map is ";
       fprintf(stderr, "%s", xtrabackup::utils::to_string(meta_map).c_str());
       ut_ad(0);
@@ -1045,41 +1092,117 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
     }
   }
 
-  // rename .delta .meta files as well
-  if (xtrabackup_incremental) {
-    auto [exists, meta_file] = is_in_meta_map(source_space_id);
-    if (exists) {
-      std::string to_path = entry.datadir + ren_file_content;
+  batch->push_back(std::move(e));
+  return true;
+}
 
-      // create .delta path from .meta
-      std::string delta_file = meta_file;
-      truncate_suffix(EXT_META, delta_file);
-      delta_file.append(EXT_DELTA);
+/**
+ * Apply all collected `.ren` renames as a batch. See the header for the
+ * three-phase algorithm and why it is cycle-safe and crash-safe.
+ * @param[in,out] batch collected `.ren` entries
+ * @return true on success
+ */
+bool prepare_handle_ren_files_batch(std::vector<ren_batch_entry_t> &batch) {
+  // Phase 1: move every source out to its space_id-keyed temporary name. This
+  // vacates every final destination name before anyone tries to claim it, so a
+  // rename cycle (swap, rotation) can never hit an "already exists" collision.
+  for (auto &e : batch) {
+    if (e.needs_ibd_rename) {
+      std::string tmp_name =
+          ren_tmp_space_name(e.dest_space_name, e.source_space_id);
 
-      std::string to_delta(to_path + EXT_DELTA);
-      xb::info() << "Renaming incremental delta file from: " << delta_file
-                 << " to: " << to_delta;
-      rename_force(delta_file, to_delta);
+      // On a re-run after a crash the file may already be staged; renaming to
+      // the same name is a no-op we must skip.
+      char *cur_name = nullptr, *cur_path = nullptr;
+      bool res = fil_space_read_name_and_filepath(e.source_space_id, &cur_name,
+                                                  &cur_path);
+      char *tmp_path = Fil_path::make_ibd_from_table_name(tmp_name);
+      bool already_staged =
+          res && tmp_path != nullptr && strcmp(cur_path, tmp_path) == 0;
+      if (cur_name != nullptr) ut::free(cur_name);
+      if (cur_path != nullptr) ut::free(cur_path);
+      if (tmp_path != nullptr) ut::free(tmp_path);
 
-      std::string to_meta(to_path + EXT_META);
-      xb::info() << "Renaming incremental meta file from: " << meta_file
-                 << " to: " << to_meta;
-      rename_force(meta_file, to_meta);
-    } else if (fil_space == nullptr) {
-      // This means the tablespace is neither found in the fullbackup dir
-      // nor in the inc backup directory as .meta and .delta
-      xb::error() << "prepare_handle_ren_files(): failed to handle " << ren_path
-                  << " ren_file content: " << ren_file_content;
-      xb::error() << "The incremental meta map is ";
-      fprintf(stderr, "%s", xtrabackup::utils::to_string(meta_map).c_str());
+      if (!already_staged) {
+        xb::info() << "prepare_handle_ren_files: staging space_id "
+                   << e.source_space_id << " to " << tmp_name;
+        if (!ren_rename_space(e.source_space_id, tmp_name)) {
+          return false;
+        }
+      }
+    }
 
-      ut_ad(0);
-      return false;
+    // Stage incremental .delta/.meta the same way, keyed by space_id.
+    if (xtrabackup_incremental) {
+      auto [exists, meta_file] = is_in_meta_map(e.source_space_id);
+      if (exists) {
+        std::string delta_file = meta_file;
+        truncate_suffix(EXT_META, delta_file);
+        delta_file.append(EXT_DELTA);
+
+        std::string tmp_base =
+            e.datadir + "#ren_tmp_" + std::to_string(e.source_space_id);
+        std::string tmp_delta = tmp_base + EXT_DELTA;
+        std::string tmp_meta = tmp_base + EXT_META;
+
+        if (meta_file != tmp_meta) {
+          xb::info() << "Staging incremental delta file from: " << delta_file
+                     << " to: " << tmp_delta;
+          rename_force(delta_file, tmp_delta);
+          xb::info() << "Staging incremental meta file from: " << meta_file
+                     << " to: " << tmp_meta;
+          rename_force(meta_file, tmp_meta);
+        }
+      } else if (!e.needs_ibd_rename &&
+                 fil_space_get(e.source_space_id) == nullptr) {
+        // Neither a full-backup tablespace nor an incremental .meta/.delta.
+        xb::error() << "prepare_handle_ren_files(): failed to handle "
+                    << e.ren_path
+                    << " ren_file content: " << e.ren_file_content;
+        xb::error() << "The incremental meta map is ";
+        fprintf(stderr, "%s", xtrabackup::utils::to_string(meta_map).c_str());
+        ut_ad(0);
+        return false;
+      }
     }
   }
 
-  // delete the .ren file, we don't need it anymore
-  os_file_delete(0, ren_path.c_str());
+  // Phase 2: move each staged file to its final destination. Every destination
+  // name was freed in phase 1, so no collision is possible here.
+  for (auto &e : batch) {
+    if (e.needs_ibd_rename) {
+      xb::info() << "prepare_handle_ren_files: renaming space_id "
+                 << e.source_space_id << " to " << e.dest_space_name;
+      if (!ren_rename_space(e.source_space_id, e.dest_space_name)) {
+        return false;
+      }
+    }
+
+    if (xtrabackup_incremental) {
+      std::string tmp_base =
+          e.datadir + "#ren_tmp_" + std::to_string(e.source_space_id);
+      std::string tmp_delta = tmp_base + EXT_DELTA;
+      std::string tmp_meta = tmp_base + EXT_META;
+      if (os_file_exists(tmp_meta.c_str())) {
+        std::string to_path = e.datadir + e.ren_file_content;
+        std::string to_delta(to_path + EXT_DELTA);
+        xb::info() << "Renaming incremental delta file from: " << tmp_delta
+                   << " to: " << to_delta;
+        rename_force(tmp_delta, to_delta);
+        std::string to_meta(to_path + EXT_META);
+        xb::info() << "Renaming incremental meta file from: " << tmp_meta
+                   << " to: " << to_meta;
+        rename_force(tmp_meta, to_meta);
+      }
+    }
+  }
+
+  // Phase 3: the renames are committed; drop the markers. Doing this last keeps
+  // the operation restartable: as long as a `.ren` exists, a re-run will redo
+  // the (idempotent) phases and converge to the same final state.
+  for (auto &e : batch) {
+    os_file_delete(0, e.ren_path.c_str());
+  }
   return true;
 }
 

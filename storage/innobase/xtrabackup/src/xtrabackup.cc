@@ -7026,12 +7026,24 @@ skip_check:
       goto error_cleanup;
     }
 
-    // This should be done after processing .meta and .del
-    if (!xb_process_datadir(
-            xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
-            EXT_REN.c_str(), prepare_handle_ren_files, NULL)) {
-      xb_data_files_close();
-      goto error_cleanup;
+    // This should be done after processing .meta and .del.
+    // Collect every .ren marker first, then apply the renames as one batch so
+    // that rename cycles produced by atomic table-rename swaps (PXB-3808) are
+    // resolved via temporary staging names instead of failing on an already
+    // existing destination file. Scoped in its own block so the non-trivial
+    // local does not cross the goto error_cleanup label.
+    {
+      std::vector<ren_batch_entry_t> ren_batch;
+      if (!xb_process_datadir(
+              xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
+              EXT_REN.c_str(), prepare_handle_ren_files, &ren_batch)) {
+        xb_data_files_close();
+        goto error_cleanup;
+      }
+      if (!prepare_handle_ren_files_batch(ren_batch)) {
+        xb_data_files_close();
+        goto error_cleanup;
+      }
     }
 
     xb_data_files_close();

@@ -173,16 +173,59 @@ void insert_into_meta_map(space_id_t space_id, const std::string &meta_path);
 else return <false, ""> if it doesnt exist */
 std::tuple<bool, std::string> is_in_meta_map(space_id_t space_id);
 
+/** Parsed representation of a single `.ren` marker, gathered during the
+datadir scan so that all renames can be applied as one batch. Processing the
+markers one-by-one is unsafe when reduced-lock backups produce rename cycles
+(e.g. an atomic two-table swap), because a destination filename can still be
+occupied by another tablespace that has not been moved yet. */
+struct ren_batch_entry_t {
+  /** tablespace id, taken from the `<space_id>.ren` file name */
+  space_id_t source_space_id;
+  /** absolute path of the `<space_id>.ren` marker; deleted only after the
+  whole batch is applied */
+  std::string ren_path;
+  /** final destination space name in `db/table` form (no extension) */
+  std::string dest_space_name;
+  /** absolute final destination `.ibd` path */
+  std::string dest_path;
+  /** raw `.ren` content (`db/table.ibd`), used to build incremental
+  `.delta`/`.meta` destination paths */
+  std::string ren_file_content;
+  /** incremental backup datadir of the marker */
+  std::string datadir;
+  /** true when a live tablespace exists for source_space_id and it is not
+  already at its destination name (i.e. the `.ibd` needs to move) */
+  bool needs_ibd_rename;
+};
+
 /**
- * Handle DDL for renamed files
- * example input: test/10.ren file with content = test/new_name.ibd ;
- *        result: tablespace with space_id=10 will be renamed to
- * test/new_name.ibd
+ * Collector callback for `.ren` markers. Parses and validates one marker and
+ * appends it to the batch supplied through @p data. The actual renames are
+ * performed later by prepare_handle_ren_files_batch().
+ * example input: test/10.ren file with content = test/new_name.ibd
+ * @param[in]     entry datadir entry for the `.ren` file
+ * @param[in,out] data  pointer to std::vector<ren_batch_entry_t> to append to
  * @return true on success
  */
 bool prepare_handle_ren_files(
     const datadir_entry_t &entry, /*!<in: datadir entry */
-    void * /*data*/);
+    void *data /*!<in,out: std::vector<ren_batch_entry_t> * */);
+
+/**
+ * Apply all collected `.ren` renames as a batch in two phases so that rename
+ * cycles (atomic swaps, N-way rotations) are handled safely:
+ *   1. move every source tablespace (and incremental .delta/.meta) to a
+ *      deterministic temporary name keyed by space_id, freeing every final
+ *      destination name;
+ *   2. move each temporary file to its final destination;
+ *   3. delete the `.ren` markers.
+ * The deterministic temp name plus the fact that markers are deleted last make
+ * the operation idempotent and therefore crash-safe across a re-run of
+ * --prepare.
+ * @param[in,out] batch collected `.ren` entries
+ * @return true on success
+ */
+bool prepare_handle_ren_files_batch(std::vector<ren_batch_entry_t> &batch);
 
 /**
  * Handle .crpt files. These files should be removed before we do *.ibd scan
