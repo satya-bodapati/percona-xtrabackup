@@ -14,7 +14,8 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 ########################################################################
-# xbcloud binary
+# xbcloud binary  +  xbcloud_internal OBJECT library shared with
+# xtrabackup (Phase 2 ds_cloud reuses the multipart upload machinery).
 ########################################################################
 
 INCLUDE(gcrypt)
@@ -41,19 +42,36 @@ INCLUDE_DIRECTORIES(
   ${LIBEV_INCLUDE_DIRS}
   )
 
-MYSQL_ADD_EXECUTABLE(xbcloud
-  xbcloud.cc
-  ../xbstream_read.cc
+# Shared multipart / HTTP / object-store implementation. Both xbcloud
+# and (Phase 2) xtrabackup's ds_cloud link against this. Keep all the
+# Object_store / Multipart_uploader / Http_client / signer / per-backend
+# client sources here -- only the xbcloud binary's main + version check
+# stay xbcloud-specific.
+ADD_LIBRARY(xbcloud_internal OBJECT
   http.cc
   object_store.cc
   azure.cc
   s3.cc
   s3_ec2.cc
-  ../xbcrypt_common.cc
-  ../file_utils.cc
   swift.cc
   multipart.cc
-  library_version_check.cc)
+  )
+
+SET_TARGET_PROPERTIES(xbcloud_internal PROPERTIES POSITION_INDEPENDENT_CODE 1)
+
+# OBJECT libraries don't inherit interface include dirs the same way
+# regular targets do; pull them in explicitly so rapidjson and curl
+# headers resolve when xtrabackup compiles us too.
+TARGET_LINK_LIBRARIES(xbcloud_internal PUBLIC extra::rapidjson ext::curl)
+
+MYSQL_ADD_EXECUTABLE(xbcloud
+  xbcloud.cc
+  ../xbstream_read.cc
+  ../xbcrypt_common.cc
+  ../file_utils.cc
+  library_version_check.cc
+  $<TARGET_OBJECTS:xbcloud_internal>
+  )
 
 SET_TARGET_PROPERTIES(xbcloud
         PROPERTIES LINKER_LANGUAGE CXX
@@ -80,10 +98,8 @@ IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
       )
 
     ADD_EXECUTABLE(xbcloud-t xbcloud-t.cc
-      http.cc
-      s3.cc
-      azure.cc
-      swift.cc)
+      $<TARGET_OBJECTS:xbcloud_internal>
+      )
 
     TARGET_LINK_LIBRARIES(xbcloud-t
       ${GCRYPT_LIBS}
