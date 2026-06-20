@@ -151,7 +151,11 @@ typedef enum {
   DS_TYPE_ENCRYPT,
   DS_TYPE_DECRYPT,
   DS_TYPE_TMPFILE,
-  DS_TYPE_BUFFER
+  DS_TYPE_BUFFER,
+  /* PXB-3671: write each file directly to an S3/GCS/Azure/Swift bucket via
+     the shared xbcloud multipart upload machinery. Configured via the
+     global ds_cloud_config_t struct populated from --cloud-* CLI options. */
+  DS_TYPE_CLOUD
 } ds_type_t;
 
 /************************************************************************

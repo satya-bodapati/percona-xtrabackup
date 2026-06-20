@@ -30,6 +30,12 @@ INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
 
 FIND_GCRYPT()
 
+# libev is needed by ds_cloud (and xbcloud_internal) for the libev-driven
+# Event_handler that drives multipart uploads. Pull it in at the parent
+# level so xtrabackup's link finds the libraries.
+INCLUDE(libev)
+FIND_EV()
+
 IF(NOT APPLE)
   FIND_PROCPS()
 ENDIF()
@@ -42,8 +48,10 @@ INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/sql
   ${CMAKE_SOURCE_DIR}/storage/innobase/xtrabackup/src/quicklz
   ${CMAKE_SOURCE_DIR}/storage/innobase/xtrabackup/src/crc
+  ${CMAKE_SOURCE_DIR}/storage/innobase/xtrabackup/src
   ${GCRYPT_INCLUDE_DIR}
   ${CURL_INCLUDE_DIRS}
+  ${LIBEV_INCLUDE_DIRS}
   ${CMAKE_CURRENT_BINARY_DIR}
   )
 
@@ -80,6 +88,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   datasink.cc
   ddl_tracker.cc
   ds_buffer.cc
+  ds_cloud.cc
   ds_compress.cc
   ds_compress_lz4.cc
   ds_compress_zstd.cc
@@ -109,6 +118,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   redo_log_consumer.cc
   redo_log.cc
   ${CMAKE_SOURCE_DIR}/sql-common/client_authentication.cc
+  $<TARGET_OBJECTS:xbcloud_internal>
   )
 
 SET_TARGET_PROPERTIES(xtrabackup PROPERTIES ENABLE_EXPORTS true)
@@ -127,7 +137,10 @@ TARGET_LINK_LIBRARIES(xtrabackup
   minchassis
   keyring_common
   ${GCRYPT_LIBS}
+  ${LIBEV_LIBRARIES}
   ext::icu
+  ext::curl
+  extra::rapidjson
   crc
   )
 
@@ -174,6 +187,14 @@ MYSQL_ADD_EXECUTABLE(xbstream
 MY_ADD_COMPILE_DEFINITIONS(
   ${BUNDLED_LZ4_PATH}/xxhash.c
   COMPILE_DEFINITIONS XXH_NAMESPACE=MY_
+  )
+
+# xbstream does not need ds_cloud; gate it out so we don't drag libev
+# and the xbcloud OBJECT library into a tool that doesn't use them.
+MY_ADD_COMPILE_DEFINITIONS(
+  datasink.cc
+  COMPILE_DEFINITIONS XB_NO_CLOUD
+  TARGETS xbstream
   )
 ADD_COMPILE_FLAGS(
     ${BUNDLED_LZ4_PATH}/xxhash.c

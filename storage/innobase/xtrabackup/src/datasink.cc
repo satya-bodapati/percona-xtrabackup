@@ -32,6 +32,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "ds_encrypt.h"
 #include "ds_fifo.h"
 #include "ds_local.h"
+#ifndef XB_NO_CLOUD
+#include "ds_cloud.h"
+#endif
 #include "ds_stdout.h"
 #include "ds_tmpfile.h"
 #include "ds_xbstream.h"
@@ -86,6 +89,11 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
     case DS_TYPE_BUFFER:
       ds = &datasink_buffer;
       break;
+#ifndef XB_NO_CLOUD
+    case DS_TYPE_CLOUD:
+      ds = &datasink_cloud;
+      break;
+#endif
     default:
       msg("Unknown datasink type: %d\n", type);
       xb_ad(0);
