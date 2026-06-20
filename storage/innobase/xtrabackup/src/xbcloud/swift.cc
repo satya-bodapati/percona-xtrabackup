@@ -76,7 +76,7 @@ bool Keystone_client::temp_auth(auth_info_t &auth_info) {
   req.add_header("X-Auth-Key", key);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(req, resp, "keystone-temp-auth")) {
     return false;
   }
 
@@ -169,7 +169,7 @@ bool Keystone_client::auth_v2(const std::string &swift_region,
   req.append_payload(payload, s.GetSize());
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(req, resp, "keystone-auth-v2")) {
     return false;
   }
 
@@ -430,7 +430,7 @@ bool Keystone_client::auth_v3(const std::string &swift_region,
   req.append_payload(payload);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(req, resp, "keystone-auth-v3")) {
     return false;
   }
 
@@ -596,7 +596,7 @@ bool Swift_client::delete_object(const std::string &container,
   req.add_header("X-Auth-Token", token);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
     return false;
   }
 
@@ -657,7 +657,7 @@ Http_buffer Swift_client::download_object(const std::string &container,
   req.add_header("X-Auth-Token", token);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
     success = false;
     return Http_buffer();
   }
@@ -685,7 +685,7 @@ bool Swift_client::create_container(const std::string &name) {
   req.add_header("X-Auth-Token", token);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, name, name, req, resp)) {
     return false;
   }
 
@@ -706,7 +706,7 @@ bool Swift_client::container_exists(const std::string &name, bool &exists) {
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, name, name, req, resp)) {
     return false;
   }
 
@@ -738,7 +738,7 @@ bool Swift_client::upload_object(const std::string &container,
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
     return false;
   }
 
@@ -847,7 +847,8 @@ bool Swift_client::list_objects_with_prefix(const std::string &container,
 
     Http_response resp;
 
-    if (!http_client->make_request(req, resp)) {
+    if (!http_client->make_request_with_retry(this, container, prefix, req,
+                                              resp)) {
       return false;
     }
 
@@ -891,6 +892,189 @@ bool Swift_client::list_objects_with_prefix(const std::string &container,
   }
 
   return true;
+}
+
+/*****************************************************************************
+ * Swift Static Large Object multipart (PXB-3671 prototype).
+ *
+ * Swift cannot accept a single PUT larger than 5 GiB, so large files are
+ * uploaded as several "segments" plus a small manifest object. The manifest
+ * is PUT to the final user-visible key with ?multipart-manifest=put and a
+ * JSON body listing segments in order. Swift serves GETs on the manifest as
+ * if the original logical file were one object, even when the segments live
+ * in a sibling pseudo-directory.
+ *
+ * Segment layout for object NAME under CONTAINER:
+ *   CONTAINER/NAME_segments/000001
+ *   CONTAINER/NAME_segments/000002
+ *   ...
+ * Manifest goes to CONTAINER/NAME.
+ *
+ * upload_id is the per-upload segments prefix (allows multiple uploads to
+ * coexist on the same key without segment collisions in the rare case).
+ * upload_part stores "<path>|<md5_hex>|<size>" in the part_id since the
+ * manifest needs all three for each segment.
+ *****************************************************************************/
+
+bool Swift_client::init_multipart_upload(const std::string &container,
+                                         const std::string &name,
+                                         std::string &upload_id) {
+  (void)container;
+  upload_id = name + "_segments";
+  return true;
+}
+
+bool Swift_client::upload_part(const std::string &container,
+                               const std::string &name,
+                               const std::string &upload_id, int part_number,
+                               const Http_buffer &contents,
+                               std::string &part_id) {
+  (void)name;
+  std::ostringstream seg;
+  seg << upload_id << "/" << std::setw(6) << std::setfill('0') << part_number;
+  std::string segment_obj = seg.str();
+
+  Http_request req(Http_request::PUT, protocol, host,
+                   path + container + "/" + segment_obj);
+  req.append_payload(contents);
+  req.add_header("Content-Type", "application/octet-stream");
+  req.add_header("X-Auth-Token", token);
+  std::string md5_hex = hex_encode(req.payload().md5());
+  req.add_header("ETag", md5_hex);
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
+    msg_ts("%s: swift upload_part: transport failure for %s/%s\n",
+           my_progname, container.c_str(), segment_obj.c_str());
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: swift upload_part: http %ld for %s/%s\n", my_progname,
+           resp.http_code(), container.c_str(), segment_obj.c_str());
+    return false;
+  }
+
+  std::ostringstream id;
+  id << "/" << container << "/" << segment_obj << "|" << md5_hex << "|"
+     << contents.size();
+  part_id = id.str();
+  return true;
+}
+
+bool Swift_client::async_upload_part(
+    const std::string &container, const std::string &name,
+    const std::string &upload_id, int part_number, const Http_buffer &contents,
+    Event_handler *h, part_callback_t callback) {
+  (void)name;
+  std::ostringstream seg;
+  seg << upload_id << "/" << std::setw(6) << std::setfill('0') << part_number;
+  std::string segment_obj = seg.str();
+  std::string seg_path = "/" + container + "/" + segment_obj;
+  size_t bytes = contents.size();
+
+  Http_request *req =
+      new Http_request(Http_request::PUT, protocol, host,
+                       path + container + "/" + segment_obj);
+  req->append_payload(contents);
+  req->add_header("Content-Type", "application/octet-stream");
+  req->add_header("X-Auth-Token", token);
+  std::string md5_hex = hex_encode(req->payload().md5());
+  req->add_header("ETag", md5_hex);
+
+  Http_response *resp = new Http_response();
+
+  /* Build the part_id ahead of time; the manifest format used by
+     complete_multipart_upload is "<seg_path>|<md5>|<size>". */
+  std::ostringstream id;
+  id << seg_path << "|" << md5_hex << "|" << bytes;
+  std::string part_id = id.str();
+
+  auto inner = [callback, part_id](bool ok, const Http_buffer & /*body*/) {
+    callback(ok, ok ? part_id : std::string());
+  };
+
+  http_client->make_async_request(
+      *req, *resp, h,
+      std::bind(Swift_client::upload_callback, this, container, name, req, resp,
+                http_client, h, async_upload_callback_t(inner),
+                std::placeholders::_1, std::placeholders::_2, 1));
+
+  return true;
+}
+
+static bool swift_parse_part_id(const std::string &part_id, std::string &path,
+                                std::string &etag, size_t &size) {
+  size_t p1 = part_id.find('|');
+  if (p1 == std::string::npos) return false;
+  size_t p2 = part_id.find('|', p1 + 1);
+  if (p2 == std::string::npos) return false;
+  path = part_id.substr(0, p1);
+  etag = part_id.substr(p1 + 1, p2 - p1 - 1);
+  size = std::stoull(part_id.substr(p2 + 1));
+  return true;
+}
+
+bool Swift_client::complete_multipart_upload(
+    const std::string &container, const std::string &name,
+    const std::string &upload_id,
+    const std::vector<std::pair<int, std::string>> &parts) {
+  (void)upload_id;
+  std::stringstream body;
+  body << "[";
+  bool first = true;
+  for (const auto &p : parts) {
+    std::string seg_path, etag;
+    size_t sz;
+    if (!swift_parse_part_id(p.second, seg_path, etag, sz)) {
+      msg_ts("%s: swift complete: malformed part_id for %s/%s\n", my_progname,
+             container.c_str(), name.c_str());
+      return false;
+    }
+    if (!first) body << ",";
+    first = false;
+    body << "{\"path\":\"" << seg_path << "\",\"etag\":\"" << etag
+         << "\",\"size_bytes\":" << sz << "}";
+  }
+  body << "]";
+  std::string body_str = body.str();
+
+  Http_request req(Http_request::PUT, protocol, host,
+                   path + container + "/" + name);
+  req.add_param("multipart-manifest", "put");
+  req.add_header("Content-Type", "application/json");
+  req.add_header("X-Auth-Token", token);
+  req.append_payload(body_str.data(), body_str.size());
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
+    msg_ts("%s: swift complete: transport failure for %s/%s\n", my_progname,
+           container.c_str(), name.c_str());
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: swift complete: http %ld for %s/%s\n", my_progname,
+           resp.http_code(), container.c_str(), name.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool Swift_client::abort_multipart_upload(const std::string &container,
+                                          const std::string &name,
+                                          const std::string &upload_id) {
+  /* Best-effort: list and delete the per-upload segments. We do not know
+     which segments succeeded from this layer, so list by prefix and delete
+     each. */
+  (void)name;
+  std::vector<std::string> segments;
+  if (!list_objects_with_prefix(container, upload_id + "/", segments)) {
+    return false;
+  }
+  bool ok = true;
+  for (const auto &seg : segments) {
+    if (!delete_object(container, seg)) ok = false;
+  }
+  return ok;
 }
 
 }  // namespace xbcloud

@@ -260,6 +260,44 @@ class S3_client {
                                 const std::string &prefix,
                                 std::vector<std::string> &objects);
 
+  /* Multipart upload (PXB-3671 prototype).
+     init_multipart_upload    -> POST  /bucket/key?uploads        (sync)
+     upload_part              -> PUT   /bucket/key?partNumber=N&uploadId=X (sync, kept for back-compat)
+     async_upload_part        -> same as upload_part but async    (PXB-3671 v2)
+     complete_multipart_upload-> POST  /bucket/key?uploadId=X     (sync)
+     abort_multipart_upload   -> DELETE /bucket/key?uploadId=X    (sync) */
+  bool init_multipart_upload(const std::string &bucket, const std::string &name,
+                             std::string &upload_id);
+  bool upload_part(const std::string &bucket, const std::string &name,
+                   const std::string &upload_id, int part_number,
+                   const Http_buffer &contents, std::string &etag);
+  /**
+   * Async variant. Dispatches UploadPart through Event_handler. Callback fires
+   * with (ok, etag). The bytes in `contents` are copied into the request body
+   * before this returns; the caller may release `contents` immediately.
+   */
+  using part_callback_t = std::function<void(bool ok, std::string etag)>;
+  bool async_upload_part(const std::string &bucket, const std::string &name,
+                         const std::string &upload_id, int part_number,
+                         const Http_buffer &contents, Event_handler *h,
+                         part_callback_t callback);
+  bool complete_multipart_upload(const std::string &bucket,
+                                 const std::string &name,
+                                 const std::string &upload_id,
+                                 const std::vector<std::pair<int, std::string>>
+                                     &parts);
+  bool abort_multipart_upload(const std::string &bucket,
+                              const std::string &name,
+                              const std::string &upload_id);
+
+  /* When set, bucket_exists() suppresses per-attempt diagnostic logging
+     (HTTP code, x-amz headers, AWS error code/message). Used by
+     probe_api_version_and_lookup so that early-failed combinations
+     don't print confusing errors before a later combination succeeds.
+     If the entire probe fails, the probe re-runs the last attempt with
+     this off so the user sees the real error. */
+  bool quiet_diagnostics{false};
+
   ulong get_max_retries() { return max_retries; }
 
   ulong get_max_backoff() { return max_backoff; }
@@ -362,6 +400,41 @@ class S3_object_store : public Object_store {
                                       const std::string &name,
                                       bool &success) override {
     return s3_client.download_object(container, name, success);
+  }
+
+  virtual bool init_multipart_upload(const std::string &container,
+                                     const std::string &object,
+                                     std::string &upload_id) override {
+    return s3_client.init_multipart_upload(container, object, upload_id);
+  }
+  virtual bool upload_part(const std::string &container,
+                           const std::string &object,
+                           const std::string &upload_id, int part_number,
+                           const Http_buffer &contents,
+                           std::string &part_id) override {
+    return s3_client.upload_part(container, object, upload_id, part_number,
+                                 contents, part_id);
+  }
+  virtual bool upload_part_async(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id, int part_number,
+      const Http_buffer &contents, Event_handler *h,
+      std::function<void(bool, std::string)> callback) override {
+    return s3_client.async_upload_part(container, object, upload_id,
+                                       part_number, contents, h,
+                                       std::move(callback));
+  }
+  virtual bool complete_multipart_upload(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id,
+      const std::vector<multipart_part_t> &parts) override {
+    return s3_client.complete_multipart_upload(container, object, upload_id,
+                                               parts);
+  }
+  virtual bool abort_multipart_upload(const std::string &container,
+                                      const std::string &object,
+                                      const std::string &upload_id) override {
+    return s3_client.abort_multipart_upload(container, object, upload_id);
   }
 };
 

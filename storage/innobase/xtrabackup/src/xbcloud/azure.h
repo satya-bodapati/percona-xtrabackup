@@ -179,6 +179,31 @@ class Azure_client {
 
   /* Not used */
   std::string hostname(const std::string &not_used) const { return host; }
+
+  /* Multipart upload (PXB-3671 prototype).
+     Azure block blob uses Put Block + Put Block List instead of S3-style
+     multipart. There is no explicit "init" call; the first Put Block opens
+     the blob's uncommitted block list implicitly. init_multipart_upload
+     here just mints a session marker. */
+  bool init_multipart_upload(const std::string &container,
+                             const std::string &name, std::string &upload_id);
+  bool upload_part(const std::string &container, const std::string &name,
+                   const std::string &upload_id, int part_number,
+                   const Http_buffer &contents, std::string &block_id);
+  /* PXB-3671: async variant via Event_handler. Submits Put Block then
+     fires the callback with the block_id on completion. */
+  using part_callback_t = std::function<void(bool ok, std::string block_id)>;
+  bool async_upload_part(const std::string &container, const std::string &name,
+                         const std::string &upload_id, int part_number,
+                         const Http_buffer &contents, Event_handler *h,
+                         part_callback_t callback);
+  bool complete_multipart_upload(
+      const std::string &container, const std::string &name,
+      const std::string &upload_id,
+      const std::vector<std::pair<int, std::string>> &parts);
+  bool abort_multipart_upload(const std::string &container,
+                              const std::string &name,
+                              const std::string &upload_id);
 };
 
 class Azure_object_store : public Object_store {
@@ -219,6 +244,41 @@ class Azure_object_store : public Object_store {
                              const std::string &object,
                              const Http_buffer &contents) override {
     return azure_client.upload_object(container, object, contents);
+  }
+
+  virtual bool init_multipart_upload(const std::string &container,
+                                     const std::string &object,
+                                     std::string &upload_id) override {
+    return azure_client.init_multipart_upload(container, object, upload_id);
+  }
+  virtual bool upload_part(const std::string &container,
+                           const std::string &object,
+                           const std::string &upload_id, int part_number,
+                           const Http_buffer &contents,
+                           std::string &part_id) override {
+    return azure_client.upload_part(container, object, upload_id, part_number,
+                                    contents, part_id);
+  }
+  virtual bool upload_part_async(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id, int part_number,
+      const Http_buffer &contents, Event_handler *h,
+      std::function<void(bool, std::string)> callback) override {
+    return azure_client.async_upload_part(container, object, upload_id,
+                                          part_number, contents, h,
+                                          std::move(callback));
+  }
+  virtual bool complete_multipart_upload(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id,
+      const std::vector<multipart_part_t> &parts) override {
+    return azure_client.complete_multipart_upload(container, object, upload_id,
+                                                  parts);
+  }
+  virtual bool abort_multipart_upload(const std::string &container,
+                                      const std::string &object,
+                                      const std::string &upload_id) override {
+    return azure_client.abort_multipart_upload(container, object, upload_id);
   }
   virtual bool async_upload_object(
       const std::string &container, const std::string &object,

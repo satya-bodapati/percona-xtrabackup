@@ -109,10 +109,15 @@ class Keystone_client {
   }
 };
 
-/* Not used */
+/* Swift does not need request signing — auth happens via the
+   X-Auth-Token header set per-request by each Swift_client method.
+   This class is a stub so the templated retry/async helpers can call
+   client->signer->sign_request() uniformly across S3, Azure, and Swift
+   without a special-case. The method does nothing. */
 class Swift_signer {
  public:
-  void sign_request(std::string, std::string &, Http_request &, time_t) {}
+  void sign_request(const std::string &, const std::string &, Http_request &,
+                    time_t) {}
   ~Swift_signer() {}
 };
 
@@ -158,7 +163,8 @@ class Swift_client {
   Swift_client(const Http_client *client, const std::string &url,
                const std::string &token, const ulong max_retries,
                const ulong max_backoff)
-      : http_client(client),
+      : signer(std::make_unique<Swift_signer>()),
+        http_client(client),
         url(url),
         token(token),
         max_retries(max_retries),
@@ -202,6 +208,31 @@ class Swift_client {
 
   /* Not used */
   std::string hostname(const std::string &not_used) const { return host; }
+
+  /* Multipart upload (PXB-3671 prototype) via Static Large Objects (SLO).
+     Segments are uploaded as ordinary objects to <name>_segments/<part>
+     under the same container, then a manifest object is PUT at the final
+     key with ?multipart-manifest=put referencing all segments in order. */
+  bool init_multipart_upload(const std::string &container,
+                             const std::string &name, std::string &upload_id);
+  bool upload_part(const std::string &container, const std::string &name,
+                   const std::string &upload_id, int part_number,
+                   const Http_buffer &contents, std::string &segment_key);
+  /* PXB-3671: async variant via Event_handler. Submits the segment PUT
+     and fires the callback with "<seg_path>|<md5>|<size>" on completion
+     (same encoding as the sync upload_part path). */
+  using part_callback_t = std::function<void(bool ok, std::string part_id)>;
+  bool async_upload_part(const std::string &container, const std::string &name,
+                         const std::string &upload_id, int part_number,
+                         const Http_buffer &contents, Event_handler *h,
+                         part_callback_t callback);
+  bool complete_multipart_upload(
+      const std::string &container, const std::string &name,
+      const std::string &upload_id,
+      const std::vector<std::pair<int, std::string>> &parts);
+  bool abort_multipart_upload(const std::string &container,
+                              const std::string &name,
+                              const std::string &upload_id);
 };
 
 class Swift_object_store : public Object_store {
@@ -265,6 +296,41 @@ class Swift_object_store : public Object_store {
                                       const std::string &name,
                                       bool &success) override {
     return swift_client.download_object(container, name, success);
+  }
+
+  virtual bool init_multipart_upload(const std::string &container,
+                                     const std::string &object,
+                                     std::string &upload_id) override {
+    return swift_client.init_multipart_upload(container, object, upload_id);
+  }
+  virtual bool upload_part(const std::string &container,
+                           const std::string &object,
+                           const std::string &upload_id, int part_number,
+                           const Http_buffer &contents,
+                           std::string &part_id) override {
+    return swift_client.upload_part(container, object, upload_id, part_number,
+                                    contents, part_id);
+  }
+  virtual bool upload_part_async(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id, int part_number,
+      const Http_buffer &contents, Event_handler *h,
+      std::function<void(bool, std::string)> callback) override {
+    return swift_client.async_upload_part(container, object, upload_id,
+                                          part_number, contents, h,
+                                          std::move(callback));
+  }
+  virtual bool complete_multipart_upload(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id,
+      const std::vector<multipart_part_t> &parts) override {
+    return swift_client.complete_multipart_upload(container, object, upload_id,
+                                                  parts);
+  }
+  virtual bool abort_multipart_upload(const std::string &container,
+                                      const std::string &object,
+                                      const std::string &upload_id) override {
+    return swift_client.abort_multipart_upload(container, object, upload_id);
   }
 };
 

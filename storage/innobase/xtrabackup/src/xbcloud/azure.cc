@@ -231,7 +231,7 @@ bool Azure_client::delete_object(const std::string &container,
   signer->sign_request(container, name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
     return false;
   }
 
@@ -310,7 +310,7 @@ Http_buffer Azure_client::download_object(const std::string &container,
   signer->sign_request(container, name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
     success = false;
     return Http_buffer();
   }
@@ -330,7 +330,7 @@ bool Azure_client::create_container(const std::string &name) {
   signer->sign_request(name, "", req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, name, name, req, resp)) {
     return false;
   }
 
@@ -361,7 +361,7 @@ bool Azure_client::container_exists(const std::string &name, bool &exists) {
   signer->sign_request(name, "", req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, name, name, req, resp)) {
     return false;
   }
 
@@ -389,7 +389,7 @@ bool Azure_client::upload_object(const std::string &container,
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
     return false;
   }
 
@@ -552,7 +552,8 @@ bool Azure_client::list_objects_common(const std::string &container,
     signer->sign_request(container, "", req, time(0));
 
     Http_response resp;
-    if (!http_client->make_request(req, resp)) {
+    if (!http_client->make_request_with_retry(this, container, prefix, req,
+                                              resp)) {
       return false;
     }
 
@@ -666,6 +667,158 @@ bool Azure_client::list_objects_files_and_dirs(const std::string &container,
         }
         return true;
       });
+}
+
+/*****************************************************************************
+ * Azure block blob multipart (PXB-3671 prototype).
+ *
+ * Azure does not have an S3-style "initiate / complete" pair. Instead each
+ * Put Block call adds a block to the blob's uncommitted block list, and a
+ * Put Block List call commits an ordered subset.
+ *
+ * Block IDs must be base64-encoded and all blocks of a single blob must
+ * share the same decoded length. We use the upload_id (16 random bytes
+ * base64-encoded, ~24 ASCII chars) as a per-upload prefix to namespace the
+ * block IDs we put, then append a 6-digit zero-padded part number. Resulting
+ * pre-base64 ID is 24 + 6 = 30 ASCII bytes which after base64 encoding is
+ * 40 ASCII bytes, well within Azure's 64-byte limit and the same length for
+ * every block.
+ *
+ * There is no Azure API to "abort" a block list; uncommitted blocks expire
+ * after 7 days. To clean up faster we DELETE the blob after a failure,
+ * which removes any uncommitted blocks too.
+ *****************************************************************************/
+
+bool Azure_client::init_multipart_upload(const std::string &container,
+                                         const std::string &name,
+                                         std::string &upload_id) {
+  /* Mint a random upload_id used to namespace block IDs for this upload.
+     Azure does not require us to talk to the server here. */
+  (void)container;
+  (void)name;
+  unsigned char rnd[16];
+  gcry_randomize(rnd, sizeof(rnd), GCRY_STRONG_RANDOM);
+  std::string raw(reinterpret_cast<char *>(rnd), sizeof(rnd));
+  upload_id = base64_encode(raw);
+  return true;
+}
+
+static std::string azure_block_id(const std::string &upload_id,
+                                  int part_number) {
+  std::ostringstream o;
+  o << upload_id << std::setw(6) << std::setfill('0') << part_number;
+  return base64_encode(o.str());
+}
+
+bool Azure_client::upload_part(const std::string &container,
+                               const std::string &name,
+                               const std::string &upload_id, int part_number,
+                               const Http_buffer &contents,
+                               std::string &block_id) {
+  block_id = azure_block_id(upload_id, part_number);
+
+  Http_request req(Http_request::PUT, protocol, host,
+                   "/" + container + "/" + name);
+  req.add_param("comp", "block");
+  req.add_param("blockid", block_id);
+  req.add_header("Content-Length", std::to_string(contents.size()));
+  req.append_payload(contents);
+  signer->sign_request(container, name, req, time(0));
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
+    msg_ts("%s: azure upload_part: transport failure for %s/%s part=%d\n",
+           my_progname, container.c_str(), name.c_str(), part_number);
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: azure upload_part: http %ld for %s/%s part=%d\n", my_progname,
+           resp.http_code(), container.c_str(), name.c_str(), part_number);
+    return false;
+  }
+  return true;
+}
+
+bool Azure_client::async_upload_part(
+    const std::string &container, const std::string &name,
+    const std::string &upload_id, int part_number, const Http_buffer &contents,
+    Event_handler *h, part_callback_t callback) {
+  /* The block_id is derived from upload_id + part_number so we know it
+     up front; the request just confirms the server stored it. */
+  std::string block_id = azure_block_id(upload_id, part_number);
+
+  Http_request *req =
+      new Http_request(Http_request::PUT, protocol, host,
+                       "/" + container + "/" + name);
+  req->add_param("comp", "block");
+  req->add_param("blockid", block_id);
+  req->add_header("Content-Length", std::to_string(contents.size()));
+  req->append_payload(contents);
+  signer->sign_request(container, name, *req, time(0));
+
+  Http_response *resp = new Http_response();
+
+  /* Wrap the user callback so we hand back the (already known) block_id
+     on success. The async_upload_callback_t form fires when the request
+     completes; the wrapper own req/resp lifetime via the existing
+     Http_client::callback template. */
+  auto inner = [callback, block_id](bool ok, const Http_buffer & /*body*/) {
+    callback(ok, ok ? block_id : std::string());
+  };
+
+  http_client->make_async_request(
+      *req, *resp, h,
+      std::bind(Azure_client::upload_callback, this, container, name, req, resp,
+                http_client, h, async_upload_callback_t(inner),
+                std::placeholders::_1, std::placeholders::_2, 1));
+
+  return true;
+}
+
+bool Azure_client::complete_multipart_upload(
+    const std::string &container, const std::string &name,
+    const std::string &upload_id,
+    const std::vector<std::pair<int, std::string>> &parts) {
+  (void)upload_id;
+  std::stringstream body;
+  body << "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>";
+  for (const auto &p : parts) {
+    body << "<Latest>" << p.second << "</Latest>";
+  }
+  body << "</BlockList>";
+  std::string body_str = body.str();
+
+  Http_request req(Http_request::PUT, protocol, host,
+                   "/" + container + "/" + name);
+  req.add_param("comp", "blocklist");
+  req.add_header("Content-Length", std::to_string(body_str.size()));
+  req.add_header("Content-Type", "application/xml");
+  req.add_header(AZURE_BLOB_TYPE_HEADER, "BlockBlob");
+  req.append_payload(body_str.data(), body_str.size());
+  signer->sign_request(container, name, req, time(0));
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, container, name, req, resp)) {
+    msg_ts(
+        "%s: azure complete_multipart_upload: transport failure for %s/%s\n",
+        my_progname, container.c_str(), name.c_str());
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: azure complete_multipart_upload: http %ld for %s/%s\n",
+           my_progname, resp.http_code(), container.c_str(), name.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool Azure_client::abort_multipart_upload(const std::string &container,
+                                          const std::string &name,
+                                          const std::string &upload_id) {
+  /* Best-effort: delete the blob to drop uncommitted blocks immediately.
+     Server-side, uncommitted blocks expire in 7 days regardless. */
+  (void)upload_id;
+  return delete_object(container, name);
 }
 
 }  // namespace xbcloud

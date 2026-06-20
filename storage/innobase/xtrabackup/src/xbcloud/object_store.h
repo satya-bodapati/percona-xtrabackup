@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "http.h"
@@ -30,6 +31,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 namespace xbcloud {
 
 class Event_handler;
+
+/* Per-part identifier returned by upload_part and consumed by
+   complete_multipart_upload. Part number is 1-based on S3/GCS. The opaque
+   string is the ETag (S3/GCS), block id (Azure), or segment path (Swift). */
+using multipart_part_t = std::pair<int, std::string>;
 
 class Object_store {
  public:
@@ -71,6 +77,83 @@ class Object_store {
                                            const std::string &directory,
                                            std::vector<std::string> &files,
                                            std::vector<std::string> &dirs);
+
+  /* Multipart upload interface (PXB-3671 prototype).
+
+     Allows callers to upload a single logical object as several parts in
+     sequence, producing one bucket object with the real file name (no
+     ".NNNNN" chunk suffix). Backends that do not implement multipart return
+     false from init_multipart_upload, and the caller is expected to fall
+     back to the chunk-PUT path. */
+
+  /* Open a new multipart upload session. On success, fills upload_id with a
+     backend-opaque handle that must be passed to subsequent calls. */
+  virtual bool init_multipart_upload(const std::string &container,
+                                     const std::string &object,
+                                     std::string &upload_id) {
+    (void)container;
+    (void)object;
+    (void)upload_id;
+    return false;
+  }
+
+  /* Upload one part of an open multipart session. part_number is 1-based.
+     On success, fills part_id with the backend's part identifier (ETag for
+     S3/GCS, block id for Azure, segment path for Swift). */
+  virtual bool upload_part(const std::string &container,
+                           const std::string &object,
+                           const std::string &upload_id, int part_number,
+                           const Http_buffer &contents, std::string &part_id) {
+    (void)container;
+    (void)object;
+    (void)upload_id;
+    (void)part_number;
+    (void)contents;
+    (void)part_id;
+    return false;
+  }
+
+  /* Finalize the multipart upload. parts must be the ordered list of
+     part_number/part_id pairs returned by upload_part. */
+  virtual bool complete_multipart_upload(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id,
+      const std::vector<multipart_part_t> &parts) {
+    (void)container;
+    (void)object;
+    (void)upload_id;
+    (void)parts;
+    return false;
+  }
+
+  /* Cancel an open multipart upload. Removes any parts already uploaded. */
+  virtual bool abort_multipart_upload(const std::string &container,
+                                      const std::string &object,
+                                      const std::string &upload_id) {
+    (void)container;
+    (void)object;
+    (void)upload_id;
+    return false;
+  }
+
+  /* Async variant of upload_part. Submits the part through the given
+     Event_handler and fires the callback with (ok, part_id) when the part
+     either completes or fails. Default impl falls back to sync upload_part
+     and invokes the callback synchronously, so backends can opt in to true
+     async by overriding. */
+  virtual bool upload_part_async(
+      const std::string &container, const std::string &object,
+      const std::string &upload_id, int part_number,
+      const Http_buffer &contents, Event_handler *h,
+      std::function<void(bool ok, std::string part_id)> callback) {
+    (void)h;
+    std::string part_id;
+    bool ok = upload_part(container, object, upload_id, part_number, contents,
+                          part_id);
+    callback(ok, std::move(part_id));
+    return true;
+  }
+
   virtual ~Object_store() {}
 };
 

@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/http.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <sstream>
 
@@ -31,6 +32,75 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "azure.h"
 #include "common.h"
 #include "msg.h"
+
+namespace xbcloud {
+namespace stats {
+/* Forward declarations of the process-wide observability counters
+   defined in multipart.cc. We can't include multipart.h here because
+   multipart.h depends on http.h. */
+extern std::atomic<uint64_t> total_bytes_appended;
+extern std::atomic<uint64_t> total_bytes_uploaded;
+extern std::atomic<int> total_parts_inflight;
+extern std::atomic<int> total_files_inflight;
+}  // namespace stats
+
+namespace http_timing {
+Bucket sync_get;
+Bucket sync_post;
+Bucket sync_put;
+Bucket sync_delete;
+Bucket sync_head;
+std::atomic<bool> enabled{false};
+
+void enable() { enabled.store(true, std::memory_order_relaxed); }
+
+static void dump_one(const char *label, const Bucket &b) {
+  uint64_t n = b.calls.load(std::memory_order_relaxed);
+  if (n == 0) return;
+  uint64_t total = b.total_us.load(std::memory_order_relaxed);
+  uint64_t nl = b.namelookup_us.load(std::memory_order_relaxed);
+  uint64_t cn = b.connect_us.load(std::memory_order_relaxed);
+  uint64_t app = b.appconnect_us.load(std::memory_order_relaxed);
+  uint64_t pre = b.pretransfer_us.load(std::memory_order_relaxed);
+  uint64_t st = b.starttransfer_us.load(std::memory_order_relaxed);
+  uint64_t fresh = b.calls_with_fresh_connect.load(std::memory_order_relaxed);
+  msg_ts(
+      "%s:   sync %-6s calls=%lu total=%lu ms avg=%.2f ms | "
+      "dns=%.2f connect=%.2f tls=%.2f pretx=%.2f startx=%.2f | "
+      "fresh_connects=%lu (%.1f%%)\n",
+      my_progname, label, n, total / 1000,
+      (double)total / 1000.0 / (double)n,
+      (double)nl / 1000.0 / (double)n,
+      (double)cn / 1000.0 / (double)n,
+      (double)app / 1000.0 / (double)n,
+      (double)pre / 1000.0 / (double)n,
+      (double)st / 1000.0 / (double)n, fresh,
+      100.0 * (double)fresh / (double)n);
+}
+
+void dump_summary() {
+  if (!enabled.load(std::memory_order_relaxed)) return;
+  msg_ts("%s: ----- sync HTTP timing summary -----\n", my_progname);
+  dump_one("GET", sync_get);
+  dump_one("POST", sync_post);
+  dump_one("PUT", sync_put);
+  dump_one("DELETE", sync_delete);
+  dump_one("HEAD", sync_head);
+  msg_ts("%s: ------------------------------------\n", my_progname);
+}
+
+static Bucket *bucket_for(Http_request::method_t m) {
+  switch (m) {
+    case Http_request::GET: return &sync_get;
+    case Http_request::POST: return &sync_post;
+    case Http_request::PUT: return &sync_put;
+    case Http_request::DELETE: return &sync_delete;
+    case Http_request::HEAD: return &sync_head;
+  }
+  return nullptr;
+}
+}  // namespace http_timing
+}  // namespace xbcloud
 #include "s3.h"
 #include "swift.h"
 
@@ -324,7 +394,8 @@ void Event_handler::ev_queue_callback(EV_P_ ev_async *ev, int revents) {
 }
 
 void Event_handler::process_queue() {
-  std::lock_guard<std::mutex> guard(queue_mutex);
+  std::unique_lock<std::mutex> lock(queue_mutex);
+  bool popped = false;
 
   while (!queue.empty() && n_queued < max_requests) {
     auto conn = queue.front();
@@ -333,10 +404,22 @@ void Event_handler::process_queue() {
     CURLMcode rc = curl_multi_add_handle(curl_multi, conn->curl_easy());
     mcode_or_die(rc);
     queue.pop();
+    popped = true;
   }
 
   if (final && queue.empty()) {
     ev_async_stop(loop, &queue_event);
+    if (rate_log_enabled) {
+      ev_timer_stop(loop, &rate_log_event);
+      rate_log_enabled = false;
+    }
+  }
+
+  /* PXB-3748: notify producers blocked in add_connection that the queue has
+     room. Drop the mutex before notifying to avoid a wake-then-block dance. */
+  if (popped) {
+    lock.unlock();
+    queue_cv.notify_all();
   }
 }
 
@@ -375,6 +458,58 @@ Event_handler::~Event_handler() {
   if (loop != nullptr) ev_loop_destroy(loop);
 }
 
+void Event_handler::ev_rate_log_callback(EV_P_ struct ev_timer *timer,
+                                         int /*events*/) {
+  auto *self = static_cast<Event_handler *>(timer->data);
+
+  double now = ev_now(EV_A);
+  uint64_t uploaded =
+      stats::total_bytes_uploaded.load(std::memory_order_relaxed);
+  uint64_t appended =
+      stats::total_bytes_appended.load(std::memory_order_relaxed);
+  int parts =
+      stats::total_parts_inflight.load(std::memory_order_relaxed);
+  int files =
+      stats::total_files_inflight.load(std::memory_order_relaxed);
+
+  double dt = now - self->rate_log_last_time;
+  if (dt < 0.001) dt = 0.001;  /* guard against clock not moving */
+
+  uint64_t d_up = uploaded - self->rate_log_last_uploaded;
+  uint64_t d_app = appended - self->rate_log_last_appended;
+  double rate_up_mibs = (double)d_up / (1024.0 * 1024.0) / dt;
+  double rate_app_mibs = (double)d_app / (1024.0 * 1024.0) / dt;
+
+  msg_ts(
+      "%s: rate up=%.1f MiB/s in=%.1f MiB/s "
+      "(uploaded=%lu MiB appended=%lu MiB) parts_inflight=%d files=%d\n",
+      my_progname, rate_up_mibs, rate_app_mibs,
+      uploaded / (1024 * 1024), appended / (1024 * 1024), parts, files);
+
+  self->rate_log_last_time = now;
+  self->rate_log_last_uploaded = uploaded;
+  self->rate_log_last_appended = appended;
+}
+
+void Event_handler::install_rate_logger(double interval_secs) {
+  if (interval_secs <= 0.0 || loop == nullptr) return;
+  rate_log_enabled = true;
+  rate_log_interval = interval_secs;
+  rate_log_last_time = ev_now(loop);
+  rate_log_last_uploaded =
+      stats::total_bytes_uploaded.load(std::memory_order_relaxed);
+  rate_log_last_appended =
+      stats::total_bytes_appended.load(std::memory_order_relaxed);
+  /* Repeating timer: ev_timer fires once after `after` seconds, then
+     repeats every `repeat` seconds. Set both to interval. The callback
+     runs on the libev thread, sharing this loop with HTTP completions
+     -- no new thread, no mutex required around the atomic counters. */
+  ev_timer_init(&rate_log_event, Event_handler::ev_rate_log_callback,
+                interval_secs, interval_secs);
+  rate_log_event.data = this;
+  ev_timer_start(loop, &rate_log_event);
+}
+
 void Event_handler::main_loop() { ev_loop(loop, 0); }
 
 std::thread Event_handler::run() {
@@ -386,19 +521,22 @@ std::thread Event_handler::run() {
 }
 
 void Event_handler::add_connection(Http_connection *conn, bool nowait) {
-  while (true) {
-    queue_mutex.lock();
-    if (nowait || queue.size() < max_requests + 4) {
-      queue.push(conn);
-      queue_mutex.unlock();
-      ev_async_send(loop, &queue_event);
-      break;
-    } else {
-      queue_mutex.unlock();
-      ev_async_send(loop, &queue_event);
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+  /* PXB-3748: queue depth raised from `max_requests + 4` (which capped
+     buffering at ~12 chunks for --parallel=8) to `max_requests * 32`
+     (~256 chunks). Allows the producer to keep reading ahead while
+     network catches up, avoiding upstream stalls during bursty
+     network behavior. The previous 50 ms sleep_for spin-wait is
+     replaced by a cv that fires when process_queue pops items. */
+  static constexpr size_t QUEUE_DEPTH_MULTIPLIER = 32;
+  std::unique_lock<std::mutex> lock(queue_mutex);
+  if (!nowait) {
+    queue_cv.wait(lock, [this] {
+      return queue.size() < max_requests * QUEUE_DEPTH_MULTIPLIER;
+    });
   }
+  queue.push(conn);
+  lock.unlock();
+  ev_async_send(loop, &queue_event);
 }
 
 void Event_handler::stop() {
@@ -537,37 +675,187 @@ int Http_client::upload_callback(char *ptr, size_t size, size_t nmemb,
   return len;
 }
 
+/* CURLSH lock/unlock callbacks. libcurl calls these around any access
+   to shared resources (DNS cache, SSL session cache, connection cache,
+   cookies, ...). We use one mutex per resource so unrelated lookups
+   don't contend with each other. */
+static void share_lock_cb(CURL * /*handle*/, curl_lock_data data,
+                          curl_lock_access /*access*/, void *userptr) {
+  auto *mutexes = static_cast<std::mutex *>(userptr);
+  if (data < 8) mutexes[data].lock();
+}
+
+static void share_unlock_cb(CURL * /*handle*/, curl_lock_data data,
+                            void *userptr) {
+  auto *mutexes = static_cast<std::mutex *>(userptr);
+  if (data < 8) mutexes[data].unlock();
+}
+
+void Http_client::init_share() const {
+  if (curl_share != nullptr) return;
+  curl_share = curl_share_init();
+  if (curl_share == nullptr) return;
+  curl_share_setopt(curl_share, CURLSHOPT_LOCKFUNC, share_lock_cb);
+  curl_share_setopt(curl_share, CURLSHOPT_UNLOCKFUNC, share_unlock_cb);
+  curl_share_setopt(curl_share, CURLSHOPT_USERDATA, &curl_share_mutex[0]);
+  /* DNS cache: avoid resolving the upstream on every call. */
+  curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+  /* TLS session cache: avoid the full TLS handshake on every call. */
+  curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+#ifdef CURL_LOCK_DATA_CONNECT
+  /* Connection cache: reuse the TCP connection across per-call easy
+     handles. Available since libcurl 7.57. Crucial on WAN (~3 RTT
+     handshake otherwise); near-free on localhost so its impact is
+     invisible in the perf_wan.sh harness, but real-AWS runs benefit. */
+  curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+#endif
+}
+
 bool Http_client::make_request(const Http_request &request,
                                Http_response &response) const {
+  CURLcode unused_rc;
+  return make_request(request, response, unused_rc);
+}
+
+bool Http_client::make_request(const Http_request &request,
+                               Http_response &response,
+                               CURLcode &out_rc) const {
   curl_slist *headers = nullptr;
   Http_connection::upload_state_t upload_state;
 
-  if (!curl) {
-    curl_easy_unique_ptr tmp = make_curl_easy();
-    curl = std::move(tmp);
-  }
-  if (!curl) {
+  /* PXB-3671 prototype: use a per-call curl handle so make_request is
+     thread-safe. The previous cached `curl` member is shared across the
+     Http_client instance and breaks under concurrent multipart-part
+     uploads from multiple threads. Allocating per call is a small
+     overhead (microseconds) that the multipart-uploaded-in-parallel
+     workload easily absorbs. */
+  curl_easy_unique_ptr local_curl = make_curl_easy();
+  if (!local_curl) {
     msg("error: cannot initialize curl handler\n");
+    out_rc = CURLE_FAILED_INIT;
     return false;
   }
 
-  setup_request(curl.get(), request, response, headers, &upload_state);
+  setup_request(local_curl.get(), request, response, headers, &upload_state);
 
-  auto res = curl_easy_perform(curl.get());
+  /* Connect handles to the shared CURLSH pool (if installed) so that
+     DNS lookups, SSL sessions, and (with libcurl >= 7.57) connection
+     entries are reused across per-call easy handles. Without this, the
+     per-call easy handle pattern forces a fresh DNS + TCP + TLS on
+     every sync request. */
+  if (curl_share != nullptr) {
+    curl_easy_setopt(local_curl.get(), CURLOPT_SHARE, curl_share);
+  }
+
+  auto res = curl_easy_perform(local_curl.get());
+  out_rc = res;
   if (res != CURLE_OK) {
-    msg("error: http request failed: %s\n", curl_easy_strerror(res));
+    /* Don't log here unconditionally -- callers (bucket_exists,
+       upload_object, ...) already log on their own with proper context.
+       Logging here too would print TWO error lines per failure and
+       create noise during probe-iteration where some failures are
+       expected. Behind --verbose we still emit it for debugging. */
+    if (verbose) {
+      msg_ts("%s: http request failed: %s\n", my_progname,
+             curl_easy_strerror(res));
+    }
     curl_slist_free_all(headers);
     return false;
   }
 
   long http_code;
-  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
+  curl_easy_getinfo(local_curl.get(), CURLINFO_RESPONSE_CODE, &http_code);
+
+  /* PXB-3671: timing capture. Always cheap (curl already collected the
+     numbers); we only aggregate them when http_timing::enabled is true,
+     to keep the production path noise-free. */
+  if (http_timing::enabled.load(std::memory_order_relaxed)) {
+    auto *bucket = http_timing::bucket_for(request.method());
+    if (bucket != nullptr) {
+      double total_s, nl_s, cn_s, app_s, pre_s, st_s;
+      long num_connects = 0;
+      curl_easy_getinfo(local_curl.get(), CURLINFO_TOTAL_TIME, &total_s);
+      curl_easy_getinfo(local_curl.get(), CURLINFO_NAMELOOKUP_TIME, &nl_s);
+      curl_easy_getinfo(local_curl.get(), CURLINFO_CONNECT_TIME, &cn_s);
+      curl_easy_getinfo(local_curl.get(), CURLINFO_APPCONNECT_TIME, &app_s);
+      curl_easy_getinfo(local_curl.get(), CURLINFO_PRETRANSFER_TIME, &pre_s);
+      curl_easy_getinfo(local_curl.get(), CURLINFO_STARTTRANSFER_TIME, &st_s);
+      curl_easy_getinfo(local_curl.get(), CURLINFO_NUM_CONNECTS, &num_connects);
+      bucket->calls.fetch_add(1, std::memory_order_relaxed);
+      bucket->total_us.fetch_add((uint64_t)(total_s * 1.0e6),
+                                  std::memory_order_relaxed);
+      bucket->namelookup_us.fetch_add((uint64_t)(nl_s * 1.0e6),
+                                       std::memory_order_relaxed);
+      bucket->connect_us.fetch_add((uint64_t)(cn_s * 1.0e6),
+                                    std::memory_order_relaxed);
+      bucket->appconnect_us.fetch_add((uint64_t)(app_s * 1.0e6),
+                                       std::memory_order_relaxed);
+      bucket->pretransfer_us.fetch_add((uint64_t)(pre_s * 1.0e6),
+                                        std::memory_order_relaxed);
+      bucket->starttransfer_us.fetch_add((uint64_t)(st_s * 1.0e6),
+                                          std::memory_order_relaxed);
+      if (num_connects > 0) {
+        bucket->calls_with_fresh_connect.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+    }
+  }
 
   curl_slist_free_all(headers);
-  curl_easy_reset(curl.get());
 
   response.set_http_code(http_code);
   return true;
+}
+
+template <typename CLIENT>
+bool Http_client::make_request_with_retry(CLIENT *client,
+                                          const std::string &container,
+                                          const std::string &name,
+                                          Http_request &request,
+                                          Http_response &response) const {
+  ulong count = 0;
+  while (true) {
+    /* (Re)sign the request with the current timestamp. The signer
+       removes any previously-set Date/Authorization headers, so this
+       is idempotent across retries. */
+    client->signer->sign_request(client->hostname(container), container,
+                                 request, time(0));
+
+    CURLcode rc;
+    response.reset_body();
+    bool transport_ok = make_request(request, response, rc);
+
+    bool retry_error = false;
+    if (!transport_ok) {
+      if (retriable_curl_error(rc)) {
+        retry_error = true;
+      } else if (get_verbose()) {
+        msg_ts(
+            "%s: Curl error (%d) %s is not configured as retriable. You can "
+            "allow it by adding --curl-retriable-errors=%d parameter\n",
+            my_progname, rc, curl_easy_strerror(rc), rc);
+      }
+    } else if (retriable_http_error(response.http_code())) {
+      retry_error = true;
+    } else if (!response.ok()) {
+      /* Some providers signal retriable conditions in the body even
+         though the HTTP status itself is not in the retriable list
+         (e.g. S3's SlowDown / RequestTimeout). */
+      client->retry_error(&response, &retry_error);
+    }
+
+    if (!retry_error) return transport_ok;
+    if (count >= client->get_max_retries()) {
+      msg_ts("%s: No more retries for %s\n", my_progname, name.c_str());
+      return false;
+    }
+
+    ulong delay = get_exponential_backoff(count + 1, client->get_max_backoff());
+    msg_ts("%s: Sleeping for %lu ms before retrying %s [%lu]\n", my_progname,
+           delay, name.c_str(), count + 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    ++count;
+  }
 }
 
 bool Http_client::make_async_request(const Http_request &request,
@@ -590,6 +878,9 @@ bool Http_client::make_async_request(const Http_request &request,
   auto conn = new Http_connection(std::move(curl), request, response, cb);
   setup_request(conn->curl_easy(), request, response, headers,
                 conn->upload_state());
+  if (curl_share != nullptr) {
+    curl_easy_setopt(conn->curl_easy(), CURLOPT_SHARE, curl_share);
+  }
 
   conn->set_headers(headers);
   h->add_connection(conn, nowait);
@@ -677,4 +968,44 @@ Http_client::callback<Azure_client, Azure_client::async_download_callback_t>(
     Http_request *req, Http_response *resp, const Http_client *http_client,
     Event_handler *h, Azure_client::async_download_callback_t callback,
     CURLcode rc, const Http_connection *conn, ulong count) const;
+
+template bool Http_client::make_request_with_retry<S3_client>(
+    S3_client *, const std::string &, const std::string &, Http_request &,
+    Http_response &) const;
+template bool Http_client::make_request_with_retry<Azure_client>(
+    Azure_client *, const std::string &, const std::string &, Http_request &,
+    Http_response &) const;
+template bool Http_client::make_request_with_retry<Swift_client>(
+    Swift_client *, const std::string &, const std::string &, Http_request &,
+    Http_response &) const;
+
+bool Http_client::make_request_with_retry(Http_request &request,
+                                          Http_response &response,
+                                          const std::string &name) const {
+  ulong count = 0;
+  while (true) {
+    CURLcode rc;
+    response.reset_body();
+    bool transport_ok = make_request(request, response, rc);
+
+    bool retry_error = false;
+    if (!transport_ok) {
+      if (retriable_curl_error(rc)) retry_error = true;
+    } else if (retriable_http_error(response.http_code())) {
+      retry_error = true;
+    }
+
+    if (!retry_error) return transport_ok;
+    if (count >= max_retries) {
+      msg_ts("%s: No more retries for %s\n", my_progname, name.c_str());
+      return false;
+    }
+
+    ulong delay = get_exponential_backoff(count + 1, max_backoff);
+    msg_ts("%s: Sleeping for %lu ms before retrying %s [%lu]\n", my_progname,
+           delay, name.c_str(), count + 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    ++count;
+  }
+}
 }  // namespace xbcloud

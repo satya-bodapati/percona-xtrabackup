@@ -25,8 +25,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <my_sys.h>
 #include <my_thread_local.h>
 #include <mysql/service_mysql_alloc.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <typelib.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <list>
@@ -47,6 +52,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "msg.h"
 #include "nulls.h"
 #include "xbcloud/azure.h"
+#include "xbcloud/multipart.h"
 #include "xbcloud/s3.h"
 #include "xbcloud/s3_ec2.h"
 #include "xbcloud/swift.h"
@@ -135,7 +141,63 @@ static u_int32_t opt_max_backoff = 300000;
 
 static bool opt_insecure = false;
 static bool opt_md5 = false;
-static enum { MODE_GET, MODE_PUT, MODE_DELETE } opt_mode;
+
+/* PXB-3671 prototype: when true, the PUT path uploads each logical file as
+   one object using backend multipart upload (one object per file, no .NNNNN
+   chunk suffix). When false, the legacy chunk-per-PUT path is used. */
+static bool opt_multipart_upload = true;
+
+/* PXB-3671 prototype: target multipart part size. When 0 (default), the
+   tiered dynamic_part_size() schedule picks the part size based on bytes
+   uploaded so far (streaming) or the known file_size (--multipart-from-file).
+   A non-zero value overrides the schedule with a fixed per-part target;
+   the final part for a file may still be smaller. */
+static ulonglong opt_multipart_part_size = 0;
+
+/* PXB-3671 prototype: peak in-flight buffer per file. Multipart_uploader
+   blocks the producer when admitting a new part would push total bytes
+   pending in libcurl-multi past this. Tunes throughput vs RAM:
+   4 GiB allows ~256 in flight at 16 MiB parts (early streaming) or
+   ~6 in flight at 600 MiB parts (tail of a >1 TiB stream). */
+static ulonglong opt_multipart_memory_budget = 4ULL * 1024 * 1024 * 1024;
+
+/* PXB-3671 prototype: streams that turn out to be smaller than this at
+   EOF (no parts submitted yet, total accumulated buffer below threshold)
+   bypass multipart and ship as a single PUT. Avoids the
+   InitiateMultipartUpload + UploadPart + CompleteMultipartUpload round-
+   trip overhead for small metadata files. */
+static ulonglong opt_multipart_threshold = 16ULL * 1024 * 1024;
+
+/* PXB-3671 prototype: per-call timing instrumentation for sync HTTP.
+   When on, every Http_client::make_request() records its curl phase
+   timings (DNS, CONNECT, TLS, pretransfer, total) into a per-method
+   bucket; xbcloud dumps a summary at shutdown. Used to diagnose the
+   multipart-vs-legacy WAN regression -- in particular to confirm
+   whether per-call easy handles are forcing fresh TCP+TLS handshakes
+   on every sync request (the CURLSH share fix hinges on this signal). */
+static bool opt_http_timing = false;
+
+/* PXB-3671 prototype: periodic throughput logging. Every N seconds the
+   Event_handler's libev timer fires and logs the current upload rate
+   (MiB/s) and in-flight part / file counts. 0 disables. Runs on the
+   existing Event_handler thread -- no new thread is spawned. */
+static ulong opt_rate_log_interval = 10;
+
+/* PXB-3671 prototype: per-object rollover threshold. Files larger than
+   this in --multipart-from-file mode are split into multiple objects
+   named <name>.part-001, <name>.part-002, ... with a sidecar manifest
+   at <name>.manifest.json listing the segments. Default is 5 TiB
+   (S3's per-object hard cap); knob is exposed so smoke tests can drop
+   it (e.g. 256 MiB) and exercise the rollover path on small files. */
+static ulonglong opt_multipart_rollover_threshold =
+    5ULL * 1024 * 1024 * 1024 * 1024;
+
+/* PXB-3671 prototype: local file source for multipart upload. When set,
+   xbcloud reads this file from disk, picks part_size via the tiered
+   schedule, and uploads via multipart. Bypasses xbstream entirely. */
+static char *opt_multipart_from_file = nullptr;
+
+static enum { MODE_GET, MODE_PUT, MODE_DELETE, MODE_PROBE } opt_mode;
 
 static std::map<std::string, std::string> extra_http_headers;
 
@@ -214,7 +276,15 @@ enum {
   OPT_MD5,
   OPT_VERBOSE,
   OPT_CURL_RETRIABLE_ERRORS,
-  OPT_HTTP_RETRIABLE_ERRORS
+  OPT_HTTP_RETRIABLE_ERRORS,
+  OPT_MULTIPART_UPLOAD,
+  OPT_MULTIPART_PART_SIZE,
+  OPT_MULTIPART_MEMORY_BUDGET,
+  OPT_MULTIPART_THRESHOLD,
+  OPT_MULTIPART_ROLLOVER_THRESHOLD,
+  OPT_RATE_LOG_INTERVAL,
+  OPT_HTTP_TIMING,
+  OPT_MULTIPART_FROM_FILE
 };
 
 static struct my_option my_long_options[] = {
@@ -465,6 +535,74 @@ static struct my_option my_long_options[] = {
      "separated list of codes.",
      0, 0, 0, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 
+    {"multipart-upload", OPT_MULTIPART_UPLOAD,
+     "PXB-3671 prototype: upload each logical file as a single object using "
+     "the backend's multipart upload API, producing one object per file with "
+     "the real file name. When OFF, the legacy per-chunk PUT path is used.",
+     &opt_multipart_upload, &opt_multipart_upload, 0, GET_BOOL, NO_ARG, 1, 0, 0,
+     0, 0, 0},
+
+    {"multipart-part-size", OPT_MULTIPART_PART_SIZE,
+     "PXB-3671 prototype: override the dynamic part-size schedule with a "
+     "fixed part size in bytes. When 0 (default), the tiered schedule "
+     "ramps from 16 MiB to 600 MiB based on bytes uploaded so far "
+     "(streaming) or stat'd file size (--multipart-from-file).",
+     &opt_multipart_part_size, &opt_multipart_part_size, 0, GET_ULL,
+     REQUIRED_ARG, 0, 0,
+     5ULL * 1024 * 1024 * 1024, 0, 0, 0},
+
+    {"multipart-memory-budget", OPT_MULTIPART_MEMORY_BUDGET,
+     "PXB-3671 prototype: peak in-flight buffer size per file in bytes. "
+     "Producer blocks when admitting a new part would push pending "
+     "multipart traffic past this. Default 4 GiB.",
+     &opt_multipart_memory_budget, &opt_multipart_memory_budget, 0, GET_ULL,
+     REQUIRED_ARG, 4ULL * 1024 * 1024 * 1024, 16ULL * 1024 * 1024,
+     ULLONG_MAX, 0, 0, 0},
+
+    {"multipart-threshold", OPT_MULTIPART_THRESHOLD,
+     "PXB-3671 prototype: streams that finish below this size with no "
+     "parts submitted yet ship as a single PUT instead of going through "
+     "multipart. Default 16 MiB. Set to 0 to force multipart for every "
+     "stream.",
+     &opt_multipart_threshold, &opt_multipart_threshold, 0, GET_ULL,
+     REQUIRED_ARG, 16ULL * 1024 * 1024, 0,
+     5ULL * 1024 * 1024 * 1024, 0, 0, 0},
+
+    {"http-timing", OPT_HTTP_TIMING,
+     "PXB-3671 prototype: record per-call curl phase timings (DNS, "
+     "CONNECT, TLS, pretransfer, total) for every sync make_request() "
+     "and dump an aggregated summary at shutdown. Used to diagnose "
+     "where WAN latency is going (fresh TCP+TLS per call vs reused).",
+     &opt_http_timing, &opt_http_timing, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0,
+     0},
+
+    {"rate-log-interval", OPT_RATE_LOG_INTERVAL,
+     "PXB-3671 prototype: log upload throughput every N seconds via the "
+     "existing Event_handler libev timer (no extra thread). Reports "
+     "goodput (delivered bytes / wall time) -- retried bytes are NOT "
+     "double-counted because the counter only increments on a part's "
+     "successful completion, not on wire transmission. Set to 0 to "
+     "disable. Default 10.",
+     &opt_rate_log_interval, &opt_rate_log_interval, 0, GET_ULONG,
+     REQUIRED_ARG, 10, 0, 86400, 0, 0, 0},
+
+    {"multipart-rollover-threshold", OPT_MULTIPART_ROLLOVER_THRESHOLD,
+     "PXB-3671 prototype: per-object rollover threshold. Files larger "
+     "than this in --multipart-from-file mode split into "
+     "<name>.part-001/.part-002/... with a <name>.manifest.json sidecar. "
+     "Default is 5 TiB (S3 per-object hard cap). Lower it for testing.",
+     &opt_multipart_rollover_threshold, &opt_multipart_rollover_threshold, 0,
+     GET_ULL, REQUIRED_ARG, 5ULL * 1024 * 1024 * 1024 * 1024,
+     16ULL * 1024 * 1024, ULLONG_MAX, 0, 0, 0},
+
+    {"multipart-from-file", OPT_MULTIPART_FROM_FILE,
+     "PXB-3671 prototype: upload a local file via multipart upload, "
+     "bypassing xbstream entirely. Path to a local file. xbcloud stats "
+     "the file, picks the part_size via dynamic_part_size(file_size), "
+     "then multipart-uploads it to the given backup-name/<basename> key.",
+     &opt_multipart_from_file, &opt_multipart_from_file, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
 static void print_version() {
@@ -649,20 +787,30 @@ static bool parse_args(int argc, char **argv) {
     opt_mode = MODE_GET;
   } else if (strcasecmp(command, "delete") == 0) {
     opt_mode = MODE_DELETE;
+  } else if (strcasecmp(command, "probe") == 0) {
+    /* probe mode: do the bucket/credential check and exit. No backup
+       name required. Wrap your pipeline as:
+         xbcloud probe <flags> && xtrabackup ... | xbcloud put <flags> NAME
+       so xtrabackup never starts streaming bytes against a broken cloud
+       endpoint. */
+    opt_mode = MODE_PROBE;
   } else {
-    msg_ts("Unknown command %s. Supported commands are put and get\n", command);
+    msg_ts("Unknown command %s. Supported: put, get, delete, probe\n",
+           command);
     usage();
     return true;
   }
 
-  /* make sure name is specified */
-  if (argc < 1) {
-    msg_ts("Backup name is required argument\n");
-    return true;
+  /* probe mode does not require a backup name; everything else does. */
+  if (opt_mode != MODE_PROBE) {
+    if (argc < 1) {
+      msg_ts("Backup name is required argument\n");
+      return true;
+    }
+    backup_name = argv[0];
+    argc--;
+    argv++;
   }
-  backup_name = argv[0];
-  argc--;
-  argv++;
 
   std::string backup_uri = backup_name;
   std::string bucket_name;
@@ -770,6 +918,22 @@ struct file_entry_t {
   std::string path;
 };
 
+/* PXB-3671 prototype: per-file multipart upload context held in mpfilehash.
+   Sequential streaming over the new range-based Multipart_uploader: the
+   put_func thread accumulates xbstream frame bytes into part_buf, and
+   whenever it crosses part_size it calls uploader->upload_part(next_part_num,
+   slice) and increments. On EOF the remainder becomes the final part and
+   commit() finalizes. Intra-file parallelism is not used in xbcloud's PUT
+   path because frames arrive sequentially from xbstream; the parallel
+   per-part model belongs in xtrabackup's Phase 2 ds_cloud (see mpcat for a
+   standalone demonstration of that). */
+struct mp_upload_t {
+  std::unique_ptr<Object_store_multipart_helper> helper;
+  std::unique_ptr<Multipart_uploader> uploader;
+  Http_buffer part_buf;
+  int next_part_num{1};
+};
+
 /**
   Build filename with proper chunk index length.
 
@@ -806,6 +970,10 @@ void put_func(put_thread_ctxt_t &cntx) {
   std::thread ev;
   Event_handler h(opt_parallel > 0 ? opt_parallel : 1);
   std::unordered_map<std::string, std::unique_ptr<file_entry_t>> filehash;
+  /* PXB-3671 prototype: parallel map of per-file Multipart_uploader. Used
+     only when opt_multipart_upload is true. Keyed by the source file path
+     the same way filehash is. */
+  std::unordered_map<std::string, std::unique_ptr<mp_upload_t>> mpfilehash;
   xb_rstream_t *stream;
   if (opt_threads > 1) {
     char filename[FN_REFLEN];
@@ -840,6 +1008,7 @@ void put_func(put_thread_ctxt_t &cntx) {
     msg_ts("%s: Failed to initialize event handler.\n", my_progname);
     goto end;
   }
+  h.install_rate_logger(static_cast<double>(opt_rate_log_interval));
   ev = h.run();
 
   do {
@@ -876,6 +1045,197 @@ void put_func(put_thread_ctxt_t &cntx) {
       }
     }
 
+    if (opt_multipart_upload) {
+      /* PXB-3671 prototype: one-file-per-object via backend multipart upload.
+         The new range-based Multipart_uploader API is driven sequentially
+         here because xbstream frames arrive in file order; intra-file
+         parallel uploads are a Phase 2 / xtrabackup-side capability and are
+         exercised separately by mpcat. */
+      std::string object_name = backup_name;
+      object_name.append("/").append(chunk.path);
+
+      mp_upload_t *mp = mpfilehash[chunk.path].get();
+      if (mp == nullptr) {
+        auto entry_ptr = std::make_unique<mp_upload_t>();
+        entry_ptr->helper = std::make_unique<Object_store_multipart_helper>(
+            cntx.store, *cntx.container, object_name);
+        /* Per-file uploader: byte-based memory budget caps the in-flight
+           buffer regardless of how the dynamic schedule grows part_size
+           through the stream. NOTE: we do NOT call uploader->start()
+           here. Multipart_uploader::upload_part lazy-Inits on first
+           call. Files that turn out to be small (single-PUT fast path
+           at EOF) never trigger Init, saving 2 sync round-trips per
+           small file. Measured impact: -8s wall on perf_wan.sh with
+           40 small files at 100ms RTT. */
+        entry_ptr->uploader = std::make_unique<Multipart_uploader>(
+            entry_ptr->helper.get(), &h, opt_multipart_memory_budget);
+        mp = (mpfilehash[chunk.path] = std::move(entry_ptr)).get();
+      }
+
+      /* The cloud object IS the file in this design -- aws s3 cp on
+         the bucket key returns the original file bytes directly. So we
+         extract chunk.data (the payload bytes only) for PAYLOAD frames.
+         chunk.raw_data is the FULL framed bytes (header + payload), used
+         by the legacy chunk-per-PUT path where downloads cat | xbstream -x.
+         EOF frames carry no file data; only signal commit. SPARSE frames
+         require offset-honoring writes / hole reconstruction which isn't
+         supported in Phase 1; sparse-file backups need Phase 2's manifest
+         carrying the sparse_map. */
+      if (chunk.type == XB_CHUNK_TYPE_SPARSE) {
+        msg_ts(
+            "%s: [%d] error: sparse file %s is not supported by xbcloud's "
+            "multipart upload in Phase 1. Sparse handling moves to the "
+            "Phase 2 manifest (backup_meta.json). Workaround: disable "
+            "sparse-file copy (--no-defaults? or use legacy "
+            "--multipart-upload=OFF for now).\n",
+            my_progname, cntx.thread_id, chunk.path);
+        cntx.has_errors->store(true);
+        my_free(chunk.raw_data);
+        my_free(chunk.sparse_map);
+        memset(&chunk, 0, sizeof(chunk));
+        continue;
+      }
+      if (chunk.type == XB_CHUNK_TYPE_PAYLOAD && chunk.length > 0) {
+        mp->part_buf.append(static_cast<const char *>(chunk.data),
+                            chunk.length);
+      }
+
+      /* Rollover not yet supported in streaming mode (size is unknown
+         up front). If the stream blows past the rollover threshold,
+         abort with a clear message rather than silently exceeding S3's
+         single-object hard cap. Known-size mode (--multipart-from-file)
+         handles oversize files via segmented uploads. */
+      if (mp->uploader->bytes_appended() > opt_multipart_rollover_threshold) {
+        msg_ts(
+            "%s: [%d] error: streaming file %s exceeded "
+            "--multipart-rollover-threshold (%llu bytes). Streaming "
+            "rollover is not yet implemented; use --multipart-from-file "
+            "for files larger than the threshold.\n",
+            my_progname, cntx.thread_id, chunk.path,
+            opt_multipart_rollover_threshold);
+        cntx.has_errors->store(true);
+        my_free(chunk.raw_data);
+        my_free(chunk.sparse_map);
+        memset(&chunk, 0, sizeof(chunk));
+        continue;
+      }
+
+      /* Flush whole parts while we have enough buffered. The flush
+         threshold is dynamic (re-evaluated after every submission so the
+         tier grows with bytes_appended) unless --multipart-part-size was
+         set to a non-zero override. */
+      while (!cntx.has_errors->load()) {
+        size_t part_size =
+            opt_multipart_part_size != 0
+                ? static_cast<size_t>(opt_multipart_part_size)
+                : dynamic_part_size(mp->uploader->bytes_appended());
+        if (mp->part_buf.size() < part_size) break;
+        if (!mp->uploader->upload_part(mp->next_part_num, mp->part_buf.begin(),
+                                       part_size)) {
+          msg_ts("%s: [%d] multipart upload_part %d failed for %s\n",
+                 my_progname, cntx.thread_id, mp->next_part_num,
+                 object_name.c_str());
+          cntx.has_errors->store(true);
+          break;
+        }
+        /* Trim flushed bytes from the buffer. */
+        Http_buffer leftover;
+        if (mp->part_buf.size() > part_size) {
+          leftover.append(mp->part_buf.begin() + part_size,
+                          mp->part_buf.size() - part_size);
+        }
+        mp->part_buf = std::move(leftover);
+        ++mp->next_part_num;
+      }
+
+      /* Update file_entry_t bookkeeping BEFORE any erase below. */
+      entry->offset += chunk.length;
+      entry->chunk_idx++;
+
+      /* EOF: flush remainder as the last part, then commit. */
+      if (chunk.type == XB_CHUNK_TYPE_EOF) {
+        if (!cntx.has_errors->load()) {
+          /* Small-file fast path: if no parts have been submitted yet and
+             the entire stream is at-or-below the threshold, ship as a
+             single PUT instead of multipart. Avoids the Initiate +
+             UploadPart + Complete round-trip overhead. */
+          bool small_file_single_put =
+              mp->next_part_num == 1 &&
+              mp->part_buf.size() <=
+                  static_cast<size_t>(opt_multipart_threshold);
+
+          if (small_file_single_put) {
+            /* Skip abort() entirely if we never Init'd (lazy-Init).
+               This is the common case for small files now: no Init,
+               no Abort, no Complete -- just one async PUT. Three
+               sync round-trips saved per small file. */
+            if (mp->uploader->started()) {
+              mp->uploader->abort();
+            }
+            Http_buffer buf;
+            if (mp->part_buf.size() > 0) {
+              buf.append(mp->part_buf.begin(), mp->part_buf.size());
+            }
+            cntx.store->async_upload_object(
+                *cntx.container, object_name, buf, &h,
+                std::bind(
+                    [&](bool ok, std::string path, size_t length,
+                        std::atomic<bool> *err) {
+                      if (ok) {
+                        msg_ts(
+                            "%s: [%d] small-file PUT done: %s, size: %zu\n",
+                            my_progname, cntx.thread_id, path.c_str(), length);
+                      } else {
+                        msg_ts(
+                            "%s: [%d] error: small-file PUT failed: %s, "
+                            "size: %zu\n",
+                            my_progname, cntx.thread_id, path.c_str(), length);
+                        err->store(true);
+                      }
+                    },
+                    std::placeholders::_1, object_name, mp->part_buf.size(),
+                    cntx.has_errors));
+            mp->part_buf = Http_buffer{};
+          } else {
+            if (mp->part_buf.size() > 0 || mp->next_part_num == 1) {
+              /* Final part: whatever bytes remain. May be < 5 MiB; S3
+                 allows the last part to be any size. */
+              if (!mp->uploader->upload_part(mp->next_part_num,
+                                             mp->part_buf.begin(),
+                                             mp->part_buf.size())) {
+                msg_ts("%s: [%d] final upload_part %d failed for %s\n",
+                       my_progname, cntx.thread_id, mp->next_part_num,
+                       object_name.c_str());
+                cntx.has_errors->store(true);
+              }
+              mp->part_buf = Http_buffer{};
+              ++mp->next_part_num;
+            }
+
+            if (!cntx.has_errors->load()) {
+              if (!mp->uploader->commit()) {
+                msg_ts("%s: [%d] multipart commit failed for %s\n",
+                       my_progname, cntx.thread_id, object_name.c_str());
+                cntx.has_errors->store(true);
+              } else {
+                msg_ts("%s: [%d] multipart commit done for %s\n", my_progname,
+                       cntx.thread_id, object_name.c_str());
+              }
+            }
+          }
+        }
+
+        mpfilehash.erase(chunk.path);
+        filehash.erase(chunk.path);
+      }
+
+      my_free(chunk.raw_data);
+      my_free(chunk.sparse_map);
+      memset(&chunk, 0, sizeof(chunk));
+      continue;
+    }
+
+    /* Legacy chunk-per-PUT path follows. */
     std::string file_name = build_file_name(chunk.path, entry->chunk_idx);
     std::string object_name = backup_name;
     object_name.append("/").append(file_name);
@@ -920,11 +1280,205 @@ void put_func(put_thread_ctxt_t &cntx) {
     memset(&chunk, 0, sizeof(chunk));
   } while (!cntx.has_errors->load());
 
+  /* PXB-3671 prototype: abort any still-open Multipart_uploaders on early
+     exit. Each uploader's destructor handles the actual abort + drain. */
+  for (auto &kv : mpfilehash) {
+    msg_ts("%s: [%d] aborting in-flight multipart on early exit: %s\n",
+           my_progname, cntx.thread_id, kv.first.c_str());
+    kv.second->uploader->abort();
+  }
+  mpfilehash.clear();
+
   h.stop();
   ev.join();
 
 end:
   if (stream != nullptr) xb_stream_read_done(stream);
+}
+
+/* Upload `segment_size` bytes from the current fd position to
+   `object_name` via one Multipart_uploader. Returns true on success.
+   On entry, fd is positioned at the start of this segment. On exit,
+   fd has advanced by segment_size. */
+static bool upload_one_segment_from_fd(Object_store *store, Event_handler *h,
+                                       const std::string &container,
+                                       const std::string &object_name, int fd,
+                                       uint64_t segment_size) {
+  Object_store_multipart_helper helper(store, container, object_name);
+  Multipart_uploader uploader(&helper, h, opt_multipart_memory_budget);
+
+  if (!uploader.start()) {
+    msg_ts("%s: multipart start failed for %s\n", my_progname,
+           object_name.c_str());
+    return false;
+  }
+
+  /* Buffer sized to the schedule's maximum tier (600 MiB at >= 1 TiB).
+     A single allocation is reused across parts. dynamic_part_size never
+     returns more than 1 GiB, but the ramp doesn't cross that within a
+     <= 5 TiB segment because the >= 1 TiB tier plateaus at 600 MiB. */
+  constexpr size_t MAX_PART_BUF = 1024ULL * 1024ULL * 1024ULL;
+  std::unique_ptr<char[]> buf(new char[MAX_PART_BUF]);
+
+  int part_number = 1;
+  uint64_t segment_read = 0;
+  while (segment_read < segment_size) {
+    size_t part_size =
+        opt_multipart_part_size != 0
+            ? static_cast<size_t>(opt_multipart_part_size)
+            : dynamic_part_size(segment_read);
+    if (part_size > MAX_PART_BUF) part_size = MAX_PART_BUF;
+    size_t to_read =
+        static_cast<size_t>(std::min<uint64_t>(part_size,
+                                               segment_size - segment_read));
+    ssize_t n = read(fd, buf.get(), to_read);
+    if (n <= 0) {
+      msg_ts("%s: read error at segment-offset %lu: %s\n", my_progname,
+             segment_read, strerror(errno));
+      uploader.abort();
+      return false;
+    }
+    if (!uploader.upload_part(part_number, buf.get(),
+                              static_cast<size_t>(n))) {
+      msg_ts("%s: upload_part %d failed for %s\n", my_progname, part_number,
+             object_name.c_str());
+      return false;
+    }
+    part_number++;
+    segment_read += static_cast<uint64_t>(n);
+  }
+
+  if (segment_read != segment_size) {
+    msg_ts("%s: short read in segment %s: %lu of %lu bytes\n", my_progname,
+           object_name.c_str(), segment_read, segment_size);
+    uploader.abort();
+    return false;
+  }
+
+  if (!uploader.commit()) {
+    msg_ts("%s: multipart commit failed for %s\n", my_progname,
+           object_name.c_str());
+    return false;
+  }
+  return true;
+}
+
+/* PXB-3671 prototype: upload one local file directly via the new async
+   Multipart_uploader, applying the tiered dynamic part-size schedule.
+   Bypasses xbstream and the put_func pipe-reading loop entirely; this
+   is the path xtrabackup's Phase 2 ds_cloud will use, and it doubles
+   as the test harness for the multipart machinery against real (large)
+   file data.
+
+   Rollover: when file_size exceeds --multipart-rollover-threshold the
+   file is split into <name>.part-001, <name>.part-002, ... segments
+   each <= threshold, and a <name>.manifest.json sidecar lists them.
+   The default threshold equals S3's 5 TiB single-object hard cap, so
+   rollover only kicks in for genuinely-oversize files unless the knob
+   is lowered for testing. */
+bool xbcloud_put_from_file(Object_store *store, const std::string &container,
+                           const std::string &backup_name,
+                           const std::string &local_path) {
+  /* Container check / create, matching xbcloud_put's behavior. */
+  bool exists;
+  if (!store->container_exists(container, exists)) return false;
+  if (!exists && !store->create_container(container)) return false;
+
+  /* stat() the local file to learn its size up front. */
+  struct stat st;
+  if (stat(local_path.c_str(), &st) != 0) {
+    msg_ts("%s: cannot stat local file %s: %s\n", my_progname,
+           local_path.c_str(), strerror(errno));
+    return false;
+  }
+  uint64_t file_size = static_cast<uint64_t>(st.st_size);
+
+  std::string base = local_path;
+  size_t slash = base.find_last_of('/');
+  if (slash != std::string::npos) base = base.substr(slash + 1);
+  std::string object_name = backup_name + "/" + base;
+
+  const uint64_t rollover = opt_multipart_rollover_threshold;
+  const bool rolled_over = file_size > rollover;
+  const uint64_t n_segments =
+      rolled_over ? (file_size + rollover - 1) / rollover : 1;
+
+  msg_ts(
+      "%s: multipart-from-file: %s (%lu bytes) -> %s/%s, "
+      "rollover_threshold=%lu MiB, segments=%lu, memory_budget=%llu MiB\n",
+      my_progname, local_path.c_str(), file_size, container.c_str(),
+      object_name.c_str(), rollover / (1024 * 1024), n_segments,
+      opt_multipart_memory_budget / (1024 * 1024));
+
+  int fd = open(local_path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    msg_ts("%s: cannot open local file %s: %s\n", my_progname,
+           local_path.c_str(), strerror(errno));
+    return false;
+  }
+
+  Event_handler h(opt_parallel > 0 ? opt_parallel : 1);
+  if (!h.init()) {
+    msg_ts("%s: Failed to initialize event handler.\n", my_progname);
+    close(fd);
+    return false;
+  }
+  h.install_rate_logger(static_cast<double>(opt_rate_log_interval));
+  std::thread ev = h.run();
+
+  bool ok = true;
+  std::vector<rollover_segment_t> segments;
+  uint64_t total_read = 0;
+
+  for (uint64_t seg = 0; seg < n_segments && ok; ++seg) {
+    uint64_t segment_size =
+        std::min<uint64_t>(rollover, file_size - total_read);
+    std::string seg_name;
+    if (rolled_over) {
+      char suffix[32];
+      snprintf(suffix, sizeof(suffix), ".part-%03lu", seg + 1);
+      seg_name = object_name + suffix;
+    } else {
+      seg_name = object_name;
+    }
+    msg_ts("%s: segment %lu/%lu -> %s (%lu bytes)\n", my_progname, seg + 1,
+           n_segments, seg_name.c_str(), segment_size);
+    if (!upload_one_segment_from_fd(store, &h, container, seg_name, fd,
+                                    segment_size)) {
+      ok = false;
+      break;
+    }
+    segments.push_back({seg_name, segment_size});
+    total_read += segment_size;
+  }
+
+  if (ok && rolled_over) {
+    std::string manifest_key = object_name + ".manifest.json";
+    std::string manifest_body =
+        build_rollover_manifest(base, file_size, rollover, segments);
+    Http_buffer body;
+    body.append(manifest_body.data(), manifest_body.size());
+    if (!store->upload_object(container, manifest_key, body)) {
+      msg_ts("%s: failed to upload rollover manifest %s\n", my_progname,
+             manifest_key.c_str());
+      ok = false;
+    } else {
+      msg_ts("%s: rollover manifest written: %s (%zu bytes, %zu segments)\n",
+             my_progname, manifest_key.c_str(), manifest_body.size(),
+             segments.size());
+    }
+  }
+
+  if (ok) {
+    msg_ts("%s: multipart-from-file done: %s -> %s/%s (%lu bytes total)\n",
+           my_progname, local_path.c_str(), container.c_str(),
+           object_name.c_str(), total_read);
+  }
+
+  close(fd);
+  h.stop();
+  ev.join();
+  return ok;
 }
 
 bool xbcloud_put(Object_store *store, const std::string &container,
@@ -1359,6 +1913,12 @@ int main(int argc, char **argv) {
   if (opt_timeout > 0) {
     http_client.set_timeout(opt_timeout);
   }
+  http_client.set_max_retries(opt_max_retries);
+  http_client.set_max_backoff(opt_max_backoff);
+  if (opt_http_timing) {
+    http_timing::enable();
+    msg_ts("%s: HTTP timing instrumentation enabled\n", my_progname);
+  }
 
   std::string container_name;
 
@@ -1612,22 +2172,47 @@ int main(int argc, char **argv) {
         "It requires --fifo-dir to be set.\n");
     return EXIT_FAILURE;
   }
+  int rc = EXIT_SUCCESS;
+  if (opt_mode == MODE_PROBE) {
+    /* By the time we reach this dispatch, probe_api_version_and_lookup
+       (S3) / equivalent backend setup has already run as part of the
+       object_store construction above. If we got here with non-null
+       object_store, the probe succeeded. */
+    if (object_store == nullptr) {
+      msg_ts("%s: probe: object store setup failed\n", my_progname);
+      rc = EXIT_FAILURE;
+    } else {
+      msg_ts("%s: probe: OK\n", my_progname);
+    }
+    http_timing::dump_summary();
+    return rc;
+  }
   if (opt_mode == MODE_PUT) {
-    if (!xbcloud_put(object_store.get(), container_name, backup_name)) {
-      return EXIT_FAILURE;
+    /* PXB-3671 prototype: --multipart-from-file overrides the xbstream pipe
+       reading loop with a direct local-file -> multipart upload. */
+    if (opt_multipart_from_file != nullptr) {
+      if (!xbcloud_put_from_file(object_store.get(), container_name,
+                                 backup_name, opt_multipart_from_file)) {
+        rc = EXIT_FAILURE;
+      }
+    } else if (!xbcloud_put(object_store.get(), container_name, backup_name)) {
+      rc = EXIT_FAILURE;
     }
   } else if (opt_mode == MODE_GET) {
     if (!xbcloud_download(object_store.get(), container_name, backup_name)) {
-      return EXIT_FAILURE;
+      rc = EXIT_FAILURE;
     }
   } else if (opt_mode == MODE_DELETE) {
     if (!xbcloud_delete(object_store.get(), container_name, backup_name)) {
-      return EXIT_FAILURE;
+      rc = EXIT_FAILURE;
     }
   } else {
     msg_ts("Unknown command supplied.\n");
-    return EXIT_FAILURE;
+    rc = EXIT_FAILURE;
   }
 
-  return EXIT_SUCCESS;
+  /* Always dump the HTTP timing summary if instrumentation was on, so
+     successful and failed runs both yield diagnostic numbers. */
+  http_timing::dump_summary();
+  return rc;
 }

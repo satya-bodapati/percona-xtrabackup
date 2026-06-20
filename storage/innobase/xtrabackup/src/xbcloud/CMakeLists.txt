@@ -52,6 +52,7 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   ../xbcrypt_common.cc
   ../file_utils.cc
   swift.cc
+  multipart.cc
   library_version_check.cc)
 
 SET_TARGET_PROPERTIES(xbcloud

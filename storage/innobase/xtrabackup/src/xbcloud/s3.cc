@@ -299,7 +299,7 @@ bool S3_client::delete_object(const std::string &bucket,
   signer->sign_request(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
     return false;
   }
 
@@ -378,7 +378,7 @@ Http_buffer S3_client::download_object(const std::string &bucket,
   signer->sign_request(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
     success = false;
     return Http_buffer();
   }
@@ -407,7 +407,7 @@ bool S3_client::create_bucket(const std::string &name) {
   signer->sign_request(hostname(name), name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, name, name, req, resp)) {
     return false;
   }
 
@@ -432,8 +432,34 @@ bool S3_client::create_bucket(const std::string &name) {
 }
 
 bool S3_client::probe_api_version_and_lookup(const std::string &bucket) {
+  /* Bucket names containing dots cannot use virtual-host-style
+     addressing over HTTPS -- AWS's S3 wildcard cert (*.s3.<region>...)
+     is one level only, and bucket.with.dots.s3.us-east-2.amazonaws.com
+     has three. Probing virtual-host for these always fails with a TLS
+     cert mismatch error that's confusing noise. Detect and skip. */
+  bool dotted_bucket = bucket.find('.') != std::string::npos;
+  bool is_https = (protocol == Http_request::HTTPS);
+  bool skip_virtual_host = dotted_bucket && is_https;
+  if (skip_virtual_host && bucket_lookup == LOOKUP_AUTO) {
+    msg_ts(
+        "%s: bucket name '%s' contains dots; skipping virtual-host "
+        "addressing (incompatible with HTTPS wildcard cert) and using "
+        "path-style.\n",
+        my_progname, bucket.c_str());
+  }
+
+  /* Quiet per-attempt diagnostics during iteration; if every attempt
+     fails we re-run the last one loud so the user sees the real
+     error instead of every fallback's noise. */
+  quiet_diagnostics = true;
+
+  s3_bucket_lookup_t last_lookup = LOOKUP_AUTO;
+
   for (auto lookup : {LOOKUP_DNS, LOOKUP_PATH}) {
     if (bucket_lookup != LOOKUP_AUTO && bucket_lookup != lookup) {
+      continue;
+    }
+    if (skip_virtual_host && lookup == LOOKUP_DNS) {
       continue;
     }
     for (auto version : {S3_V4, S3_V2}) {
@@ -456,9 +482,12 @@ bool S3_client::probe_api_version_and_lookup(const std::string &bucket) {
 
       bool exists;
       if (bucket_exists(bucket.c_str(), exists)) {
+        quiet_diagnostics = false;
         msg_ts("%s: Successfully connected.\n", my_progname);
         return true;
       }
+
+      last_lookup = lookup;
 
       bucket_lookup = tmp_lookup;
       api_version = tmp_version;
@@ -467,12 +496,95 @@ bool S3_client::probe_api_version_and_lookup(const std::string &bucket) {
     }
   }
 
+  /* All combinations failed. Re-run with diagnostics ON so the user
+     sees the real AWS error. Force path-style + SigV4 -- that's the
+     combination AWS CLI (`aws s3 ls`) uses by default, so the message
+     will line up with what the user can reproduce with that tool.
+     Earlier the LAST attempt in the loop was path+V2 (SigV2 is mostly
+     deprecated by AWS and returns a misleading "InvalidRequest, use
+     AWS4-HMAC-SHA256" that hides the real underlying cause -- expired
+     creds, wrong region, etc).
+
+     If the user pinned a specific lookup/version, honor it for the
+     diagnostic too. */
+  quiet_diagnostics = false;
+  if (last_lookup != LOOKUP_AUTO) {
+    auto diag_lookup =
+        (bucket_lookup != LOOKUP_AUTO) ? bucket_lookup : LOOKUP_PATH;
+    auto diag_version =
+        (api_version != S3_V_AUTO) ? api_version : S3_V4;
+    if (diag_version == S3_V2) {
+      signer = std::unique_ptr<S3_signer>(
+          new S3_signerV2(diag_lookup, region, access_key, secret_key));
+    } else {
+      signer = std::unique_ptr<S3_signer>(new S3_signerV4(
+          diag_lookup, region, access_key, secret_key, session_token,
+          storage_class));
+    }
+    bucket_lookup = diag_lookup;
+    api_version = diag_version;
+    bool exists;
+    (void)bucket_exists(bucket.c_str(), exists);  // for diagnostics only
+  }
+
   msg_ts(
-      "%s: Probe failed. Please check your credentials and endpoint "
-      "settings.\n",
+      "%s: Probe failed. See diagnostic above; verify credentials, "
+      "bucket name, and region (--s3-region).\n",
       my_progname);
 
   return false;
+}
+
+/* Dump the most useful headers from an S3 error response. x-amz-request-id
+   and x-amz-id-2 are what AWS support asks for when opening a case. */
+static void log_s3_response_headers(const Http_response &resp) {
+  const auto &h = resp.headers();
+  auto it = h.find("x-amz-request-id");
+  if (it != h.end()) {
+    msg_ts("%s:     x-amz-request-id: %s\n", my_progname, it->second.c_str());
+  }
+  it = h.find("x-amz-id-2");
+  if (it != h.end()) {
+    msg_ts("%s:     x-amz-id-2: %s\n", my_progname, it->second.c_str());
+  }
+  it = h.find("x-amz-bucket-region");
+  if (it != h.end()) {
+    msg_ts("%s:     x-amz-bucket-region: %s (configured region was used)\n",
+           my_progname, it->second.c_str());
+  }
+}
+
+/* Map an AWS error <Code> to a user-actionable hint. Quiet on unknown. */
+static void log_actionable_hint(const std::string &aws_code) {
+  if (aws_code == "ExpiredToken" || aws_code == "TokenRefreshRequired") {
+    msg_ts(
+        "%s:   HINT: AWS STS token expired. Re-issue credentials and retry. "
+        "Verify with: aws s3 ls s3://<bucket>/\n",
+        my_progname);
+  } else if (aws_code == "InvalidAccessKeyId" ||
+             aws_code == "SignatureDoesNotMatch") {
+    msg_ts(
+        "%s:   HINT: AWS credentials are wrong. Check "
+        "--s3-access-key/--s3-secret-key or AWS_ACCESS_KEY_ID env var.\n",
+        my_progname);
+  } else if (aws_code == "AccessDenied") {
+    msg_ts(
+        "%s:   HINT: Credentials are valid but the IAM principal lacks "
+        "permission. Required on the bucket: s3:ListBucket, s3:GetObject, "
+        "s3:PutObject (plus s3:AbortMultipartUpload for multipart).\n",
+        my_progname);
+  } else if (aws_code == "NoSuchBucket") {
+    msg_ts(
+        "%s:   HINT: Bucket does not exist in this region. Verify "
+        "--s3-bucket and --s3-region.\n",
+        my_progname);
+  } else if (aws_code == "PermanentRedirect" ||
+             aws_code == "AuthorizationHeaderMalformed") {
+    msg_ts(
+        "%s:   HINT: Region mismatch. See x-amz-bucket-region in the "
+        "response headers above and pass it as --s3-region.\n",
+        my_progname);
+  }
 }
 
 bool S3_client::bucket_exists(const std::string &name, bool &exists) {
@@ -481,7 +593,11 @@ bool S3_client::bucket_exists(const std::string &name, bool &exists) {
   signer->sign_request(hostname(name), name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, name, name, req, resp)) {
+    if (!quiet_diagnostics) {
+      msg_ts("%s: bucket_exists HEAD %s/ -> transport failed\n", my_progname,
+             name.c_str());
+    }
     return false;
   }
 
@@ -493,6 +609,44 @@ bool S3_client::bucket_exists(const std::string &name, bool &exists) {
   if (resp.http_code() == 404) {
     exists = false;
     return true;
+  }
+
+  /* Non-2xx, non-404. Quiet during probe iteration; surface only when
+     we're committed to reporting this as the final error. */
+  if (quiet_diagnostics) return false;
+
+  /* HEAD responses carry the headers we need but no body, so the user
+     can't see the AWS <Code>/<Message>. Re-issue as GET so we have a
+     body to surface. The GET returns the same error (S3 is consistent
+     here), just with the explanatory XML. */
+  msg_ts("%s: bucket_exists HEAD %s/ -> HTTP %ld\n", my_progname, name.c_str(),
+         resp.http_code());
+  log_s3_response_headers(resp);
+
+  Http_request get_req(Http_request::GET, protocol, hostname(name),
+                       bucketname(name) + "/");
+  signer->sign_request(hostname(name), name, get_req, time(0));
+  Http_response get_resp;
+  if (http_client->make_request_with_retry(this, name, name, get_req,
+                                            get_resp)) {
+    if (get_resp.body().size() > 0) {
+      S3_response s3_resp;
+      if (s3_resp.parse_http_response(get_resp) && s3_resp.error()) {
+        std::string code = s3_resp.error_code();
+        msg_ts("%s:   S3 error code='%s' message='%s'\n", my_progname,
+               code.c_str(), s3_resp.error_message().c_str());
+        log_actionable_hint(code);
+      } else {
+        /* Body present but not parseable as <Error>. Dump up to 512 bytes
+           verbatim so the user can see what AWS actually returned. */
+        std::string body(get_resp.body().begin(), get_resp.body().end());
+        if (body.size() > 512) body.resize(512);
+        msg_ts("%s:   raw response body: %s\n", my_progname, body.c_str());
+      }
+    } else {
+      msg_ts("%s:   (no body on follow-up GET either, HTTP %ld)\n",
+             my_progname, get_resp.http_code());
+    }
   }
 
   return false;
@@ -509,7 +663,7 @@ bool S3_client::upload_object(const std::string &bucket,
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
     return false;
   }
 
@@ -646,7 +800,8 @@ bool S3_client::list_objects_with_prefix(const std::string &bucket,
     signer->sign_request(hostname(bucket), bucket, req, time(0));
 
     Http_response resp;
-    if (!http_client->make_request(req, resp)) {
+    if (!http_client->make_request_with_retry(this, bucket, prefix, req,
+                                              resp)) {
       return false;
     }
 
@@ -738,10 +893,18 @@ bool S3_client::list_objects_with_prefix(const std::string &bucket,
 void S3_client::retry_error(Http_response *resp, bool *retry) {
   S3_response s3_resp;
   if (!s3_resp.parse_http_response(*resp)) {
-    msg_ts("%s: Failed to parse XML response.\n", my_progname);
+    /* During probe iteration we expect some attempts to fail; the per-
+       attempt noise drowns out the eventual "Successfully connected" or
+       the canonical diagnostic at the end. Suppress here; the final
+       re-probe will surface the real error. */
+    if (!quiet_diagnostics) {
+      msg_ts("%s: Failed to parse XML response.\n", my_progname);
+    }
   } else if (s3_resp.error()) {
-    msg_ts("%s: S3 error message: %s\n", my_progname,
-           s3_resp.error_message().c_str());
+    if (!quiet_diagnostics) {
+      msg_ts("%s: S3 error message: %s\n", my_progname,
+             s3_resp.error_message().c_str());
+    }
     if (s3_resp.error_code() == "RequestTimeout") {
       *retry = true;
     }
@@ -759,6 +922,205 @@ void S3_client::retry_error(Http_response *resp, bool *retry) {
       }
     }
   }
+}
+
+/*****************************************************************************
+ * S3 multipart upload (PXB-3671 prototype).
+ *
+ * Synchronous implementations. The per-file path in xbcloud's put_func
+ * orchestrates one of these per logical file: init -> upload_part * N ->
+ * complete. Failures call abort to clean up server-side state.
+ *****************************************************************************/
+
+bool S3_client::init_multipart_upload(const std::string &bucket,
+                                      const std::string &name,
+                                      std::string &upload_id) {
+  Http_request req(Http_request::POST, protocol, hostname(bucket),
+                   bucketname(bucket) + "/" + name);
+  req.add_param("uploads", "");
+  req.add_header("Content-Type", "application/octet-stream");
+  signer->sign_request(hostname(bucket), bucket, req, time(0));
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
+    msg_ts("%s: init_multipart_upload: transport failure for %s/%s\n",
+           my_progname, bucket.c_str(), name.c_str());
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: init_multipart_upload: http %ld for %s/%s\n", my_progname,
+           resp.http_code(), bucket.c_str(), name.c_str());
+    return false;
+  }
+
+  using namespace rapidxml;
+  std::string body(resp.body().begin(), resp.body().end());
+  xml_document<> doc;
+  try {
+    doc.parse<0>(&body[0]);
+  } catch (...) {
+    msg_ts("%s: init_multipart_upload: invalid XML response for %s/%s\n",
+           my_progname, bucket.c_str(), name.c_str());
+    return false;
+  }
+  xml_node<> *root = doc.first_node("InitiateMultipartUploadResult");
+  if (root == nullptr) {
+    msg_ts("%s: init_multipart_upload: missing root element for %s/%s\n",
+           my_progname, bucket.c_str(), name.c_str());
+    return false;
+  }
+  xml_node<> *id = root->first_node("UploadId");
+  if (id == nullptr) {
+    msg_ts("%s: init_multipart_upload: missing UploadId for %s/%s\n",
+           my_progname, bucket.c_str(), name.c_str());
+    return false;
+  }
+  upload_id.assign(id->value(), id->value_size());
+  return true;
+}
+
+bool S3_client::upload_part(const std::string &bucket, const std::string &name,
+                            const std::string &upload_id, int part_number,
+                            const Http_buffer &contents, std::string &etag) {
+  Http_request req(Http_request::PUT, protocol, hostname(bucket),
+                   bucketname(bucket) + "/" + name);
+  req.add_param("partNumber", std::to_string(part_number));
+  req.add_param("uploadId", upload_id);
+  req.add_header("Content-Type", "application/octet-stream");
+  req.append_payload(contents);
+  signer->sign_request(hostname(bucket), bucket, req, time(0));
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
+    msg_ts("%s: upload_part: transport failure for %s/%s part=%d\n",
+           my_progname, bucket.c_str(), name.c_str(), part_number);
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: upload_part: http %ld for %s/%s part=%d\n", my_progname,
+           resp.http_code(), bucket.c_str(), name.c_str(), part_number);
+    return false;
+  }
+
+  /* Header lookup is case-insensitive; the existing code lowercases header
+     keys when storing them (see Http_response::header_appender). */
+  const auto &h = resp.headers();
+  auto it = h.find("etag");
+  if (it == h.end()) {
+    msg_ts("%s: upload_part: missing ETag in response for %s/%s part=%d\n",
+           my_progname, bucket.c_str(), name.c_str(), part_number);
+    return false;
+  }
+  etag = it->second;
+  return true;
+}
+
+bool S3_client::complete_multipart_upload(
+    const std::string &bucket, const std::string &name,
+    const std::string &upload_id,
+    const std::vector<std::pair<int, std::string>> &parts) {
+  std::stringstream body;
+  body << "<CompleteMultipartUpload>";
+  for (const auto &p : parts) {
+    body << "<Part><PartNumber>" << p.first << "</PartNumber><ETag>"
+         << p.second << "</ETag></Part>";
+  }
+  body << "</CompleteMultipartUpload>";
+  std::string body_str = body.str();
+
+  Http_request req(Http_request::POST, protocol, hostname(bucket),
+                   bucketname(bucket) + "/" + name);
+  req.add_param("uploadId", upload_id);
+  req.add_header("Content-Type", "application/xml");
+  req.append_payload(body_str.data(), body_str.size());
+  signer->sign_request(hostname(bucket), bucket, req, time(0));
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
+    msg_ts("%s: complete_multipart_upload: transport failure for %s/%s\n",
+           my_progname, bucket.c_str(), name.c_str());
+    return false;
+  }
+  if (!resp.ok()) {
+    msg_ts("%s: complete_multipart_upload: http %ld for %s/%s\n", my_progname,
+           resp.http_code(), bucket.c_str(), name.c_str());
+    return false;
+  }
+  /* S3 sometimes returns 200 with an embedded <Error> body for late errors.
+     Detect via the body. */
+  std::string s(resp.body().begin(), resp.body().end());
+  if (s.find("<Error>") != std::string::npos) {
+    msg_ts("%s: complete_multipart_upload: late error for %s/%s: %s\n",
+           my_progname, bucket.c_str(), name.c_str(), s.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool S3_client::async_upload_part(const std::string &bucket,
+                                  const std::string &name,
+                                  const std::string &upload_id, int part_number,
+                                  const Http_buffer &contents, Event_handler *h,
+                                  part_callback_t callback) {
+  Http_request *req =
+      new Http_request(Http_request::PUT, protocol, hostname(bucket),
+                       bucketname(bucket) + "/" + name);
+  req->add_param("partNumber", std::to_string(part_number));
+  req->add_param("uploadId", upload_id);
+  req->add_header("Content-Type", "application/octet-stream");
+  req->append_payload(contents);
+  signer->sign_request(hostname(bucket), bucket, *req, time(0));
+
+  Http_response *resp = new Http_response();
+
+  /* Wrap the user callback so we can extract the ETag from the response
+     headers (S3 puts the part ETag in the response, not the body). The
+     wrapper also owns the heap-allocated req/resp for the async lifetime;
+     existing async_upload_object uses the same pattern. */
+  auto inner =
+      [callback, resp](bool ok, const Http_buffer & /*body*/) {
+        std::string etag;
+        if (ok) {
+          const auto &headers = resp->headers();
+          auto it = headers.find("etag");
+          if (it == headers.end()) {
+            callback(false, std::string());
+            return;
+          }
+          etag = it->second;
+        }
+        callback(ok, std::move(etag));
+      };
+
+  http_client->make_async_request(
+      *req, *resp, h,
+      std::bind(S3_client::upload_callback, this, bucket, name, req, resp,
+                http_client, h, async_upload_callback_t(inner),
+                std::placeholders::_1, std::placeholders::_2, 1));
+
+  return true;
+}
+
+bool S3_client::abort_multipart_upload(const std::string &bucket,
+                                       const std::string &name,
+                                       const std::string &upload_id) {
+  Http_request req(Http_request::DELETE, protocol, hostname(bucket),
+                   bucketname(bucket) + "/" + name);
+  req.add_param("uploadId", upload_id);
+  signer->sign_request(hostname(bucket), bucket, req, time(0));
+
+  Http_response resp;
+  if (!http_client->make_request_with_retry(this, bucket, name, req, resp)) {
+    msg_ts("%s: abort_multipart_upload: transport failure for %s/%s\n",
+           my_progname, bucket.c_str(), name.c_str());
+    return false;
+  }
+  if (resp.http_code() != 204 && !resp.ok()) {
+    msg_ts("%s: abort_multipart_upload: http %ld for %s/%s\n", my_progname,
+           resp.http_code(), bucket.c_str(), name.c_str());
+    return false;
+  }
+  return true;
 }
 
 }  // namespace xbcloud
