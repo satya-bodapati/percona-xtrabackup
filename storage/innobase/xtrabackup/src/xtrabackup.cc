@@ -100,6 +100,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "common.h"
 #include "datasink.h"
+#include "ds_cloud.h"
 #include "xtrabackup_version.h"
 
 #include "backup_copy.h"
@@ -267,6 +268,38 @@ char *xtrabackup_encrypt_key = NULL;
 char *xtrabackup_encrypt_key_file = NULL;
 uint xtrabackup_encrypt_threads;
 ulonglong xtrabackup_encrypt_chunk_size = 0;
+
+/* PXB-3671 ds_cloud raw option storage. After option parsing the values
+   are folded into the global ds_cloud_config_t (g_ds_cloud_config) which
+   ds_cloud.cc reads at init/probe time. */
+static char *opt_cloud_storage = nullptr;
+static char *opt_cloud_url = nullptr;
+static char *opt_cloud_bucket = nullptr;
+static char *opt_cloud_region = nullptr;
+static char *opt_cloud_endpoint = nullptr;
+static char *opt_cloud_access_key = nullptr;
+static char *opt_cloud_secret_key = nullptr;
+static char *opt_cloud_session_token = nullptr;
+static char *opt_cloud_bucket_lookup = nullptr;
+static char *opt_cloud_storage_class = nullptr;
+static char *opt_cloud_azure_account = nullptr;
+static char *opt_cloud_azure_access_key = nullptr;
+static char *opt_cloud_azure_endpoint = nullptr;
+static bool opt_cloud_insecure = false;
+static char *opt_cloud_cacert = nullptr;
+static ulong opt_cloud_timeout = 120;
+static ulong opt_cloud_max_retries = 10;
+static ulong opt_cloud_max_backoff = 300000;
+static ulong opt_cloud_parallel = 8;
+static bool opt_cloud_multipart_upload = true;
+static ulonglong opt_cloud_multipart_part_size = 0;
+static ulonglong opt_cloud_multipart_memory_budget =
+    4ULL * 1024 * 1024 * 1024;
+static ulonglong opt_cloud_multipart_threshold = 16ULL * 1024 * 1024;
+static ulonglong opt_cloud_multipart_rollover_threshold =
+    5ULL * 1024 * 1024 * 1024 * 1024;
+static ulong opt_cloud_rate_log_interval = 10;
+static bool opt_cloud_http_timing = false;
 
 size_t redo_memory = 0;
 ulint redo_frames = 0;
@@ -824,6 +857,35 @@ enum options_xtrabackup {
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_CHECK_TABLES,
+  /* PXB-3671 / PXB-3787 ds_cloud direct-upload knobs. Storage type +
+     URL/bucket/credentials, plus the multipart tuning parameters
+     mirrored from xbcloud. */
+  OPT_XTRA_CLOUD_STORAGE,
+  OPT_XTRA_CLOUD_URL,
+  OPT_XTRA_CLOUD_BUCKET,
+  OPT_XTRA_CLOUD_REGION,
+  OPT_XTRA_CLOUD_ENDPOINT,
+  OPT_XTRA_CLOUD_ACCESS_KEY,
+  OPT_XTRA_CLOUD_SECRET_KEY,
+  OPT_XTRA_CLOUD_SESSION_TOKEN,
+  OPT_XTRA_CLOUD_BUCKET_LOOKUP,
+  OPT_XTRA_CLOUD_STORAGE_CLASS,
+  OPT_XTRA_CLOUD_AZURE_ACCOUNT,
+  OPT_XTRA_CLOUD_AZURE_ACCESS_KEY,
+  OPT_XTRA_CLOUD_AZURE_ENDPOINT,
+  OPT_XTRA_CLOUD_INSECURE,
+  OPT_XTRA_CLOUD_CACERT,
+  OPT_XTRA_CLOUD_TIMEOUT,
+  OPT_XTRA_CLOUD_MAX_RETRIES,
+  OPT_XTRA_CLOUD_MAX_BACKOFF,
+  OPT_XTRA_CLOUD_PARALLEL,
+  OPT_XTRA_CLOUD_MULTIPART_UPLOAD,
+  OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
+  OPT_XTRA_CLOUD_MULTIPART_MEMORY_BUDGET,
+  OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
+  OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
+  OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
+  OPT_XTRA_CLOUD_HTTP_TIMING,
 };
 
 struct my_option xb_client_options[] = {
@@ -1472,6 +1534,122 @@ struct my_option xb_client_options[] = {
      "Maximum count of ROCKSB checkpoints.", &opt_rocksdb_checkpoint_max_count,
      &opt_rocksdb_checkpoint_max_count, 0, GET_INT, REQUIRED_ARG, 0, 0, INT_MAX,
      0, 0, 0},
+
+    /* PXB-3671 / PXB-3787 -- direct cloud upload via ds_cloud. */
+    {"cloud-storage", OPT_XTRA_CLOUD_STORAGE,
+     "Direct cloud upload backend: s3 | gcs | azure | swift. When set, "
+     "xtrabackup --backup streams each file directly to the bucket via "
+     "ds_cloud and the multipart upload machinery (no xbcloud needed). "
+     "Mutually exclusive with --stream.",
+     &opt_cloud_storage, &opt_cloud_storage, 0, GET_STR, REQUIRED_ARG, 0, 0,
+     0, 0, 0, 0},
+    {"cloud-url", OPT_XTRA_CLOUD_URL,
+     "Cloud target URL (endpoint + optional path). Combined with "
+     "--cloud-bucket and --cloud-region to form per-object keys.",
+     &opt_cloud_url, &opt_cloud_url, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0,
+     0},
+    {"cloud-bucket", OPT_XTRA_CLOUD_BUCKET, "Bucket / container name.",
+     &opt_cloud_bucket, &opt_cloud_bucket, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-region", OPT_XTRA_CLOUD_REGION, "Region (S3-style).",
+     &opt_cloud_region, &opt_cloud_region, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-endpoint", OPT_XTRA_CLOUD_ENDPOINT,
+     "Endpoint host (overrides default for the storage backend).",
+     &opt_cloud_endpoint, &opt_cloud_endpoint, 0, GET_STR, REQUIRED_ARG, 0, 0,
+     0, 0, 0, 0},
+    {"cloud-access-key", OPT_XTRA_CLOUD_ACCESS_KEY, "Access key.",
+     &opt_cloud_access_key, &opt_cloud_access_key, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-secret-key", OPT_XTRA_CLOUD_SECRET_KEY, "Secret key.",
+     &opt_cloud_secret_key, &opt_cloud_secret_key, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-session-token", OPT_XTRA_CLOUD_SESSION_TOKEN,
+     "AWS STS session token.",
+     &opt_cloud_session_token, &opt_cloud_session_token, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-bucket-lookup", OPT_XTRA_CLOUD_BUCKET_LOOKUP,
+     "Bucket-name addressing style: auto | path | dns. Dotted bucket names "
+     "force path-style on HTTPS regardless.",
+     &opt_cloud_bucket_lookup, &opt_cloud_bucket_lookup, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-storage-class", OPT_XTRA_CLOUD_STORAGE_CLASS,
+     "Storage class (S3 STANDARD/STANDARD_IA/etc., Azure equivalent).",
+     &opt_cloud_storage_class, &opt_cloud_storage_class, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-account", OPT_XTRA_CLOUD_AZURE_ACCOUNT,
+     "Azure storage account.",
+     &opt_cloud_azure_account, &opt_cloud_azure_account, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-access-key", OPT_XTRA_CLOUD_AZURE_ACCESS_KEY,
+     "Azure account key.",
+     &opt_cloud_azure_access_key, &opt_cloud_azure_access_key, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-endpoint", OPT_XTRA_CLOUD_AZURE_ENDPOINT,
+     "Azure endpoint host override.",
+     &opt_cloud_azure_endpoint, &opt_cloud_azure_endpoint, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-insecure", OPT_XTRA_CLOUD_INSECURE,
+     "Skip TLS certificate verification.",
+     &opt_cloud_insecure, &opt_cloud_insecure, 0, GET_BOOL, NO_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-cacert", OPT_XTRA_CLOUD_CACERT, "Path to CA bundle PEM.",
+     &opt_cloud_cacert, &opt_cloud_cacert, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-timeout", OPT_XTRA_CLOUD_TIMEOUT,
+     "Per-request curl timeout (seconds). 0 to disable.",
+     &opt_cloud_timeout, &opt_cloud_timeout, 0, GET_ULONG, REQUIRED_ARG, 120,
+     0, 86400, 0, 0, 0},
+    {"cloud-max-retries", OPT_XTRA_CLOUD_MAX_RETRIES,
+     "Max retries on transient HTTP/curl errors.",
+     &opt_cloud_max_retries, &opt_cloud_max_retries, 0, GET_ULONG,
+     REQUIRED_ARG, 10, 0, 1000, 0, 0, 0},
+    {"cloud-max-backoff", OPT_XTRA_CLOUD_MAX_BACKOFF,
+     "Max retry backoff in ms.",
+     &opt_cloud_max_backoff, &opt_cloud_max_backoff, 0, GET_ULONG,
+     REQUIRED_ARG, 300000, 0, 3600000, 0, 0, 0},
+    {"cloud-parallel", OPT_XTRA_CLOUD_PARALLEL,
+     "Max concurrent in-flight HTTP requests inside the Event_handler.",
+     &opt_cloud_parallel, &opt_cloud_parallel, 0, GET_ULONG, REQUIRED_ARG, 8,
+     1, 1024, 0, 0, 0},
+    {"cloud-multipart-upload", OPT_XTRA_CLOUD_MULTIPART_UPLOAD,
+     "Enable multipart upload (one object per file). OFF falls back to "
+     "single-PUT per file.",
+     &opt_cloud_multipart_upload, &opt_cloud_multipart_upload, 0, GET_BOOL,
+     NO_ARG, 1, 0, 0, 0, 0, 0},
+    {"cloud-multipart-part-size", OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
+     "Override the tiered dynamic part-size schedule with a fixed part "
+     "size in bytes. 0 = use the schedule.",
+     &opt_cloud_multipart_part_size, &opt_cloud_multipart_part_size, 0,
+     GET_ULL, REQUIRED_ARG, 0, 0,
+     5ULL * 1024 * 1024 * 1024, 0, 0, 0},
+    {"cloud-multipart-memory-budget", OPT_XTRA_CLOUD_MULTIPART_MEMORY_BUDGET,
+     "Per-file in-flight buffer cap in bytes.",
+     &opt_cloud_multipart_memory_budget, &opt_cloud_multipart_memory_budget,
+     0, GET_ULL, REQUIRED_ARG, 4ULL * 1024 * 1024 * 1024,
+     16ULL * 1024 * 1024, ULLONG_MAX, 0, 0, 0},
+    {"cloud-multipart-threshold", OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
+     "Streams below this finish as a single PUT, no Initiate/Abort.",
+     &opt_cloud_multipart_threshold, &opt_cloud_multipart_threshold, 0,
+     GET_ULL, REQUIRED_ARG, 16ULL * 1024 * 1024, 0,
+     5ULL * 1024 * 1024 * 1024, 0, 0, 0},
+    {"cloud-multipart-rollover-threshold",
+     OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
+     "Files larger than this would roll over (currently aborts with a "
+     "clear message; rollover lands in the manifest follow-up).",
+     &opt_cloud_multipart_rollover_threshold,
+     &opt_cloud_multipart_rollover_threshold, 0, GET_ULL, REQUIRED_ARG,
+     5ULL * 1024 * 1024 * 1024 * 1024, 16ULL * 1024 * 1024, ULLONG_MAX, 0, 0,
+     0},
+    {"cloud-rate-log-interval", OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
+     "Log upload throughput every N seconds on the libev thread. 0 to "
+     "disable.",
+     &opt_cloud_rate_log_interval, &opt_cloud_rate_log_interval, 0,
+     GET_ULONG, REQUIRED_ARG, 10, 0, 86400, 0, 0, 0},
+    {"cloud-http-timing", OPT_XTRA_CLOUD_HTTP_TIMING,
+     "Record per-call curl phase timings; dump on exit.",
+     &opt_cloud_http_timing, &opt_cloud_http_timing, 0, GET_BOOL, NO_ARG, 0,
+     0, 0, 0, 0, 0},
 
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
@@ -3498,7 +3676,76 @@ Otherwise (i.e. when streaming in the 'tar' format) we need 2 separate datasinks
 for the data stream (and don't allow parallel data copying) and for metainfo
 files (including xtrabackup_logfile). The second datasink writes to temporary
 files first, and then streams them in a serialized way when closed. */
+/* Fold the raw --cloud-* option storage into g_ds_cloud_config that
+   ds_cloud reads. Called from main() after the option parser runs. */
+static void apply_cloud_options() {
+  if (opt_cloud_storage) g_ds_cloud_config.storage = opt_cloud_storage;
+  if (opt_cloud_url) g_ds_cloud_config.url = opt_cloud_url;
+  if (opt_cloud_bucket) g_ds_cloud_config.container = opt_cloud_bucket;
+  if (opt_cloud_region) g_ds_cloud_config.region = opt_cloud_region;
+  if (opt_cloud_endpoint) g_ds_cloud_config.endpoint = opt_cloud_endpoint;
+  if (opt_cloud_access_key)
+    g_ds_cloud_config.access_key = opt_cloud_access_key;
+  if (opt_cloud_secret_key)
+    g_ds_cloud_config.secret_key = opt_cloud_secret_key;
+  if (opt_cloud_session_token)
+    g_ds_cloud_config.session_token = opt_cloud_session_token;
+  if (opt_cloud_bucket_lookup)
+    g_ds_cloud_config.bucket_lookup = opt_cloud_bucket_lookup;
+  if (opt_cloud_storage_class)
+    g_ds_cloud_config.storage_class = opt_cloud_storage_class;
+  if (opt_cloud_azure_account)
+    g_ds_cloud_config.azure_account = opt_cloud_azure_account;
+  if (opt_cloud_azure_access_key)
+    g_ds_cloud_config.azure_access_key = opt_cloud_azure_access_key;
+  if (opt_cloud_azure_endpoint)
+    g_ds_cloud_config.azure_endpoint = opt_cloud_azure_endpoint;
+  g_ds_cloud_config.insecure = opt_cloud_insecure;
+  if (opt_cloud_cacert) g_ds_cloud_config.cacert = opt_cloud_cacert;
+  g_ds_cloud_config.timeout = opt_cloud_timeout;
+  g_ds_cloud_config.max_retries = opt_cloud_max_retries;
+  g_ds_cloud_config.max_backoff = opt_cloud_max_backoff;
+  g_ds_cloud_config.parallel = opt_cloud_parallel;
+  g_ds_cloud_config.multipart_upload = opt_cloud_multipart_upload;
+  g_ds_cloud_config.multipart_part_size = opt_cloud_multipart_part_size;
+  g_ds_cloud_config.multipart_memory_budget =
+      opt_cloud_multipart_memory_budget;
+  g_ds_cloud_config.multipart_threshold = opt_cloud_multipart_threshold;
+  g_ds_cloud_config.multipart_rollover_threshold =
+      opt_cloud_multipart_rollover_threshold;
+  g_ds_cloud_config.rate_log_interval = opt_cloud_rate_log_interval;
+  g_ds_cloud_config.http_timing = opt_cloud_http_timing;
+}
+
 static void xtrabackup_init_datasinks(void) {
+  apply_cloud_options();
+
+  /* PXB-3671: when --cloud-storage is set, every backup datasink target
+     becomes the cloud bucket via ds_cloud. The backup name (passed as
+     the "root") becomes the prefix inside the bucket. Mutually
+     exclusive with --stream and with local target-dir output. */
+  if (!g_ds_cloud_config.storage.empty()) {
+    if (xtrabackup_stream) {
+      xb::error() << "--cloud-storage is incompatible with --stream";
+      exit(EXIT_FAILURE);
+    }
+    if (!ds_cloud_probe()) {
+      xb::error() << "ds_cloud probe failed; refusing to start the backup";
+      exit(EXIT_FAILURE);
+    }
+    /* Use the backup name (basename of target-dir) as the bucket prefix.
+       Strip leading "./" and any trailing slash. */
+    const char *prefix = xtrabackup_target_dir;
+    while (prefix[0] == '.' && prefix[1] == '/') prefix += 2;
+    ds_data = ds_meta = ds_redo = ds_create(prefix, DS_TYPE_CLOUD);
+    if (ds_data == nullptr) {
+      xb::error() << "ds_cloud init failed";
+      exit(EXIT_FAILURE);
+    }
+    xtrabackup_add_datasink(ds_data);
+    return;
+  }
+
   /* Start building out the pipelines from the terminus back */
   if (xtrabackup_stream) {
     if (xtrabackup_fifo_streams > 1) {
