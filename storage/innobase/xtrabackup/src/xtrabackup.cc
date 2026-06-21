@@ -101,6 +101,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "common.h"
 #include "datasink.h"
 #include "ds_cloud.h"
+#include "ds_cloud_lifecycle.h"
 #include "xtrabackup_version.h"
 
 #include "backup_copy.h"
@@ -162,6 +163,14 @@ bool xtrabackup_copy_back = false;
 bool xtrabackup_move_back = false;
 bool xtrabackup_decrypt_decompress = false;
 bool xtrabackup_print_param = false;
+
+/* PXB-3671: cloud lifecycle modes. --download fetches a previously
+   uploaded backup from the cloud back to --target-dir. --delete removes
+   a backup's objects from the cloud. Both are top-level modes; the
+   --backup mode itself remains the way to PUSH a backup to the cloud
+   (via --cloud-storage). */
+bool xtrabackup_cloud_download = false;
+bool xtrabackup_cloud_delete = false;
 
 bool xtrabackup_export = false;
 bool xtrabackup_apply_log_only = false;
@@ -886,6 +895,8 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
   OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
   OPT_XTRA_CLOUD_HTTP_TIMING,
+  OPT_XTRA_CLOUD_DOWNLOAD,
+  OPT_XTRA_CLOUD_DELETE,
 };
 
 struct my_option xb_client_options[] = {
@@ -1650,6 +1661,21 @@ struct my_option xb_client_options[] = {
      "Record per-call curl phase timings; dump on exit.",
      &opt_cloud_http_timing, &opt_cloud_http_timing, 0, GET_BOOL, NO_ARG, 0,
      0, 0, 0, 0, 0},
+
+    {"download", OPT_XTRA_CLOUD_DOWNLOAD,
+     "Cloud lifecycle: fetch a previously uploaded backup from the cloud "
+     "and reconstruct it under --target-dir locally. Requires --cloud-* "
+     "options to identify the source bucket / prefix. Resulting tree is "
+     "identical to a local backup so --prepare / --copy-back work "
+     "unchanged.",
+     &xtrabackup_cloud_download, &xtrabackup_cloud_download, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"delete", OPT_XTRA_CLOUD_DELETE,
+     "Cloud lifecycle: delete a backup from the cloud. Lists objects "
+     "under the prefix and removes each one. --force skips the "
+     "confirmation prompt.",
+     &xtrabackup_cloud_delete, &xtrabackup_cloud_delete, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
 
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
@@ -8566,6 +8592,8 @@ int main(int argc, char **argv) {
     if (xtrabackup_copy_back) num++;
     if (xtrabackup_move_back) num++;
     if (xtrabackup_decrypt_decompress) num++;
+    if (xtrabackup_cloud_download) num++;
+    if (xtrabackup_cloud_delete) num++;
     if (num != 1) { /* !XOR (for now) */
       usage();
       exit(EXIT_FAILURE);
@@ -8590,6 +8618,21 @@ int main(int argc, char **argv) {
   signal(SIGUSR1, sigusr1_handler);
 #endif /* UNIV_DEBUG */
 #endif
+
+  /* --download / --delete: cloud lifecycle modes (no mysqld interaction). */
+  if (xtrabackup_cloud_download || xtrabackup_cloud_delete) {
+    apply_cloud_options();
+    if (xtrabackup_cloud_download) {
+      if (!xb_cloud_download(xtrabackup_target_dir)) {
+        exit(EXIT_FAILURE);
+      }
+    } else {
+      if (!xb_cloud_delete(/*force=*/false)) {
+        exit(EXIT_FAILURE);
+      }
+    }
+    exit(EXIT_SUCCESS);
+  }
 
   /* --backup */
   if (xtrabackup_backup) {
