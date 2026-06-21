@@ -1,11 +1,41 @@
-# PXB-3671 Phase 1 prototype status
+# PXB-3671 / PXB-3787 status
 
 Branch: `97_redesign_proto` off `release-9.7.0-1`.
 Worktree: `~/WORK/pxb-97-redesign-proto`.
 JIRA: https://perconadev.atlassian.net/browse/PXB-3671
 Design doc: `~/.claude/plans/no-these-are-just-sunny-pnueli.md`.
 
-## Phase 1c update (this commit)
+## Phase 2 update (xtrabackup direct-cloud streaming)
+
+Phase 2 added direct cloud upload/download/delete in xtrabackup itself
+via the new `ds_cloud` datasink. xbcloud is unchanged and remains the
+testing/comparison baseline.
+
+User-facing docs: `storage/innobase/xtrabackup/doc/cloud_direct.md`.
+Test harness: `storage/innobase/xtrabackup/test/cloud/`.
+
+Phase 2 commits (on top of the consolidated Phase 1 work):
+- Extract `xbcloud_internal` OBJECT library; xtrabackup and xbcloud
+  both link it.
+- New `ds_cloud` datasink: per-file `Multipart_uploader`, shared
+  `Event_handler`, lazy Init + small-file fast path inherited from
+  xbcloud.
+- 24 `--cloud-*` CLI options on xtrabackup; backup mode probes
+  before file copy starts.
+- `xtrabackup --download` / `xtrabackup --delete` modes.
+- `test/cloud/` harness: env-driven (`PXB_CLOUD_BACKEND`), validated
+  end-to-end against LocalStack (`upload_download_round_trip.sh`).
+
+Phase 2 follow-up work (NOT in this branch):
+- Sparse file fidelity (needs `backup_meta.json` from PXB-3754).
+- Streaming rollover for files > 5 TiB (needs the same manifest).
+- `--force` on `xtrabackup --delete`.
+- Parallel range GETs in `--download`.
+- `ListMultipartUploads` cleanup in `--delete`.
+- Comprehensive backup → download → `--prepare` → diff harness
+  against a real mysqld 9.7 instance.
+
+## Phase 1c update (the previous commit)
 
 Replaces the per-file Q7 formula and fixed-size streaming threshold
 with one unified tiered schedule (`dynamic_part_size`) that drives
