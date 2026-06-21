@@ -107,6 +107,42 @@ ds_cloud, courtesy of the `xbcloud_internal` CMake OBJECT library.
 ds_cloud-ctxt (i.e. one libev thread per xtrabackup data-copy chain);
 `Http_client` carries the per-process curl handles and `CURLSH` share.
 
+`Stream_multipart_writer` (defined in `xbcloud/multipart.h`) is the
+single class that drives the streaming-multipart protocol — buffer
+bytes, flush parts at `dynamic_part_size()` boundaries, take the small-
+file fast path at close. Both xbcloud's `put_func` and ds_cloud's
+`cloud_write`/`cloud_close` use it; there is no duplicated multipart
+state machine.
+
+### Why xbcloud uses async small-file PUT but ds_cloud uses sync
+
+`Stream_multipart_writer::set_async_small_file_uploader()` lets the
+small-file fast path go async; without it, the writer uses sync
+`upload_object`. The two callers choose differently on purpose:
+
+- **xbcloud's `put_func` is single-producer**. One thread reads
+  xbstream frames in a tight loop. Blocking on each small file's PUT
+  would stall the pipe, so xbcloud installs the async uploader that
+  fires-and-forgets through `Event_handler`. Errors bubble back via a
+  `has_errors` atomic in the caller's callback, and `h.stop(); ev.join()`
+  drains everything before exit.
+
+- **ds_cloud is multi-worker**. xtrabackup spins up `--parallel=N`
+  data-copy threads, each iterating files independently. Worker N
+  blocking in `cloud_close` on a sync upload does NOT prevent the
+  other N−1 workers from progressing — parallelism comes from having
+  multiple workers, not from per-worker async. So sync is fine, and
+  it brings three concrete simplifications: `cloud_close` returns the
+  true upload result directly (no separate atomic / drain machinery
+  on the ctxt), no risk of `xtrabackup_checkpoints` racing ahead of
+  a still-in-flight data file (the commit-marker hazard), and one
+  fewer state machine in ds_cloud's per-file lifecycle.
+
+Connection reuse (CURLSH sharing DNS / TLS / connection pool) is the
+same for sync and async paths — both route through one `Http_client`
+with the share handle installed. So this choice is purely about whose
+thread blocks, not about wire efficiency.
+
 ```
 xtrabackup --backup
    |
