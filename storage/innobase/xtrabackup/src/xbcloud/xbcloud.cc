@@ -928,10 +928,11 @@ struct file_entry_t {
    per-part model belongs in xtrabackup's Phase 2 ds_cloud (see mpcat for a
    standalone demonstration of that). */
 struct mp_upload_t {
-  std::unique_ptr<Object_store_multipart_helper> helper;
-  std::unique_ptr<Multipart_uploader> uploader;
-  Http_buffer part_buf;
-  int next_part_num{1};
+  /* Shared Stream_multipart_writer (see multipart.h) drives the
+     buffer + flush + commit / small-file fast-path logic. Both
+     xbcloud's put_func and xtrabackup's ds_cloud use the same class
+     -- single source of truth for the multipart streaming protocol. */
+  std::unique_ptr<Stream_multipart_writer> writer;
 };
 
 /**
@@ -1057,37 +1058,52 @@ void put_func(put_thread_ctxt_t &cntx) {
       mp_upload_t *mp = mpfilehash[chunk.path].get();
       if (mp == nullptr) {
         auto entry_ptr = std::make_unique<mp_upload_t>();
-        entry_ptr->helper = std::make_unique<Object_store_multipart_helper>(
-            cntx.store, *cntx.container, object_name);
-        /* Per-file uploader: byte-based memory budget caps the in-flight
-           buffer regardless of how the dynamic schedule grows part_size
-           through the stream. NOTE: we do NOT call uploader->start()
-           here. Multipart_uploader::upload_part lazy-Inits on first
-           call. Files that turn out to be small (single-PUT fast path
-           at EOF) never trigger Init, saving 2 sync round-trips per
-           small file. Measured impact: -8s wall on perf_wan.sh with
-           40 small files at 100ms RTT. */
-        entry_ptr->uploader = std::make_unique<Multipart_uploader>(
-            entry_ptr->helper.get(), &h, opt_multipart_memory_budget);
+        entry_ptr->writer = std::make_unique<Stream_multipart_writer>(
+            cntx.store, *cntx.container, object_name, &h,
+            opt_multipart_memory_budget,
+            static_cast<size_t>(opt_multipart_threshold),
+            static_cast<size_t>(opt_multipart_part_size));
+        /* xbcloud (unlike ds_cloud) prefers an async small-file PUT so the
+           producer thread doesn't block on each tiny file when ingesting
+           many of them. Wire the writer's small-file path through the
+           Event_handler-backed async_upload_object. */
+        auto *errp = cntx.has_errors;
+        int thread_id = cntx.thread_id;
+        auto *container = cntx.container;
+        Object_store *store = cntx.store;
+        Event_handler *event_handler = &h;
+        entry_ptr->writer->set_async_small_file_uploader(
+            [errp, thread_id, container, store, event_handler](
+                const std::string &name, const Http_buffer &body) -> bool {
+              size_t length = body.size();
+              return store->async_upload_object(
+                  *container, name, body, event_handler,
+                  [errp, thread_id, name, length](bool ok,
+                                                  const Http_buffer &) {
+                    if (ok) {
+                      msg_ts(
+                          "%s: [%d] small-file PUT done: %s, size: %zu\n",
+                          my_progname, thread_id, name.c_str(), length);
+                    } else {
+                      msg_ts(
+                          "%s: [%d] error: small-file PUT failed: %s, "
+                          "size: %zu\n",
+                          my_progname, thread_id, name.c_str(), length);
+                      errp->store(true);
+                    }
+                  });
+            });
         mp = (mpfilehash[chunk.path] = std::move(entry_ptr)).get();
       }
 
-      /* The cloud object IS the file in this design -- aws s3 cp on
-         the bucket key returns the original file bytes directly. So we
-         extract chunk.data (the payload bytes only) for PAYLOAD frames.
-         chunk.raw_data is the FULL framed bytes (header + payload), used
-         by the legacy chunk-per-PUT path where downloads cat | xbstream -x.
-         EOF frames carry no file data; only signal commit. SPARSE frames
-         require offset-honoring writes / hole reconstruction which isn't
-         supported in Phase 1; sparse-file backups need Phase 2's manifest
-         carrying the sparse_map. */
+      /* SPARSE frames require offset-honoring writes / hole reconstruction
+         which is not supported in this phase; folds into the unified
+         backup_meta.json manifest (PXB-3754). */
       if (chunk.type == XB_CHUNK_TYPE_SPARSE) {
         msg_ts(
             "%s: [%d] error: sparse file %s is not supported by xbcloud's "
-            "multipart upload in Phase 1. Sparse handling moves to the "
-            "Phase 2 manifest (backup_meta.json). Workaround: disable "
-            "sparse-file copy (--no-defaults? or use legacy "
-            "--multipart-upload=OFF for now).\n",
+            "multipart upload. Use --multipart-upload=OFF for sparse-file "
+            "backups.\n",
             my_progname, cntx.thread_id, chunk.path);
         cntx.has_errors->store(true);
         my_free(chunk.raw_data);
@@ -1096,21 +1112,22 @@ void put_func(put_thread_ctxt_t &cntx) {
         continue;
       }
       if (chunk.type == XB_CHUNK_TYPE_PAYLOAD && chunk.length > 0) {
-        mp->part_buf.append(static_cast<const char *>(chunk.data),
-                            chunk.length);
+        if (!mp->writer->append(static_cast<const char *>(chunk.data),
+                                chunk.length)) {
+          msg_ts("%s: [%d] writer->append failed for %s\n", my_progname,
+                 cntx.thread_id, object_name.c_str());
+          cntx.has_errors->store(true);
+        }
       }
 
-      /* Rollover not yet supported in streaming mode (size is unknown
-         up front). If the stream blows past the rollover threshold,
-         abort with a clear message rather than silently exceeding S3's
-         single-object hard cap. Known-size mode (--multipart-from-file)
-         handles oversize files via segmented uploads. */
-      if (mp->uploader->bytes_appended() > opt_multipart_rollover_threshold) {
+      /* Rollover not yet supported in streaming mode (size is unknown up
+         front). If the writer's running bytes_appended crosses the
+         configured per-object cap, abort with a clear message. */
+      if (mp->writer->bytes_appended() > opt_multipart_rollover_threshold) {
         msg_ts(
             "%s: [%d] error: streaming file %s exceeded "
-            "--multipart-rollover-threshold (%llu bytes). Streaming "
-            "rollover is not yet implemented; use --multipart-from-file "
-            "for files larger than the threshold.\n",
+            "--multipart-rollover-threshold (%llu bytes). Use "
+            "--multipart-from-file for files larger than the threshold.\n",
             my_progname, cntx.thread_id, chunk.path,
             opt_multipart_rollover_threshold);
         cntx.has_errors->store(true);
@@ -1120,111 +1137,23 @@ void put_func(put_thread_ctxt_t &cntx) {
         continue;
       }
 
-      /* Flush whole parts while we have enough buffered. The flush
-         threshold is dynamic (re-evaluated after every submission so the
-         tier grows with bytes_appended) unless --multipart-part-size was
-         set to a non-zero override. */
-      while (!cntx.has_errors->load()) {
-        size_t part_size =
-            opt_multipart_part_size != 0
-                ? static_cast<size_t>(opt_multipart_part_size)
-                : dynamic_part_size(mp->uploader->bytes_appended());
-        if (mp->part_buf.size() < part_size) break;
-        if (!mp->uploader->upload_part(mp->next_part_num, mp->part_buf.begin(),
-                                       part_size)) {
-          msg_ts("%s: [%d] multipart upload_part %d failed for %s\n",
-                 my_progname, cntx.thread_id, mp->next_part_num,
-                 object_name.c_str());
-          cntx.has_errors->store(true);
-          break;
-        }
-        /* Trim flushed bytes from the buffer. */
-        Http_buffer leftover;
-        if (mp->part_buf.size() > part_size) {
-          leftover.append(mp->part_buf.begin() + part_size,
-                          mp->part_buf.size() - part_size);
-        }
-        mp->part_buf = std::move(leftover);
-        ++mp->next_part_num;
-      }
-
       /* Update file_entry_t bookkeeping BEFORE any erase below. */
       entry->offset += chunk.length;
       entry->chunk_idx++;
 
-      /* EOF: flush remainder as the last part, then commit. */
+      /* EOF: writer->close() finalizes (multipart commit OR small-file
+         single PUT depending on whether parts were already submitted). */
       if (chunk.type == XB_CHUNK_TYPE_EOF) {
         if (!cntx.has_errors->load()) {
-          /* Small-file fast path: if no parts have been submitted yet and
-             the entire stream is at-or-below the threshold, ship as a
-             single PUT instead of multipart. Avoids the Initiate +
-             UploadPart + Complete round-trip overhead. */
-          bool small_file_single_put =
-              mp->next_part_num == 1 &&
-              mp->part_buf.size() <=
-                  static_cast<size_t>(opt_multipart_threshold);
-
-          if (small_file_single_put) {
-            /* Skip abort() entirely if we never Init'd (lazy-Init).
-               This is the common case for small files now: no Init,
-               no Abort, no Complete -- just one async PUT. Three
-               sync round-trips saved per small file. */
-            if (mp->uploader->started()) {
-              mp->uploader->abort();
-            }
-            Http_buffer buf;
-            if (mp->part_buf.size() > 0) {
-              buf.append(mp->part_buf.begin(), mp->part_buf.size());
-            }
-            cntx.store->async_upload_object(
-                *cntx.container, object_name, buf, &h,
-                std::bind(
-                    [&](bool ok, std::string path, size_t length,
-                        std::atomic<bool> *err) {
-                      if (ok) {
-                        msg_ts(
-                            "%s: [%d] small-file PUT done: %s, size: %zu\n",
-                            my_progname, cntx.thread_id, path.c_str(), length);
-                      } else {
-                        msg_ts(
-                            "%s: [%d] error: small-file PUT failed: %s, "
-                            "size: %zu\n",
-                            my_progname, cntx.thread_id, path.c_str(), length);
-                        err->store(true);
-                      }
-                    },
-                    std::placeholders::_1, object_name, mp->part_buf.size(),
-                    cntx.has_errors));
-            mp->part_buf = Http_buffer{};
-          } else {
-            if (mp->part_buf.size() > 0 || mp->next_part_num == 1) {
-              /* Final part: whatever bytes remain. May be < 5 MiB; S3
-                 allows the last part to be any size. */
-              if (!mp->uploader->upload_part(mp->next_part_num,
-                                             mp->part_buf.begin(),
-                                             mp->part_buf.size())) {
-                msg_ts("%s: [%d] final upload_part %d failed for %s\n",
-                       my_progname, cntx.thread_id, mp->next_part_num,
-                       object_name.c_str());
-                cntx.has_errors->store(true);
-              }
-              mp->part_buf = Http_buffer{};
-              ++mp->next_part_num;
-            }
-
-            if (!cntx.has_errors->load()) {
-              if (!mp->uploader->commit()) {
-                msg_ts("%s: [%d] multipart commit failed for %s\n",
-                       my_progname, cntx.thread_id, object_name.c_str());
-                cntx.has_errors->store(true);
-              } else {
-                msg_ts("%s: [%d] multipart commit done for %s\n", my_progname,
-                       cntx.thread_id, object_name.c_str());
-              }
-            }
+          if (!mp->writer->close()) {
+            msg_ts("%s: [%d] writer->close failed for %s\n", my_progname,
+                   cntx.thread_id, object_name.c_str());
+            cntx.has_errors->store(true);
+          } else if (!mp->writer->small_file_path_taken()) {
+            msg_ts("%s: [%d] multipart commit done for %s\n", my_progname,
+                   cntx.thread_id, object_name.c_str());
           }
         }
-
         mpfilehash.erase(chunk.path);
         filehash.erase(chunk.path);
       }
@@ -1280,12 +1209,11 @@ void put_func(put_thread_ctxt_t &cntx) {
     memset(&chunk, 0, sizeof(chunk));
   } while (!cntx.has_errors->load());
 
-  /* PXB-3671 prototype: abort any still-open Multipart_uploaders on early
-     exit. Each uploader's destructor handles the actual abort + drain. */
+  /* Abort any still-open writers on early exit. */
   for (auto &kv : mpfilehash) {
     msg_ts("%s: [%d] aborting in-flight multipart on early exit: %s\n",
            my_progname, cntx.thread_id, kv.first.c_str());
-    kv.second->uploader->abort();
+    kv.second->writer->abort();
   }
   mpfilehash.clear();
 

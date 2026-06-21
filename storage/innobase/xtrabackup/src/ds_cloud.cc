@@ -65,14 +65,12 @@ struct ds_cloud_ctxt_t {
   std::atomic<unsigned long long> bytes_written{0};
 };
 
-/* Per-file state. file->ptr points here. */
+/* Per-file state. file->ptr points here.
+   Stream_multipart_writer encapsulates the part_buf + flush loop +
+   small-file fast path; we just feed it bytes. */
 struct ds_cloud_file_t {
   std::string object_name;                 /* "<backup_prefix>/<path>" */
-  std::unique_ptr<Object_store_multipart_helper> helper;
-  std::unique_ptr<Multipart_uploader> uploader;
-  Http_buffer part_buf;
-  int next_part_num{1};
-  uint64_t bytes_appended{0};
+  std::unique_ptr<Stream_multipart_writer> writer;
   ds_cloud_ctxt_t *ctxt{nullptr};
 };
 
@@ -206,13 +204,11 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   auto *cf = new ds_cloud_file_t;
   cf->object_name = object;
   cf->ctxt = cc;
-  cf->helper = std::make_unique<Object_store_multipart_helper>(
-      cc->object_store.get(), cc->container, object);
-  cf->uploader = std::make_unique<Multipart_uploader>(
-      cf->helper.get(), cc->event_handler.get(),
-      g_ds_cloud_config.multipart_memory_budget);
-  /* NOTE: do NOT call uploader->start() here -- lazy Init means small
-     files take the single-PUT fast path with zero control-plane RTTs. */
+  cf->writer = std::make_unique<Stream_multipart_writer>(
+      cc->object_store.get(), cc->container, object, cc->event_handler.get(),
+      g_ds_cloud_config.multipart_memory_budget,
+      static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
+      static_cast<size_t>(g_ds_cloud_config.multipart_part_size));
 
   size_t path_len = strlen(path) + 1;
   auto *file = static_cast<ds_file_t *>(
@@ -226,54 +222,24 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   return file;
 }
 
-/* Flush accumulated parts while we have enough buffered. The flush
-   threshold is dynamic (re-evaluated against bytes_appended so the
-   tier grows with stream size) unless --cloud-multipart-part-size set
-   an explicit override. */
-bool flush_parts_if_full(ds_cloud_file_t *cf) {
-  while (true) {
-    size_t part_size =
-        g_ds_cloud_config.multipart_part_size != 0
-            ? static_cast<size_t>(g_ds_cloud_config.multipart_part_size)
-            : dynamic_part_size(cf->bytes_appended);
-    if (cf->part_buf.size() < part_size) break;
-    if (!cf->uploader->upload_part(cf->next_part_num, cf->part_buf.begin(),
-                                   part_size)) {
-      msg_ts("ds_cloud: upload_part %d failed for %s\n", cf->next_part_num,
-             cf->object_name.c_str());
-      return false;
-    }
-    Http_buffer leftover;
-    if (cf->part_buf.size() > part_size) {
-      leftover.append(cf->part_buf.begin() + part_size,
-                      cf->part_buf.size() - part_size);
-    }
-    cf->part_buf = std::move(leftover);
-    cf->bytes_appended += part_size;
-    ++cf->next_part_num;
-
-    /* Safety: streaming rollover not yet supported (size unknown up
-       front). If the stream is about to cross the per-object hard cap,
-       abort with a clear message. The Phase 2 manifest will fold
-       streaming rollover later. */
-    if (cf->bytes_appended > g_ds_cloud_config.multipart_rollover_threshold) {
-      msg_ts(
-          "ds_cloud: file '%s' exceeded --cloud-multipart-rollover-threshold "
-          "(%llu bytes); streaming rollover is not yet implemented\n",
-          cf->object_name.c_str(),
-          g_ds_cloud_config.multipart_rollover_threshold);
-      return false;
-    }
-  }
-  return true;
-}
-
 int cloud_write(ds_file_t *file, const void *buf, size_t len) {
   auto *cf = static_cast<ds_cloud_file_t *>(file->ptr);
-  if (len > 0) {
-    cf->part_buf.append(static_cast<const char *>(buf), len);
+  if (!cf->writer->append(static_cast<const char *>(buf), len)) {
+    msg_ts("ds_cloud: append failed for %s\n", cf->object_name.c_str());
+    return 1;
   }
-  if (!flush_parts_if_full(cf)) return 1;
+  /* Streaming rollover not yet supported (size unknown up front). If
+     the writer's running bytes_appended crosses the configured per-
+     object cap, fail fast with a clear message. */
+  if (cf->writer->bytes_appended() >
+      g_ds_cloud_config.multipart_rollover_threshold) {
+    msg_ts(
+        "ds_cloud: file '%s' exceeded --cloud-multipart-rollover-threshold "
+        "(%llu bytes); streaming rollover is not yet implemented\n",
+        cf->object_name.c_str(),
+        g_ds_cloud_config.multipart_rollover_threshold);
+    return 1;
+  }
   cf->ctxt->bytes_written.fetch_add(len, std::memory_order_relaxed);
   return 0;
 }
@@ -295,54 +261,10 @@ int cloud_write_sparse(ds_file_t *file, const void *buf, size_t len,
 
 int cloud_close(ds_file_t *file) {
   auto *cf = static_cast<ds_cloud_file_t *>(file->ptr);
-  int rc = 0;
-
-  /* Small-file fast path: if no parts have been submitted yet AND the
-     entire buffer is at-or-below the threshold, ship as a single PUT.
-     Avoids Init + UploadPart + Complete round-trips for tiny files. */
-  bool small_file_single_put =
-      cf->next_part_num == 1 &&
-      cf->part_buf.size() <=
-          static_cast<size_t>(g_ds_cloud_config.multipart_threshold);
-
-  if (small_file_single_put) {
-    if (cf->uploader->started()) {
-      cf->uploader->abort();
-    }
-    Http_buffer payload;
-    if (cf->part_buf.size() > 0) {
-      payload.append(cf->part_buf.begin(), cf->part_buf.size());
-    }
-    /* Use sync upload_object -- xtrabackup's per-file close runs on a
-       data-copy thread already, so blocking briefly here is fine. The
-       Http_client's CURLSH share keeps the TCP connection warm. */
-    if (!cf->ctxt->object_store->upload_object(
-            cf->ctxt->container, cf->object_name, payload)) {
-      msg_ts("ds_cloud: small-file PUT failed for %s\n",
-             cf->object_name.c_str());
-      rc = 1;
-    }
-  } else {
-    /* Final part: whatever bytes remain. May be < 5 MiB; S3 allows the
-       last part to be any size. */
-    if (cf->part_buf.size() > 0) {
-      if (!cf->uploader->upload_part(cf->next_part_num, cf->part_buf.begin(),
-                                     cf->part_buf.size())) {
-        msg_ts("ds_cloud: final upload_part %d failed for %s\n",
-               cf->next_part_num, cf->object_name.c_str());
-        rc = 1;
-      }
-    }
-    if (rc == 0) {
-      if (!cf->uploader->commit()) {
-        msg_ts("ds_cloud: commit failed for %s\n", cf->object_name.c_str());
-        rc = 1;
-      }
-    } else {
-      cf->uploader->abort();
-    }
+  int rc = cf->writer->close() ? 0 : 1;
+  if (rc != 0) {
+    msg_ts("ds_cloud: close failed for %s\n", cf->object_name.c_str());
   }
-
   delete cf;
   my_free(file);
   return rc;

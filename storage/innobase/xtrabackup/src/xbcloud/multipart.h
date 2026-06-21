@@ -246,6 +246,97 @@ class Object_store_multipart_helper : public IMultipart_helper {
 };
 
 /**
+ * Streaming multipart writer. Owns one Multipart_uploader plus the
+ * per-file part_buf and counters. Encapsulates the dynamic_part_size
+ * flush loop and the small-file single-PUT fast path so callers don't
+ * each open-code it.
+ *
+ * Used by:
+ *   - xbcloud's put_func (one writer per file in the mpfilehash map).
+ *   - xtrabackup's ds_cloud (one writer per ds_file_t).
+ *   - xbcloud's --multipart-from-file mode (one writer per segment).
+ *
+ * Threading model: same as Multipart_uploader -- producer thread calls
+ * append() and close() serially per writer. Part uploads happen async
+ * on Event_handler's libev thread.
+ *
+ * Lazy Init is inherited from Multipart_uploader: no InitiateMultipart
+ * is issued until the first part actually flushes.
+ *
+ * Small-file fast path: at close(), if no parts have been submitted
+ * yet AND the accumulated buffer is <= small_file_threshold, the
+ * writer ships the whole buffer as a single PUT (sync by default; an
+ * async variant is available via set_async_small_file_uploader, used
+ * by xbcloud to keep the producer thread non-blocking when ingesting
+ * many tiny files).
+ */
+class Stream_multipart_writer {
+ public:
+  /* Caller-supplied function that performs an async single-PUT when the
+     writer decides the small-file fast path applies. Receives the
+     object key + body; should return true on accepted submission (the
+     PUT itself fires async). When unset, close() falls back to a
+     synchronous store->upload_object. */
+  using async_small_file_fn =
+      std::function<bool(const std::string &object,
+                         const Http_buffer &body)>;
+
+  Stream_multipart_writer(Object_store *store, std::string container,
+                          std::string object, Event_handler *event_handler,
+                          uint64_t memory_budget,
+                          size_t small_file_threshold,
+                          size_t fixed_part_size_override = 0)
+      : m_store(store),
+        m_container(std::move(container)),
+        m_object(std::move(object)),
+        m_helper(m_store, m_container, m_object),
+        m_uploader(&m_helper, event_handler, memory_budget),
+        m_small_file_threshold(small_file_threshold),
+        m_fixed_part_size_override(fixed_part_size_override) {}
+
+  Stream_multipart_writer(const Stream_multipart_writer &) = delete;
+  Stream_multipart_writer &operator=(const Stream_multipart_writer &) = delete;
+
+  /* Use an async small-file PUT instead of the default sync upload. */
+  void set_async_small_file_uploader(async_small_file_fn fn) {
+    m_async_small_file = std::move(fn);
+  }
+
+  /* Append bytes; may flush full parts as they accumulate. Returns false
+     on failure (upload_part rejected, etc.). */
+  bool append(const char *data, size_t size);
+
+  /* EOF: either single-PUT fast path or final-flush + commit. After
+     close() the writer is finalized. Returns false on failure. */
+  bool close();
+
+  uint64_t bytes_appended() const { return m_uploader.bytes_appended(); }
+  uint64_t bytes_uploaded() const { return m_uploader.bytes_uploaded(); }
+  bool small_file_path_taken() const { return m_small_file_path_taken; }
+  const std::string &object_name() const { return m_object; }
+
+  /* Cancel any in-flight upload. Best effort. */
+  void abort();
+
+ private:
+  bool flush_full_parts();
+
+  Object_store *m_store;
+  std::string m_container;
+  std::string m_object;
+  Object_store_multipart_helper m_helper;
+  Multipart_uploader m_uploader;
+  size_t m_small_file_threshold;
+  size_t m_fixed_part_size_override;
+
+  Http_buffer m_part_buf;
+  int m_next_part_num{1};
+  bool m_small_file_path_taken{false};
+  bool m_closed{false};
+  async_small_file_fn m_async_small_file;
+};
+
+/**
  * One segment of a rolled-over file. A logical file larger than
  * --multipart-rollover-threshold is split across several objects in
  * the bucket; the manifest sidecar records the order and per-segment

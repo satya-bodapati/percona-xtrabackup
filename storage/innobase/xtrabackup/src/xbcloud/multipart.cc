@@ -248,4 +248,108 @@ void Multipart_uploader::abort() {
   stats::total_files_inflight.fetch_sub(1, std::memory_order_relaxed);
 }
 
+/* -------------------------------------------------------------------
+   Stream_multipart_writer
+
+   Shared driver loop that both xbcloud's put_func and xtrabackup's
+   ds_cloud use to ingest bytes into a Multipart_uploader. Consolidates
+   the dynamic_part_size flush loop + small-file fast path so a single
+   piece of code is the source of truth for "what does multipart-upload-
+   of-one-streaming-file" look like.
+   -------------------------------------------------------------------*/
+
+bool Stream_multipart_writer::flush_full_parts() {
+  while (!m_uploader.failed()) {
+    size_t part_size =
+        m_fixed_part_size_override != 0
+            ? m_fixed_part_size_override
+            : dynamic_part_size(m_uploader.bytes_appended());
+    if (m_part_buf.size() < part_size) break;
+    if (!m_uploader.upload_part(m_next_part_num, m_part_buf.begin(),
+                                 part_size)) {
+      msg_ts(
+          "%s: Stream_multipart_writer: upload_part #%d failed for %s\n",
+          my_progname, m_next_part_num, m_object.c_str());
+      return false;
+    }
+    Http_buffer leftover;
+    if (m_part_buf.size() > part_size) {
+      leftover.append(m_part_buf.begin() + part_size,
+                      m_part_buf.size() - part_size);
+    }
+    m_part_buf = std::move(leftover);
+    ++m_next_part_num;
+  }
+  return !m_uploader.failed();
+}
+
+bool Stream_multipart_writer::append(const char *data, size_t size) {
+  if (m_closed) {
+    msg_ts("%s: Stream_multipart_writer: append after close on %s\n",
+           my_progname, m_object.c_str());
+    return false;
+  }
+  if (size > 0) {
+    m_part_buf.append(data, size);
+  }
+  return flush_full_parts();
+}
+
+bool Stream_multipart_writer::close() {
+  if (m_closed) return true;
+  m_closed = true;
+
+  /* Small-file fast path: never opened a multipart session AND the
+     entire stream fits below the threshold -> ship as one PUT. Skips
+     Initiate + UploadPart + Complete round-trips. */
+  bool small_file =
+      m_next_part_num == 1 && m_part_buf.size() <= m_small_file_threshold;
+
+  if (small_file) {
+    m_small_file_path_taken = true;
+    /* Belt-and-suspenders: if a prior failure path started the
+       uploader, clean it up. With lazy Init this shouldn't happen. */
+    if (m_uploader.started()) m_uploader.abort();
+
+    Http_buffer body;
+    if (m_part_buf.size() > 0) {
+      body.append(m_part_buf.begin(), m_part_buf.size());
+    }
+    m_part_buf = Http_buffer{};
+
+    if (m_async_small_file) {
+      return m_async_small_file(m_object, body);
+    }
+    return m_store->upload_object(m_container, m_object, body);
+  }
+
+  /* Multipart path: flush remainder (allowed < 5 MiB as last part by
+     S3), then commit. */
+  if (m_part_buf.size() > 0) {
+    if (!m_uploader.upload_part(m_next_part_num, m_part_buf.begin(),
+                                 m_part_buf.size())) {
+      msg_ts(
+          "%s: Stream_multipart_writer: final upload_part #%d failed for %s\n",
+          my_progname, m_next_part_num, m_object.c_str());
+      return false;
+    }
+    m_part_buf = Http_buffer{};
+    ++m_next_part_num;
+  }
+  if (!m_uploader.commit()) {
+    msg_ts("%s: Stream_multipart_writer: commit failed for %s\n",
+           my_progname, m_object.c_str());
+    return false;
+  }
+  return true;
+}
+
+void Stream_multipart_writer::abort() {
+  if (m_closed) return;
+  m_closed = true;
+  if (m_uploader.started()) {
+    m_uploader.abort();
+  }
+}
+
 }  // namespace xbcloud
