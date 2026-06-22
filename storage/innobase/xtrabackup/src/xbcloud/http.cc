@@ -707,9 +707,18 @@ int Http_client::redacting_debug_callback(CURL * /*handle*/,
                                           curl_infotype type, char *data,
                                           size_t size, void * /*userptr*/) {
   /* Header lines we sanitize: any whose value carries credentials. */
+  /* Per-provider credential-bearing request headers:
+       AWS / S3-compat:  Authorization, X-Amz-Security-Token
+       GCS:              Authorization, X-Goog-Session-Token
+       Azure:            Authorization (SharedKey signature)
+       Swift / Keystone: X-Auth-Token (Keystone bearer token --
+                         every Swift request carries it; leaking it
+                         is equivalent to leaking the username/password). */
   static const char *const kSensitiveHeaders[] = {
-      "authorization", "x-amz-security-token", "x-amz-session-token",
-      "x-goog-session-token"};
+      "authorization",         "x-amz-security-token",
+      "x-amz-session-token",   "x-goog-session-token",
+      "x-auth-token",          "x-subject-token",
+  };
 
   auto print_prefix = [&](const char *tag) {
     fprintf(stderr, "%s ", tag);
