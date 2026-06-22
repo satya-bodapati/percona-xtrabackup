@@ -63,6 +63,13 @@ struct ds_cloud_ctxt_t {
   std::string container;     /* bucket name */
   std::string backup_prefix; /* root passed to ds_init -- prefix within bucket */
   std::atomic<unsigned long long> bytes_written{0};
+  /* Set true by any async small-file PUT callback that observed a
+     failure. Because the async path returns from cloud_close before the
+     PUT completes, ds_close cannot surface those errors directly; we
+     accumulate them here and the libev thread drain at deinit logs +
+     reports them. Same pattern xbcloud's put_func uses with its
+     has_errors atomic. */
+  std::atomic<bool> async_upload_failed{false};
 };
 
 /* Per-file state. file->ptr points here.
@@ -210,6 +217,41 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
       static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
       static_cast<size_t>(g_ds_cloud_config.multipart_part_size));
 
+  /* Empirical (perf_wan.sh + real-AWS benchmarks): sync small-file PUT
+     bottlenecks at WAN RTT even when xtrabackup runs many data-copy
+     workers, because each worker still serializes through its own
+     file sequence. Two specific cases hurt:
+       - Lots of small .ibd files: worker N stalls 200ms-per-file on
+         every close while ds_redo and other workers wait.
+       - ds_redo's small final part on close: blocking it stalls the
+         Redo Log reader thread, which we cannot let happen.
+     So install an async small-file uploader that submits through the
+     Event_handler and returns immediately. Failures land in the ctxt's
+     async_upload_failed atomic; cloud_deinit's drain checks it. */
+  auto *cc_ptr = cc;
+  auto *store = cc->object_store.get();
+  auto *event_handler = cc->event_handler.get();
+  const std::string &container = cc->container;
+  cf->writer->set_async_small_file_uploader(
+      [cc_ptr, store, event_handler, container](
+          const std::string &name, const Http_buffer &body) -> bool {
+        size_t length = body.size();
+        return store->async_upload_object(
+            container, name, body, event_handler,
+            [cc_ptr, name, length](bool ok, const Http_buffer &) {
+              if (ok) {
+                msg_ts("ds_cloud: small-file PUT done: %s (%zu bytes)\n",
+                       name.c_str(), length);
+              } else {
+                msg_ts(
+                    "ds_cloud: small-file PUT FAILED: %s (%zu bytes)\n",
+                    name.c_str(), length);
+                cc_ptr->async_upload_failed.store(true,
+                                                  std::memory_order_relaxed);
+              }
+            });
+      });
+
   size_t path_len = strlen(path) + 1;
   auto *file = static_cast<ds_file_t *>(
       my_malloc(PSI_NOT_INSTRUMENTED, sizeof(ds_file_t) + path_len,
@@ -272,11 +314,25 @@ int cloud_close(ds_file_t *file) {
 
 void cloud_deinit(ds_ctxt_t *ctxt) {
   auto *cc = static_cast<ds_cloud_ctxt_t *>(ctxt->ptr);
+  /* stop() drains the Event_handler -- any small-file PUTs whose
+     async submissions returned during cloud_close but whose HTTP
+     completion hadn't fired yet drain here. By the time the libev
+     thread joins, every async upload has either succeeded or failed. */
   if (cc->event_handler) {
     cc->event_handler->stop();
   }
   if (cc->event_thread.joinable()) {
     cc->event_thread.join();
+  }
+  if (cc->async_upload_failed.load(std::memory_order_relaxed)) {
+    msg_ts(
+        "ds_cloud: one or more async small-file PUTs failed during this "
+        "backup -- the bucket may be missing files. Re-check the bucket "
+        "listing and the log lines above for the specific filenames.\n");
+    /* ds_destroy doesn't have a return value, so the failure surfaces
+       in the log only. Phase 3 cleanup: add an out-parameter or a
+       ds_drain() API so xtrabackup can refuse to write
+       xtrabackup_checkpoints when uploads have failed. */
   }
   delete cc;
   my_free(ctxt->root);
