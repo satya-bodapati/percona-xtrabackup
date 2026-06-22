@@ -58,8 +58,8 @@ struct ds_cloud_config_t {
   /* Max concurrent in-flight HTTP requests inside the libev / curl-multi
      Event_handler. This is HTTP-side concurrency, NOT the count of
      data-copy threads (that's --parallel). Inherits --parallel by
-     default; override with --cloud-http-parallel-requests. */
-  ulong http_parallel_requests{8};
+     default; override with --cloud-max-concurrent-requests. */
+  ulong max_concurrent_requests{8};
 
   /* Multipart knobs. ds_cloud is multipart-only by design -- there is
      no chunk-PUT fallback like xbcloud's legacy mode -- so there's no

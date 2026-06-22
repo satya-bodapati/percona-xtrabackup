@@ -182,8 +182,8 @@ ds_ctxt_t *cloud_init(const char *root) {
   }
 
   cc->event_handler = std::make_unique<Event_handler>(
-      g_ds_cloud_config.http_parallel_requests > 0
-          ? g_ds_cloud_config.http_parallel_requests
+      g_ds_cloud_config.max_concurrent_requests > 0
+          ? g_ds_cloud_config.max_concurrent_requests
           : 1);
   if (!cc->event_handler->init()) {
     msg_ts("ds_cloud: Event_handler init failed\n");
@@ -248,8 +248,8 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   static constexpr uint64_t kMaxParts = 10000;
   const uint64_t user_part = g_ds_cloud_config.multipart_part_size;
   const uint64_t user_concurrent =
-      g_ds_cloud_config.http_parallel_requests > 0
-          ? g_ds_cloud_config.http_parallel_requests
+      g_ds_cloud_config.max_concurrent_requests > 0
+          ? g_ds_cloud_config.max_concurrent_requests
           : 16;
   const uint64_t rollover = g_ds_cloud_config.multipart_rollover_threshold;
   const uint64_t buf = g_ds_cloud_config.upload_buffer_size;
@@ -276,13 +276,29 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   }
 
   /* Diagnostic log so users can see what the auto-sizer chose.
-     Files below --cloud-multipart-threshold take the small-file
-     fast path inside Stream_multipart_writer::close() -- one single
-     PUT, no multipart Initiate/Abort, so the part_size and
-     concurrent numbers don't apply.  We log accordingly so the user
-     isn't confused by "part_size=16 MiB" on a 112 KiB file. */
+     Three log shapes:
+
+     (1) filesize == 0  -> streaming case (e.g., xtrabackup_logfile
+         grows during write, redo log writer, anything with unknown
+         final size).  Show "unknown (streaming)".  Auto-sizer fell
+         back to the 16 MiB floor for part_size.
+     (2) filesize <= --cloud-multipart-threshold  -> small-file fast
+         path (single PUT, no multipart).  part_size/concurrent
+         don't apply.
+     (3) otherwise  -> multipart with the chosen sizing. */
   const uint64_t small_threshold = g_ds_cloud_config.multipart_threshold;
-  if (filesize > 0 && filesize <= small_threshold) {
+  if (filesize == 0) {
+    msg_ts(
+        "ds_cloud: %s: filesize=unknown (streaming), part_size=%s%s, "
+        "concurrent=%llu%s\n",
+        object.c_str(),
+        xtrabackup::utils::human_readable(part_size).c_str(),
+        part_size_auto ? " (auto)" : " (user)",
+        (unsigned long long)effective_concurrent,
+        buf != 0 && effective_concurrent < user_concurrent
+            ? " (shrunk by --cloud-upload-buffer-size)"
+            : "");
+  } else if (filesize <= small_threshold) {
     msg_ts("ds_cloud: %s: filesize=%s, single-PUT fast path\n",
            object.c_str(),
            xtrabackup::utils::human_readable(filesize).c_str());

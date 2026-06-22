@@ -9,7 +9,7 @@
 #   --cloud-multipart-threshold       (single-PUT cutoff)
 #   --cloud-multipart-rollover-threshold (per-object 5 TiB cap; tested at
 #                                        a tiny threshold for behavior)
-#   --cloud-http-parallel-requests    (curl-multi concurrent in-flight)
+#   --cloud-max-concurrent-requests    (curl-multi concurrent in-flight)
 #   --cloud-rate-log-interval         (observability; assert log lines)
 #   --cloud-timeout                   (sanity-pass with a generous value)
 #   --cloud-max-retries / --cloud-max-backoff (sanity-pass)
@@ -122,14 +122,14 @@ run_one threshold-1 "--cloud-multipart-threshold=1"
 run_one threshold-100MiB "--cloud-multipart-threshold=104857600"
 
 ############################################################################
-# Scenario 5: --cloud-http-parallel-requests=2  (low concurrency stress)
+# Scenario 5: --cloud-max-concurrent-requests=2  (low concurrency stress)
 ############################################################################
-run_one parallel-2 "--cloud-http-parallel-requests=2"
+run_one parallel-2 "--cloud-max-concurrent-requests=2"
 
 ############################################################################
-# Scenario 6: --cloud-http-parallel-requests=32 (high concurrency)
+# Scenario 6: --cloud-max-concurrent-requests=32 (high concurrency)
 ############################################################################
-run_one parallel-32 "--cloud-http-parallel-requests=32"
+run_one parallel-32 "--cloud-max-concurrent-requests=32"
 
 ############################################################################
 # Scenario 7: --cloud-rate-log-interval=1 (log every second; assert at

@@ -303,7 +303,7 @@ static ulong opt_cloud_max_backoff = 300000;
 /* Default 16 -- matches aws-cli's max_concurrent_requests philosophy.
    Decoupled from --parallel: data-copy threads (--parallel) and HTTP
    request concurrency are different resources. */
-static ulong opt_cloud_http_parallel_requests = 16;
+static ulong opt_cloud_max_concurrent_requests = 16;
 static ulonglong opt_cloud_multipart_part_size = 0;
 static ulonglong opt_cloud_multipart_threshold = 16ULL * 1024 * 1024;
 static ulonglong opt_cloud_multipart_rollover_threshold =
@@ -892,7 +892,7 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_TIMEOUT,
   OPT_XTRA_CLOUD_MAX_RETRIES,
   OPT_XTRA_CLOUD_MAX_BACKOFF,
-  OPT_XTRA_CLOUD_HTTP_PARALLEL_REQUESTS,
+  OPT_XTRA_CLOUD_MAX_CONCURRENT_REQUESTS,
   OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
   OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
   OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
@@ -1629,10 +1629,10 @@ struct my_option xb_client_options[] = {
      "Max retry backoff in ms.",
      &opt_cloud_max_backoff, &opt_cloud_max_backoff, 0, GET_ULONG,
      REQUIRED_ARG, 300000, 0, 3600000, 0, 0, 0},
-    {"cloud-http-parallel-requests", OPT_XTRA_CLOUD_HTTP_PARALLEL_REQUESTS,
+    {"cloud-max-concurrent-requests", OPT_XTRA_CLOUD_MAX_CONCURRENT_REQUESTS,
      "Max concurrent cloud HTTP requests. Default 16. Higher = more "
      "throughput but more memory (memory ~= this * part-size).",
-     &opt_cloud_http_parallel_requests, &opt_cloud_http_parallel_requests, 0,
+     &opt_cloud_max_concurrent_requests, &opt_cloud_max_concurrent_requests, 0,
      GET_ULONG, REQUIRED_ARG, 16, 1, 1024, 0, 0, 0},
     {"cloud-multipart-part-size", OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
      "Multipart part size in bytes. 0 = auto: max(16MiB, ceil(filesize/10K)).",
@@ -3808,11 +3808,11 @@ static void apply_cloud_options() {
   g_ds_cloud_config.timeout = opt_cloud_timeout;
   g_ds_cloud_config.max_retries = opt_cloud_max_retries;
   g_ds_cloud_config.max_backoff = opt_cloud_max_backoff;
-  /* --cloud-http-parallel-requests has a fixed default (16),
+  /* --cloud-max-concurrent-requests has a fixed default (16),
      decoupled from --parallel.  Data-copy threads and HTTP
      concurrency are different resources; conflating them led to
      unpredictable memory peaks when users bumped --parallel high. */
-  g_ds_cloud_config.http_parallel_requests = opt_cloud_http_parallel_requests;
+  g_ds_cloud_config.max_concurrent_requests = opt_cloud_max_concurrent_requests;
   g_ds_cloud_config.upload_buffer_size = opt_cloud_upload_buffer_size;
   g_ds_cloud_config.multipart_part_size = opt_cloud_multipart_part_size;
   g_ds_cloud_config.multipart_threshold = opt_cloud_multipart_threshold;

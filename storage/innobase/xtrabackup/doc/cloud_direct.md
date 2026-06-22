@@ -106,10 +106,11 @@ Interactive confirmation by default. (A `--force` flag will follow.)
 | `--cloud-timeout`                 | Per-request timeout (s)                   |
 | `--cloud-max-retries`             | Retry budget                              |
 | `--cloud-max-backoff`             | Max retry backoff (ms)                    |
-| `--cloud-http-parallel-requests`  | Max concurrent in-flight HTTP requests in curl-multi (default 0 = inherit `--parallel`) |
-| `--cloud-multipart-part-size`     | Fixed part size (0 = dynamic schedule)    |
-| `--cloud-multipart-threshold`     | Single-PUT fast-path threshold            |
-| `--cloud-multipart-rollover-threshold` | Per-object cap (5 TiB default)       |
+| `--cloud-max-concurrent-requests` | Max concurrent in-flight HTTP requests (default 16) |
+| `--cloud-upload-buffer-size`      | Total upload-memory cap (default 0 = unlimited; aws-cli-like) |
+| `--cloud-multipart-part-size`     | Part size in bytes (0 = auto: `max(16 MiB, ceil(filesize/10K))`) |
+| `--cloud-multipart-threshold`     | Single-PUT fast-path threshold (default 16 MiB) |
+| `--cloud-multipart-rollover-threshold` | Advanced: per-object cap (5 TiB default; lower for parallel-download workflows) |
 | `--cloud-rate-log-interval`       | Throughput log cadence (s, 0 = off)       |
 | `--cloud-http-timing`             | Curl phase timing dump                    |
 
@@ -131,38 +132,101 @@ Two flags from earlier prototypes are intentionally NOT on this list:
 
 ## Memory model
 
-Each open backup file gets its own `Stream_multipart_writer` with a 64 MiB
-in-flight byte cap. Files are opened, written, and closed by xtrabackup's
-data-copy threads (`--parallel`), one file per thread at a time. So:
+Cloud upload memory follows the **aws-cli model**:
 
 ```
-peak in-flight bytes  =  --parallel  ×  64 MiB
+memory_peak  =  effective_concurrent  ×  part_size
 ```
 
-Typical values: `--parallel=8` → 512 MiB peak; `--parallel=4` → 256 MiB
-peak. This is the entire ds_cloud memory footprint above the steady-state
-HTTP / TLS / curl handle overhead.
+Both quantities are derived from the user's flags at `cloud_open` time
+per file. The defaults trade some memory headroom for full throughput on
+typical workloads; explicit knobs let memory-tight hosts dial back.
 
-**Why this is hardcoded, not a tunable.** The previous
-`--cloud-multipart-memory-budget` knob expressed the cap *per writer*,
-which silently multiplied by `--parallel`. With its 4 GiB default at
-`--parallel=8` that's 32 GiB peak → OOM in practice. The right shape is a
-single global cap that's invariant to `--parallel`. That follow-up is
-tracked as task #45 and will land as `--cloud-upload-buffer-size` (default
-256 MiB total across all writers, enforced by a shared atomic + cv inside
-`ds_cloud_ctxt`). Until that lands, the hardcoded 64 MiB per writer keeps
-peak in the 256-512 MiB band at typical parallelism, which is well-sized
-for a WAN BDP.
+### Auto-sizing algorithm (one line per file in xtrabackup's log)
 
-**`--cloud-http-parallel-requests` is a different thing.** It sizes the
-libev / curl-multi HTTP concurrency inside the shared `Event_handler`
-(how many HTTP requests can be in flight simultaneously across all
-writers), not the per-writer buffer count. If left unset it inherits
-from `--parallel` and xtrabackup prints an INFO line saying so on backup
-start. Setting it explicitly only makes sense when you want to decouple
-data-copy-thread count from cloud-side HTTP concurrency (rare — e.g. a
-small `--parallel` over a fat WAN where you want more concurrent in-
-flight PUTs than data-copy threads).
+```
+effective_size       = min(filesize, --cloud-multipart-rollover-threshold)
+if --cloud-multipart-part-size != 0:
+    part_size = --cloud-multipart-part-size          # user override
+else:
+    part_size = max(16 MiB, ceil(effective_size / 10000))   # auto, S3-10K-cap safe
+
+if --cloud-upload-buffer-size != 0:
+    effective_concurrent = min(--cloud-max-concurrent-requests,
+                               max(1, --cloud-upload-buffer-size / part_size))
+else:
+    effective_concurrent = --cloud-max-concurrent-requests
+```
+
+For each file the backup log emits a diagnostic line so users can see
+what was chosen:
+
+```
+ds_cloud: bench/big.ibd: filesize=42.00 MiB, part_size=16.00 MiB (auto), concurrent=16
+ds_cloud: bench/tiny.ibd: filesize=112.00 KiB, single-PUT fast path
+ds_cloud: xtrabackup_logfile: filesize=unknown (streaming), part_size=16.00 MiB (auto), concurrent=16
+```
+
+`(auto)` vs `(user)` shows whether the part_size came from the formula or
+a user override. When `--cloud-upload-buffer-size` causes concurrency to
+shrink, an additional `(shrunk by --cloud-upload-buffer-size)` suffix
+appears.
+
+### Memory by file size at defaults
+
+`--cloud-max-concurrent-requests=16`, `--cloud-upload-buffer-size=0`
+(unlimited), no overrides:
+
+| File size | part_size | concurrent | memory peak |
+|-----------|----------:|-----------:|------------:|
+| < 16 MiB  | n/a (single-PUT fast path) | n/a | ~ filesize |
+| 16 MiB – 100 GiB | 16 MiB (floor) | 16 | 256 MiB |
+| 1 TiB     | 100 MiB | 16 | 1.6 GiB |
+| 5 TiB     | 500 MiB | 16 | 8 GiB |
+
+Memory grows linearly with file size for very large files (matches
+aws-cli behavior; aws-cli's `max_concurrent_requests=10` with auto-bumped
+chunks reaches similar memory peaks).
+
+### Capping memory on small hosts
+
+For memory-tight hosts (containers, small VMs), set
+`--cloud-upload-buffer-size` to cap total in-flight bytes:
+
+| `--cloud-upload-buffer-size` | 1 TiB file behavior | Memory | Throughput vs default |
+|-----------------------------:|---------------------|-------:|----------------------:|
+| 0 (unlimited, default)       | 100 MiB × 16 conc.  | 1.6 GiB | 100% |
+| 1 GiB                        | 100 MiB × 10 conc.  | ~1 GiB  | 62% |
+| 512 MiB                      | 100 MiB × 5 conc.   | 500 MiB | 31% |
+| 256 MiB                      | 100 MiB × 2 conc.   | 200 MiB | 12% |
+
+For extreme cases (5 TiB file in a 4 GiB container), the trade-off
+between memory and throughput becomes painful. The escape hatch is to
+lower `--cloud-multipart-rollover-threshold` so the file splits into
+smaller cloud objects, each of which gets sized for the smaller effective
+object size — bringing `part_size` back down to the 16 MiB floor and
+restoring full concurrency:
+
+```bash
+# 5 TiB IBD, 4 GiB container: backup into 50-100 GiB chunks per object,
+# keep concurrency at 16 with ~256 MiB peak memory.
+xtrabackup --backup --cloud-storage=s3 ... \
+    --cloud-upload-buffer-size=2g \
+    --cloud-multipart-rollover-threshold=100g
+```
+
+The backup ends up as 50 objects in the bucket (5 TiB / 100 GiB) instead
+of one; `--download` re-assembles them via the manifest's `segments[]`
+field.
+
+### `--cloud-max-concurrent-requests` is independent of `--parallel`
+
+`--parallel` controls how many xtrabackup data-copy threads read source
+IBDs in parallel — that's a separate resource from how many HTTP requests
+fly to the cloud concurrently. They no longer inherit: bumping
+`--parallel=64` does NOT bump `--cloud-max-concurrent-requests`. Set the
+latter explicitly if you want more cloud-side parallelism than the
+default 16.
 
 ## Benchmark: legacy pipeline vs direct ds_cloud
 
@@ -170,7 +234,7 @@ Real backup against a running mysqld, 9.3 GB schema (1 large ~10 MB seed,
 5 empty IBDs, 5×112 MB, 4×560 MB, 4×1.6 GB tables — mixed sizes to
 exercise both the small-file fast path and the multipart tiers).
 LocalStack S3 target via `fault_proxy.py` for controlled RTT injection.
-`--parallel=8`, `--cloud-http-parallel-requests` inherited (also 8). 2 timed iterations
+`--parallel=8`, `--cloud-max-concurrent-requests=8` (matching). 2 timed iterations
 per path per RTT after a warm-up run; bucket reset between iterations so
 LocalStack disk stays bounded. Lower is better.
 
