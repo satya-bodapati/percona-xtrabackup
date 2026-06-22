@@ -14,6 +14,22 @@ modes to `xtrabackup`:
 `xbcloud` is unchanged and remains available for testing and
 side-by-side comparison.
 
+## Choosing the transport
+
+xtrabackup has three ways to ship a backup off the host. Pick by destination:
+
+| Destination                            | Use                              |
+|----------------------------------------|----------------------------------|
+| S3 / Azure / GCS / Swift bucket        | `--cloud-storage=<backend>` (this doc) |
+| Another host (over SSH / custom pipe)  | `--fifo-streams=N --fifo-dir=...` + downstream reader |
+| Local filesystem / fast NAS / NVMe     | default `--target-dir` (or `--fifo-streams` for parallel local writers) |
+
+`--cloud-storage` and `--fifo-streams` are mutually exclusive — both
+replace the default datasink chain, so you can only pick one. The
+legacy `--stream=xbstream | xbcloud put` pipeline still works but is
+~2× slower than `--cloud-storage` (see Benchmark below); prefer
+`--cloud-storage` for any new cloud-destination workflow.
+
 ## Backup
 
 ```bash
@@ -90,14 +106,89 @@ Interactive confirmation by default. (A `--force` flag will follow.)
 | `--cloud-timeout`                 | Per-request timeout (s)                   |
 | `--cloud-max-retries`             | Retry budget                              |
 | `--cloud-max-backoff`             | Max retry backoff (ms)                    |
-| `--cloud-parallel`                | Concurrent in-flight requests             |
-| `--cloud-multipart-upload`        | Enable multipart                          |
+| `--cloud-http-parallel-requests`  | Max concurrent in-flight HTTP requests in curl-multi (default 0 = inherit `--parallel`) |
 | `--cloud-multipart-part-size`     | Fixed part size (0 = dynamic schedule)    |
-| `--cloud-multipart-memory-budget` | Per-file in-flight buffer cap             |
 | `--cloud-multipart-threshold`     | Single-PUT fast-path threshold            |
 | `--cloud-multipart-rollover-threshold` | Per-object cap (5 TiB default)       |
 | `--cloud-rate-log-interval`       | Throughput log cadence (s, 0 = off)       |
 | `--cloud-http-timing`             | Curl phase timing dump                    |
+
+Two flags from earlier prototypes are intentionally NOT on this list:
+
+- **`--cloud-multipart-upload=ON|OFF`** — removed. ds_cloud is multipart-only
+  by design (the `Stream_multipart_writer` already short-circuits to a single
+  PUT for files below `--cloud-multipart-threshold`, so there's no
+  non-multipart code path to fall back to). xbcloud keeps the equivalent
+  option because xbcloud has a legacy chunk-per-PUT path for backward
+  compatibility; ds_cloud never did.
+
+- **`--cloud-multipart-memory-budget`** — removed. The control was per-writer
+  (one writer per file held by an xtrabackup data-copy thread), which means
+  setting it to N silently multiplied to `N × --parallel` total peak memory.
+  With the default 4 GiB and `--parallel=8`, that's 32 GiB → OOM. Hardcoded
+  today to 64 MiB per writer; the eventual single global cap will be
+  `--cloud-upload-buffer-size` (see Memory model below).
+
+## Memory model
+
+Each open backup file gets its own `Stream_multipart_writer` with a 64 MiB
+in-flight byte cap. Files are opened, written, and closed by xtrabackup's
+data-copy threads (`--parallel`), one file per thread at a time. So:
+
+```
+peak in-flight bytes  =  --parallel  ×  64 MiB
+```
+
+Typical values: `--parallel=8` → 512 MiB peak; `--parallel=4` → 256 MiB
+peak. This is the entire ds_cloud memory footprint above the steady-state
+HTTP / TLS / curl handle overhead.
+
+**Why this is hardcoded, not a tunable.** The previous
+`--cloud-multipart-memory-budget` knob expressed the cap *per writer*,
+which silently multiplied by `--parallel`. With its 4 GiB default at
+`--parallel=8` that's 32 GiB peak → OOM in practice. The right shape is a
+single global cap that's invariant to `--parallel`. That follow-up is
+tracked as task #45 and will land as `--cloud-upload-buffer-size` (default
+256 MiB total across all writers, enforced by a shared atomic + cv inside
+`ds_cloud_ctxt`). Until that lands, the hardcoded 64 MiB per writer keeps
+peak in the 256-512 MiB band at typical parallelism, which is well-sized
+for a WAN BDP.
+
+**`--cloud-http-parallel-requests` is a different thing.** It sizes the
+libev / curl-multi HTTP concurrency inside the shared `Event_handler`
+(how many HTTP requests can be in flight simultaneously across all
+writers), not the per-writer buffer count. If left unset it inherits
+from `--parallel` and xtrabackup prints an INFO line saying so on backup
+start. Setting it explicitly only makes sense when you want to decouple
+data-copy-thread count from cloud-side HTTP concurrency (rare — e.g. a
+small `--parallel` over a fat WAN where you want more concurrent in-
+flight PUTs than data-copy threads).
+
+## Benchmark: legacy pipeline vs direct ds_cloud
+
+Real backup against a running mysqld, 9.3 GB schema (1 large ~10 MB seed,
+5 empty IBDs, 5×112 MB, 4×560 MB, 4×1.6 GB tables — mixed sizes to
+exercise both the small-file fast path and the multipart tiers).
+LocalStack S3 target via `fault_proxy.py` for controlled RTT injection.
+`--parallel=8`, `--cloud-http-parallel-requests` inherited (also 8). 2 timed iterations
+per path per RTT after a warm-up run; bucket reset between iterations so
+LocalStack disk stays bounded. Lower is better.
+
+| RTT inject | legacy (ms) | direct (ms) | direct − legacy | direct vs legacy |
+|------------|------------:|------------:|----------------:|-----------------:|
+|   0 ms     |       73495 |       38502 |          −34993 |       −47.6%     |
+|  50 ms     |       76336 |       38321 |          −38015 |       −49.8%     |
+| 200 ms     |       84102 |       43410 |          −40692 |       −48.4%     |
+
+Direct beats legacy by ~48–50% across all RTTs with low per-iteration
+variance (max−min < 3% on both paths). The legacy path is bounded by the
+single xbstream pipe serializing all data-copy threads through one xbcloud
+process; the direct path uploads each file in parallel from the data-copy
+thread that owns it. The gap holds at 200 ms RTT because both paths use
+the same multipart pipelining underneath; what direct saves is the
+serialization overhead, not RTT-per-part.
+
+Harness: `storage/innobase/xtrabackup/test/cloud/bench_legacy_vs_direct.sh`.
 
 ## Architecture
 
