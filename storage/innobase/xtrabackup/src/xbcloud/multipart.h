@@ -171,6 +171,16 @@ class Multipart_uploader {
   bool started() const { return m_started; }
   bool failed() const { return m_failed.load(); }
 
+  /** Override the name used in log messages.  By default Multipart_uploader
+   *  logs the IMultipart_helper's object_name (the full bucket key like
+   *  "backup-2026.../bench/t.ibd").  Callers can set a shorter display
+   *  name (e.g., just "bench/t.ibd") to keep logs readable.  Empty (the
+   *  default) means use object_name. */
+  void set_display_name(const std::string &name) { m_display_name = name; }
+  const std::string &display_name() const {
+    return m_display_name.empty() ? m_helper->object_name() : m_display_name;
+  }
+
   /* Observability accessors. Producers and stats loggers can read these
      to diagnose throughput at the producer side (bytes_appended) vs the
      consumer side (bytes_uploaded). */
@@ -185,6 +195,8 @@ class Multipart_uploader {
   IMultipart_helper *m_helper;
   Event_handler *m_event_handler;
   uint64_t m_memory_budget;
+  std::string m_display_name;  /* see set_display_name(); empty => use
+                                  m_helper->object_name() */
 
   std::string m_upload_id;
   bool m_started{false};
@@ -322,6 +334,12 @@ class Stream_multipart_writer {
   /* Use an async small-file PUT instead of the default sync upload. */
   void set_async_small_file_uploader(async_small_file_fn fn) {
     m_async_small_file = std::move(fn);
+  }
+
+  /** Forward a short log-display name to the inner Multipart_uploader.
+   *  See Multipart_uploader::set_display_name. */
+  void set_display_name(const std::string &name) {
+    m_uploader.set_display_name(name);
   }
 
   /* Append bytes; may flush full parts as they accumulate. Returns false

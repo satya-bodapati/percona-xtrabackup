@@ -27,6 +27,9 @@ the Free Software Foundation; version 2 of the License.
 #include "file_context.h"
 #include "file_utils.h"
 #include "msg.h"
+#include "srv0srv.h"
+#include "ut0log.h"
+#include "utils.h"
 
 #include "xbcloud/http.h"
 #include "xbcloud/object_store.h"
@@ -103,23 +106,23 @@ static std::string strip_prefix(const std::string &obj,
 
 bool xb_cloud_download(const std::string &target_dir) {
   if (g_ds_cloud_config.storage.empty()) {
-    msg_ts("--download requires --cloud-storage to be set\n");
+    xb::error() << "--download requires --cloud-storage to be set";
     return false;
   }
   if (g_ds_cloud_config.container.empty()) {
-    msg_ts("--download requires --cloud-bucket to be set\n");
+    xb::error() << "--download requires --cloud-bucket to be set";
     return false;
   }
   if (mkdirp(target_dir.c_str(), 0755, MYF(0)) < 0 && errno != EEXIST) {
-    msg_ts("--download: cannot create target dir %s: %s\n",
-           target_dir.c_str(), strerror(errno));
+    xb::error() << "--download: cannot create target dir " << target_dir
+                << ": " << strerror(errno);
     return false;
   }
 
   std::unique_ptr<Http_client> hc(make_http_client());
   auto store = build_store(hc.get());
   if (!store) {
-    msg_ts("--download: store init failed\n");
+    xb::error() << "--download: store init failed";
     return false;
   }
 
@@ -134,16 +137,16 @@ bool xb_cloud_download(const std::string &target_dir) {
   std::vector<std::string> objects;
   if (!store->list_objects_in_directory(g_ds_cloud_config.container, prefix,
                                          objects)) {
-    msg_ts("--download: list_objects_in_directory failed\n");
+    xb::error() << "--download: list_objects_in_directory failed";
     return false;
   }
   if (objects.empty()) {
-    msg_ts("--download: no objects found under %s/%s\n",
-           g_ds_cloud_config.container.c_str(), prefix.c_str());
+    xb::error() << "--download: no objects found under "
+                << g_ds_cloud_config.container << "/" << prefix;
     return false;
   }
-  msg_ts("--download: %zu objects under %s/%s\n", objects.size(),
-         g_ds_cloud_config.container.c_str(), prefix.c_str());
+  xb::info() << "--download: " << objects.size() << " objects under "
+             << g_ds_cloud_config.container << "/" << prefix;
 
   /* Locate backup_meta.json in the listing.  It MUST be present --
      the new-format manifest is mandatory and drives sparse-restore
@@ -157,10 +160,10 @@ bool xb_cloud_download(const std::string &target_dir) {
     }
   }
   if (manifest_obj.empty()) {
-    msg_ts("--download: backup_meta.json missing from bucket under %s/%s; "
-           "refusing to restore (manifest is mandatory in new-format "
-           "backups)\n",
-           g_ds_cloud_config.container.c_str(), prefix.c_str());
+    xb::error() << "--download: backup_meta.json missing from bucket under "
+                << g_ds_cloud_config.container << "/" << prefix
+                << "; refusing to restore (manifest is mandatory in "
+                << "new-format backups)";
     return false;
   }
   {
@@ -168,7 +171,7 @@ bool xb_cloud_download(const std::string &target_dir) {
     Http_buffer body =
         store->download_object(g_ds_cloud_config.container, manifest_obj, ok);
     if (!ok) {
-      msg_ts("--download: failed to fetch %s\n", manifest_obj.c_str());
+      xb::error() << "--download: failed to fetch " << manifest_obj;
       return false;
     }
     std::string full = target_dir;
@@ -176,23 +179,23 @@ bool xb_cloud_download(const std::string &target_dir) {
     full.append("backup_meta.json");
     int fd = open(full.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-      msg_ts("--download: cannot open %s: %s\n", full.c_str(),
-             strerror(errno));
+      xb::error() << "--download: cannot open " << full << ": "
+                  << strerror(errno);
       return false;
     }
     if (write(fd, body.begin(), body.size()) !=
         static_cast<ssize_t>(body.size())) {
-      msg_ts("--download: short write to %s\n", full.c_str());
+      xb::error() << "--download: short write to " << full;
       close(fd);
       return false;
     }
     close(fd);
-    msg_ts("--download: wrote %s (%zu bytes)\n", full.c_str(), body.size());
+    xb::info() << "--download: wrote " << full << " ("
+               << xtrabackup::utils::human_readable(body.size()) << ")";
   }
   if (!file_context_load_manifest_from(target_dir.c_str())) {
-    msg_ts(
-        "--download: failed to parse backup_meta.json after fetch; "
-        "aborting restore\n");
+    xb::error() << "--download: failed to parse backup_meta.json after "
+                << "fetch; aborting restore";
     return false;
   }
 
@@ -216,12 +219,12 @@ bool xb_cloud_download(const std::string &target_dir) {
     Http_buffer body =
         store->download_object(g_ds_cloud_config.container, obj, ok);
     if (!ok) {
-      msg_ts("--download: failed to fetch %s\n", obj.c_str());
+      xb::error() << "--download: failed to fetch " << obj;
       return false;
     }
     std::string rel = strip_prefix(obj, prefix);
     if (!mkdir_for(target_dir, rel)) {
-      msg_ts("--download: mkdir_for failed for %s\n", rel.c_str());
+      xb::error() << "--download: mkdir_for failed for " << rel;
       return false;
     }
     std::string full = target_dir;
@@ -231,13 +234,13 @@ bool xb_cloud_download(const std::string &target_dir) {
 
     int fd = open(staging.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-      msg_ts("--download: cannot open %s: %s\n", staging.c_str(),
-             strerror(errno));
+      xb::error() << "--download: cannot open " << staging << ": "
+                  << strerror(errno);
       return false;
     }
     if (write(fd, body.begin(), body.size()) !=
         static_cast<ssize_t>(body.size())) {
-      msg_ts("--download: short write to %s\n", staging.c_str());
+      xb::error() << "--download: short write to " << staging;
       close(fd);
       ::unlink(staging.c_str());
       return false;
@@ -253,38 +256,37 @@ bool xb_cloud_download(const std::string &target_dir) {
           file_context_lookup_logical_size(rel.c_str());
       if (!file_context_punch_holes_from_regions(staging.c_str(),
                                                   logical_size, *regions)) {
-        msg_ts(
-            "--download: manifest-driven punch failed for %s (continuing "
-            "without sparse reclaim)\n",
-            rel.c_str());
+        xb::warn() << "--download: manifest-driven punch failed for " << rel
+                   << " (continuing without sparse reclaim)";
       }
     }
 
     if (::rename(staging.c_str(), full.c_str()) != 0) {
-      msg_ts("--download: rename %s -> %s failed: %s\n", staging.c_str(),
-             full.c_str(), strerror(errno));
+      xb::error() << "--download: rename " << staging << " -> " << full
+                  << " failed: " << strerror(errno);
       ::unlink(staging.c_str());
       return false;
     }
-    msg_ts("--download: wrote %s (%zu bytes)\n", full.c_str(), body.size());
+    xb::info() << "--download: wrote " << rel << " ("
+               << xtrabackup::utils::human_readable(body.size()) << ")";
   }
   return true;
 }
 
 bool xb_cloud_delete(bool force) {
   if (g_ds_cloud_config.storage.empty()) {
-    msg_ts("--delete requires --cloud-storage to be set\n");
+    xb::error() << "--delete requires --cloud-storage to be set";
     return false;
   }
   if (g_ds_cloud_config.container.empty()) {
-    msg_ts("--delete requires --cloud-bucket to be set\n");
+    xb::error() << "--delete requires --cloud-bucket to be set";
     return false;
   }
 
   std::unique_ptr<Http_client> hc(make_http_client());
   auto store = build_store(hc.get());
   if (!store) {
-    msg_ts("--delete: store init failed\n");
+    xb::error() << "--delete: store init failed";
     return false;
   }
 
@@ -298,12 +300,12 @@ bool xb_cloud_delete(bool force) {
   std::vector<std::string> objects;
   if (!store->list_objects_in_directory(g_ds_cloud_config.container, prefix,
                                          objects)) {
-    msg_ts("--delete: list failed\n");
+    xb::error() << "--delete: list failed";
     return false;
   }
   if (objects.empty()) {
-    msg_ts("--delete: no objects to remove under %s/%s\n",
-           g_ds_cloud_config.container.c_str(), prefix.c_str());
+    xb::info() << "--delete: no objects to remove under "
+               << g_ds_cloud_config.container << "/" << prefix;
     return true;
   }
 
@@ -314,17 +316,17 @@ bool xb_cloud_delete(bool force) {
     std::string line;
     std::getline(std::cin, line);
     if (line != "yes") {
-      msg_ts("--delete: cancelled by user\n");
+      xb::info() << "--delete: cancelled by user";
       return false;
     }
   }
 
   for (const auto &obj : objects) {
     if (!store->delete_object(g_ds_cloud_config.container, obj)) {
-      msg_ts("--delete: failed to delete %s\n", obj.c_str());
+      xb::error() << "--delete: failed to delete " << obj;
       return false;
     }
   }
-  msg_ts("--delete: removed %zu objects\n", objects.size());
+  xb::info() << "--delete: removed " << objects.size() << " objects";
   return true;
 }

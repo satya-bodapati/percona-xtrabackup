@@ -3853,10 +3853,22 @@ static void xtrabackup_init_datasinks(void) {
       xb::error() << "ds_cloud probe failed; refusing to start the backup";
       exit(EXIT_FAILURE);
     }
-    /* Use the backup name (basename of target-dir) as the bucket prefix.
-       Strip leading "./" and any trailing slash. */
-    const char *prefix = xtrabackup_target_dir;
-    while (prefix[0] == '.' && prefix[1] == '/') prefix += 2;
+    /* Use the BASENAME of --target-dir as the bucket prefix.  Without
+       this, an absolute target-dir like "/tmp/2026-..." would land
+       cloud objects at keys "/tmp/2026-.../<file>" -- noisy and
+       confusing.  Strip leading "./" first, then take everything
+       after the final '/'. */
+    std::string prefix_buf(xtrabackup_target_dir);
+    while (prefix_buf.size() >= 2 && prefix_buf[0] == '.' &&
+           prefix_buf[1] == '/') {
+      prefix_buf.erase(0, 2);
+    }
+    while (!prefix_buf.empty() && prefix_buf.back() == '/') {
+      prefix_buf.pop_back();
+    }
+    size_t slash = prefix_buf.find_last_of('/');
+    if (slash != std::string::npos) prefix_buf.erase(0, slash + 1);
+    const char *prefix = prefix_buf.c_str();
     ds_data = ds_meta = ds_redo = ds_create(prefix, DS_TYPE_CLOUD);
     if (ds_data == nullptr) {
       xb::error() << "ds_cloud init failed";

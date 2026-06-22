@@ -71,6 +71,26 @@ std::string build_rollover_manifest(
   return body;
 }
 
+/* Short byte formatter for log messages.  Lives in xbcloud (not the
+   xtrabackup-side utils::human_readable) because xbcloud is also built
+   into a standalone binary that doesn't link the xtrabackup utils
+   library.  Picks the largest unit that yields a value >= 1, e.g.
+   17825792 -> "17.00 MiB". */
+static std::string human_bytes(uint64_t n) {
+  char buf[64];
+  if (n >= (1ULL << 40))
+    snprintf(buf, sizeof(buf), "%.2f TiB", (double)n / (1ULL << 40));
+  else if (n >= (1ULL << 30))
+    snprintf(buf, sizeof(buf), "%.2f GiB", (double)n / (1ULL << 30));
+  else if (n >= (1ULL << 20))
+    snprintf(buf, sizeof(buf), "%.2f MiB", (double)n / (1ULL << 20));
+  else if (n >= (1ULL << 10))
+    snprintf(buf, sizeof(buf), "%.2f KiB", (double)n / (1ULL << 10));
+  else
+    snprintf(buf, sizeof(buf), "%llu bytes", (unsigned long long)n);
+  return buf;
+}
+
 size_t dynamic_part_size(uint64_t bytes_so_far) {
   /* Continuous formula: max(16 MiB, ceil(filesize / MAX_PARTS_PER_OBJECT))
      where MAX_PARTS_PER_OBJECT = 10000 (S3 hard limit).
@@ -99,7 +119,7 @@ Multipart_uploader::~Multipart_uploader() {
     msg_ts(
         "%s: Multipart_uploader destroyed without commit/abort; cancelling "
         "%s upload_id=%s\n",
-        my_progname, m_helper->object_name().c_str(), m_upload_id.c_str());
+        my_progname, display_name().c_str(), m_upload_id.c_str());
     abort();
   }
 }
@@ -113,7 +133,7 @@ bool Multipart_uploader::start() {
   m_started = true;
   stats::total_files_inflight.fetch_add(1, std::memory_order_relaxed);
   msg_ts("%s: multipart start %s upload_id=%s\n", my_progname,
-         m_helper->object_name().c_str(), m_upload_id.c_str());
+         display_name().c_str(), m_upload_id.c_str());
   return true;
 }
 
@@ -137,12 +157,13 @@ void Multipart_uploader::on_part_complete(int part_number, size_t bytes,
     stats::total_parts_inflight.fetch_sub(1, std::memory_order_relaxed);
   }
   m_cv.notify_all();
-  if (ok) {
-    msg_ts("%s: multipart %s part #%d done (%zu bytes)\n", my_progname,
-           m_helper->object_name().c_str(), part_number, bytes);
-  } else {
-    msg_ts("%s: multipart %s part #%d FAILED (%zu bytes)\n", my_progname,
-           m_helper->object_name().c_str(), part_number, bytes);
+  /* Per-part "done" is intentionally silent.  For multi-GiB files
+     this generates hundreds of log lines and drowns out the
+     ds_cloud per-file diagnostic that says everything users need
+     to see.  Failures stay logged. */
+  if (!ok) {
+    msg_ts("%s: multipart %s part #%d FAILED (%s)\n", my_progname,
+           display_name().c_str(), part_number, human_bytes(bytes).c_str());
   }
 }
 

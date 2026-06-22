@@ -40,6 +40,8 @@ the Free Software Foundation; version 2 of the License.
 #include "common.h"
 #include "datasink.h"
 #include "msg.h"
+#include "srv0srv.h"
+#include "ut0log.h"
 #include "utils.h"
 
 #include "xbcloud/http.h"
@@ -125,21 +127,21 @@ bool probe_and_setup_store(ds_cloud_ctxt_t *cc) {
       g_ds_cloud_config.storage == "google") {
     auto *s3_store = static_cast<S3_object_store *>(cc->object_store.get());
     if (!s3_store->probe_api_version_and_lookup(cc->container)) {
-      msg_ts("ds_cloud: probe failed for bucket '%s'\n",
-             cc->container.c_str());
+      xb::error() << "ds_cloud: probe failed for bucket '"
+                  << cc->container << "'";
       return false;
     }
   } else {
     /* For Azure/Swift, container_exists is sufficient. */
     bool exists;
     if (!cc->object_store->container_exists(cc->container, exists)) {
-      msg_ts("ds_cloud: container_exists check failed for '%s'\n",
-             cc->container.c_str());
+      xb::error() << "ds_cloud: container_exists check failed for '"
+                  << cc->container << "'";
       return false;
     }
     if (!exists) {
-      msg_ts("ds_cloud: container '%s' does not exist\n",
-             cc->container.c_str());
+      xb::error() << "ds_cloud: container '" << cc->container
+                  << "' does not exist";
       return false;
     }
   }
@@ -150,11 +152,11 @@ bool probe_and_setup_store(ds_cloud_ctxt_t *cc) {
 
 ds_ctxt_t *cloud_init(const char *root) {
   if (g_ds_cloud_config.storage.empty()) {
-    msg_ts("ds_cloud: --cloud-storage is not set; cannot initialize\n");
+    xb::error() << "ds_cloud: --cloud-storage is not set; cannot initialize";
     return nullptr;
   }
   if (g_ds_cloud_config.container.empty()) {
-    msg_ts("ds_cloud: --cloud-bucket / container is not set\n");
+    xb::error() << "ds_cloud: --cloud-bucket / container is not set";
     return nullptr;
   }
 
@@ -172,8 +174,8 @@ ds_ctxt_t *cloud_init(const char *root) {
 
   cc->object_store = build_object_store(cc->http_client.get());
   if (!cc->object_store) {
-    msg_ts("ds_cloud: unknown storage backend '%s'\n",
-           g_ds_cloud_config.storage.c_str());
+    xb::error() << "ds_cloud: unknown storage backend '"
+                << g_ds_cloud_config.storage << "'";
     return nullptr;
   }
 
@@ -186,7 +188,7 @@ ds_ctxt_t *cloud_init(const char *root) {
           ? g_ds_cloud_config.max_concurrent_requests
           : 1);
   if (!cc->event_handler->init()) {
-    msg_ts("ds_cloud: Event_handler init failed\n");
+    xb::error() << "ds_cloud: Event_handler init failed";
     return nullptr;
   }
   if (g_ds_cloud_config.rate_log_interval > 0) {
@@ -287,32 +289,25 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
          don't apply.
      (3) otherwise  -> multipart with the chosen sizing. */
   const uint64_t small_threshold = g_ds_cloud_config.multipart_threshold;
+  const char *part_origin = part_size_auto ? " (auto)" : " (user)";
+  const char *shrink_note =
+      (buf != 0 && effective_concurrent < user_concurrent)
+          ? " (shrunk by --cloud-upload-buffer-size)"
+          : "";
   if (filesize == 0) {
-    msg_ts(
-        "ds_cloud: %s: filesize=unknown (streaming), part_size=%s%s, "
-        "concurrent=%llu%s\n",
-        object.c_str(),
-        xtrabackup::utils::human_readable(part_size).c_str(),
-        part_size_auto ? " (auto)" : " (user)",
-        (unsigned long long)effective_concurrent,
-        buf != 0 && effective_concurrent < user_concurrent
-            ? " (shrunk by --cloud-upload-buffer-size)"
-            : "");
+    xb::info() << "ds_cloud: " << path << ": filesize=unknown (streaming), "
+               << "part_size="
+               << xtrabackup::utils::human_readable(part_size) << part_origin
+               << ", concurrent=" << effective_concurrent << shrink_note;
   } else if (filesize <= small_threshold) {
-    msg_ts("ds_cloud: %s: filesize=%s, single-PUT fast path\n",
-           object.c_str(),
-           xtrabackup::utils::human_readable(filesize).c_str());
+    xb::info() << "ds_cloud: " << path << ": filesize="
+               << xtrabackup::utils::human_readable(filesize)
+               << ", single-PUT fast path";
   } else {
-    msg_ts(
-        "ds_cloud: %s: filesize=%s, part_size=%s%s, concurrent=%llu%s\n",
-        object.c_str(),
-        xtrabackup::utils::human_readable(filesize).c_str(),
-        xtrabackup::utils::human_readable(part_size).c_str(),
-        part_size_auto ? " (auto)" : " (user)",
-        (unsigned long long)effective_concurrent,
-        buf != 0 && effective_concurrent < user_concurrent
-            ? " (shrunk by --cloud-upload-buffer-size)"
-            : "");
+    xb::info() << "ds_cloud: " << path << ": filesize="
+               << xtrabackup::utils::human_readable(filesize) << ", part_size="
+               << xtrabackup::utils::human_readable(part_size) << part_origin
+               << ", concurrent=" << effective_concurrent << shrink_note;
   }
 
   /* Stream_multipart_writer's existing memory_budget parameter is the
@@ -327,6 +322,11 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
       per_writer_budget,
       static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
       static_cast<size_t>(part_size));
+  /* Use the short relative path as the display name in multipart
+     log messages -- the full object key includes the bucket prefix
+     and is noisy in logs (a 1 TiB backup at 16 MiB parts would emit
+     ~65K lines with the full key each). */
+  cf->writer->set_display_name(path);
 
   /* Empirical (perf_wan.sh + real-AWS benchmarks): sync small-file PUT
      bottlenecks at WAN RTT even when xtrabackup runs many data-copy
@@ -351,12 +351,13 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
             container, name, body, event_handler,
             [cc_ptr, name, length](bool ok, const Http_buffer &) {
               if (ok) {
-                msg_ts("ds_cloud: small-file PUT done: %s (%zu bytes)\n",
-                       name.c_str(), length);
+                xb::info() << "ds_cloud: small-file PUT done: " << name
+                           << " (" << xtrabackup::utils::human_readable(length)
+                           << ")";
               } else {
-                msg_ts(
-                    "ds_cloud: small-file PUT FAILED: %s (%zu bytes)\n",
-                    name.c_str(), length);
+                xb::error() << "ds_cloud: small-file PUT FAILED: " << name
+                            << " (" << xtrabackup::utils::human_readable(length)
+                            << ")";
                 cc_ptr->async_upload_failed.store(true,
                                                   std::memory_order_relaxed);
               }
@@ -378,7 +379,7 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
 int cloud_write(ds_file_t *file, const void *buf, size_t len) {
   auto *cf = static_cast<ds_cloud_file_t *>(file->ptr);
   if (!cf->writer->append(static_cast<const char *>(buf), len)) {
-    msg_ts("ds_cloud: append failed for %s\n", cf->object_name.c_str());
+    xb::error() << "ds_cloud: append failed for " << file->path;
     return 1;
   }
   /* Streaming rollover not yet supported (size unknown up front). If
@@ -386,11 +387,11 @@ int cloud_write(ds_file_t *file, const void *buf, size_t len) {
      object cap, fail fast with a clear message. */
   if (cf->writer->bytes_appended() >
       g_ds_cloud_config.multipart_rollover_threshold) {
-    msg_ts(
-        "ds_cloud: file '%s' exceeded --cloud-multipart-rollover-threshold "
-        "(%llu bytes); streaming rollover is not yet implemented\n",
-        cf->object_name.c_str(),
-        g_ds_cloud_config.multipart_rollover_threshold);
+    xb::error() << "ds_cloud: file '" << file->path
+                << "' exceeded --cloud-multipart-rollover-threshold ("
+                << xtrabackup::utils::human_readable(
+                       g_ds_cloud_config.multipart_rollover_threshold)
+                << "); streaming rollover is not yet implemented";
     return 1;
   }
   cf->ctxt->bytes_written.fetch_add(len, std::memory_order_relaxed);
@@ -416,7 +417,7 @@ int cloud_close(ds_file_t *file) {
   auto *cf = static_cast<ds_cloud_file_t *>(file->ptr);
   int rc = cf->writer->close() ? 0 : 1;
   if (rc != 0) {
-    msg_ts("ds_cloud: close failed for %s\n", cf->object_name.c_str());
+    xb::error() << "ds_cloud: close failed for " << file->path;
   }
   delete cf;
   my_free(file);
@@ -436,10 +437,10 @@ void cloud_deinit(ds_ctxt_t *ctxt) {
     cc->event_thread.join();
   }
   if (cc->async_upload_failed.load(std::memory_order_relaxed)) {
-    msg_ts(
-        "ds_cloud: one or more async small-file PUTs failed during this "
-        "backup -- the bucket may be missing files. Re-check the bucket "
-        "listing and the log lines above for the specific filenames.\n");
+    xb::error() << "ds_cloud: one or more async small-file PUTs failed "
+                << "during this backup -- the bucket may be missing files. "
+                << "Re-check the bucket listing and the log lines above "
+                << "for the specific filenames.";
     /* ds_destroy doesn't have a return value, so the failure surfaces
        in the log only. Phase 3 cleanup: add an out-parameter or a
        ds_drain() API so xtrabackup can refuse to write
@@ -469,7 +470,7 @@ datasink_t datasink_cloud = {&cloud_init,         &cloud_open,
 bool ds_cloud_probe() {
   if (g_ds_cloud_config.storage.empty()) return true;  /* cloud disabled */
   if (g_ds_cloud_config.container.empty()) {
-    msg_ts("ds_cloud: --cloud-bucket / container is not set\n");
+    xb::error() << "ds_cloud: --cloud-bucket / container is not set";
     return false;
   }
 
@@ -483,8 +484,8 @@ bool ds_cloud_probe() {
 
   auto store = build_object_store(&hc);
   if (!store) {
-    msg_ts("ds_cloud: unknown storage backend '%s'\n",
-           g_ds_cloud_config.storage.c_str());
+    xb::error() << "ds_cloud: unknown storage backend '"
+                << g_ds_cloud_config.storage << "'";
     return false;
   }
 
@@ -501,8 +502,8 @@ bool ds_cloud_probe() {
       return false;
     }
     if (!exists) {
-      msg_ts("ds_cloud: bucket '%s' does not exist\n",
-             g_ds_cloud_config.container.c_str());
+      xb::error() << "ds_cloud: bucket '" << g_ds_cloud_config.container
+                  << "' does not exist";
       return false;
     }
   }
