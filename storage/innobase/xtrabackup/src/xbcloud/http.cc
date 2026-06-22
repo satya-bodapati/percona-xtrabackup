@@ -643,6 +643,13 @@ void Http_client::setup_request(
 
   if (verbose) {
     curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+    /* Install our own debug callback so request headers can be
+       sanitized before they reach stderr. libcurl's default verbose
+       dump includes Authorization (which embeds the AWS access key in
+       the Credential= field) and X-Amz-Security-Token (the full STS
+       session token). Both must NOT land in customer logs. */
+    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION,
+                     &Http_client::redacting_debug_callback);
   }
 
   if (insecure) {
@@ -689,6 +696,94 @@ static void share_unlock_cb(CURL * /*handle*/, curl_lock_data data,
                             void *userptr) {
   auto *mutexes = static_cast<std::mutex *>(userptr);
   if (data < 8) mutexes[data].unlock();
+}
+
+/* Strip the value from a "Name: value" header line if Name is in the
+   sensitive set. Writes the (possibly-redacted) line to stderr with
+   the same "=> Send header" tag libcurl uses, so verbose output
+   structure looks familiar. Other CURLINFO types are passed through
+   verbatim. */
+int Http_client::redacting_debug_callback(CURL * /*handle*/,
+                                          curl_infotype type, char *data,
+                                          size_t size, void * /*userptr*/) {
+  /* Header lines we sanitize: any whose value carries credentials. */
+  static const char *const kSensitiveHeaders[] = {
+      "authorization", "x-amz-security-token", "x-amz-session-token",
+      "x-goog-session-token"};
+
+  auto print_prefix = [&](const char *tag) {
+    fprintf(stderr, "%s ", tag);
+  };
+
+  auto is_sensitive = [&](const char *line, size_t n) -> bool {
+    /* Match "name:" prefix, case-insensitive. */
+    for (auto *h : kSensitiveHeaders) {
+      size_t hlen = strlen(h);
+      if (n <= hlen) continue;
+      bool match = true;
+      for (size_t i = 0; i < hlen; ++i) {
+        char c = line[i];
+        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        if (c != h[i]) { match = false; break; }
+      }
+      if (match && line[hlen] == ':') return true;
+    }
+    return false;
+  };
+
+  switch (type) {
+    case CURLINFO_HEADER_OUT: {
+      /* Outbound request headers -- this is where Authorization and
+         X-Amz-Security-Token live. Parse line by line and redact. */
+      const char *cur = data;
+      const char *end = data + size;
+      while (cur < end) {
+        const char *eol = static_cast<const char *>(memchr(cur, '\n', end - cur));
+        size_t line_len = (eol != nullptr) ? (size_t)(eol - cur + 1)
+                                            : (size_t)(end - cur);
+        /* Strip trailing CR/LF for the match check. */
+        size_t name_len = line_len;
+        while (name_len > 0 &&
+               (cur[name_len - 1] == '\n' || cur[name_len - 1] == '\r')) {
+          --name_len;
+        }
+
+        print_prefix("=>");
+        if (is_sensitive(cur, name_len)) {
+          /* Print "Name: REDACTED" and the original CR/LF. */
+          const char *colon =
+              static_cast<const char *>(memchr(cur, ':', name_len));
+          if (colon != nullptr) {
+            fwrite(cur, 1, (size_t)(colon - cur + 1), stderr);
+            fputs(" <REDACTED>", stderr);
+          }
+          for (size_t i = name_len; i < line_len; ++i) fputc(cur[i], stderr);
+        } else {
+          fwrite(cur, 1, line_len, stderr);
+        }
+        cur += line_len;
+      }
+      break;
+    }
+    case CURLINFO_TEXT:
+      print_prefix("*");
+      fwrite(data, 1, size, stderr);
+      break;
+    case CURLINFO_HEADER_IN:
+      print_prefix("<=");
+      fwrite(data, 1, size, stderr);
+      break;
+    case CURLINFO_DATA_IN:
+    case CURLINFO_DATA_OUT:
+    case CURLINFO_SSL_DATA_IN:
+    case CURLINFO_SSL_DATA_OUT:
+      /* Don't dump bodies (they're large, can contain payload, and
+         the previous libcurl default did skip them too for VERBOSE). */
+      break;
+    default:
+      break;
+  }
+  return 0;
 }
 
 void Http_client::init_share() const {

@@ -431,6 +431,16 @@ class Http_client {
                      Http_response &response, curl_slist *&headers,
                      Http_connection::upload_state_t *upload_state) const;
 
+  /* CURLOPT_DEBUGFUNCTION callback. Replaces libcurl's default verbose
+     dump so we can redact credential-bearing headers (Authorization
+     embedding the AWS access key, X-Amz-Security-Token carrying STS
+     tokens) before they reach stderr. Verbose mode is a debugging
+     feature; redaction is non-negotiable for logs that customers /
+     support paste into tickets. */
+  static int redacting_debug_callback(CURL *handle, curl_infotype type,
+                                       char *data, size_t size,
+                                       void *userptr);
+
   static int upload_callback(char *ptr, size_t size, size_t nmemb, void *data);
 
  public:
