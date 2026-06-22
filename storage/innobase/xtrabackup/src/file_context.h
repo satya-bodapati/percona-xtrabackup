@@ -77,4 +77,49 @@ bool file_context_build_manifest(std::string &out);
    created via the factory. */
 void file_context_registry_clear();
 
+/* ----- Restore-side manifest reader -----
+   At restore (--prepare / --copy-back / xbstream -x) we lazily load
+   backup_meta.json into an in-memory lookup keyed by relative path.
+   Restore code calls file_context_lookup_regions() per file; if the
+   path is in the manifest, the returned regions[] drives manifest-
+   based hole reconstruction; otherwise the caller falls back to
+   IBD page-walk (backward compat for old-format backups without
+   backup_meta.json). */
+
+/* Load backup_meta.json from @p target_dir into the lookup table.
+   Idempotent within a process: a second call against the same dir
+   is a no-op.  Returns true if the manifest was found AND parsed
+   successfully (which is the only case where lookups will return
+   non-null); returns false on absent / unreadable / unparseable
+   manifest (lookups then always return null and callers fall back).
+*/
+bool file_context_load_manifest_from(const char *target_dir);
+
+/* Look up a file by its relative path inside the backup.  Returns
+   a pointer to the regions vector if the path is known and has a
+   sparse_map; returns nullptr otherwise (file dense in manifest,
+   path not in manifest, or manifest not loaded).  Lifetime of the
+   returned vector is the process. */
+const std::vector<file_region_t> *file_context_lookup_regions(
+    const char *path);
+
+/* Look up a file's logical_size from the loaded manifest.  Returns
+   0 if not known (manifest not loaded, path not present, or
+   logical_size field omitted). */
+uint64_t file_context_lookup_logical_size(const char *path);
+
+/* Manifest-driven hole punch.  Opens @p file_path for write, walks
+   the gaps between consecutive regions (and the trailing tail up to
+   @p logical_size), and fallocate(PUNCH_HOLE) each gap.  Used at
+   restore-time as a replacement for the IBD page-walk in
+   restore_sparseness() when the file is known to the manifest.
+
+   Returns true on success.  Returns true (no-op) on filesystems
+   without PUNCH_HOLE support -- the file stays dense on disk,
+   which is functionally correct; only disk-space reclaim is lost.
+   Returns false if the file cannot be opened. */
+bool file_context_punch_holes_from_regions(
+    const char *file_path, uint64_t logical_size,
+    const std::vector<file_region_t> &regions);
+
 #endif /* XB_FILE_CONTEXT_H */

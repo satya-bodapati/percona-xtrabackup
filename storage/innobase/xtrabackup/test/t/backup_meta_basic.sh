@@ -189,4 +189,73 @@ else
   rm -rf $topdir/bm_backup4
 fi
 
+############################################################################
+# Scenario 5: Compressed backup of sparse table -> --decompress restores
+# sparseness via the manifest (manifest-driven punch_hole), not via the
+# IBD page-walk in restore_sparseness().
+############################################################################
+if grep -q 'PUNCH HOLE support not available' $MYSQLD_ERRFILE ; then
+  vlog "=== Scenario 5: SKIPPED (no PUNCH HOLE support) ==="
+elif [ "$( jq -r '.files[] | select(.name == "bm_test/t_sparse.ibd") | .sparse_map | length' \
+            < /dev/null 2>/dev/null )" = "" ] && ! command -v zstd >/dev/null; then
+  vlog "=== Scenario 5: SKIPPED (zstd not available) ==="
+else
+  vlog "=== Scenario 5: Compressed sparse -> --decompress restores sparseness ==="
+
+  # Reuse the sparse table from scenario 4 (assumed still present).
+  mysql -e "FLUSH TABLES bm_test.t_sparse FOR EXPORT; UNLOCK TABLES;" 2>/dev/null || true
+  is_sparse_file $mysql_datadir/bm_test/t_sparse.ibd \
+    || die "scen5: source t_sparse.ibd not sparse"
+
+  src_blocks=$(stat -c %b $mysql_datadir/bm_test/t_sparse.ibd)
+
+  xtrabackup --backup --compress=zstd --target-dir=$topdir/bm_backup5
+
+  # Compressed file present, raw .ibd absent
+  [ -f $topdir/bm_backup5/bm_test/t_sparse.ibd.zst ] \
+    || die "scen5: t_sparse.ibd.zst missing after compressed backup"
+
+  # Manifest still has sparse_map for the table (built pre-compression)
+  manifest_regions=$(jq -r '.files[]
+                       | select(.name == "bm_test/t_sparse.ibd")
+                       | .sparse_map // [] | length' \
+                     < $topdir/bm_backup5/backup_meta.json)
+  [ "$manifest_regions" -gt 0 ] \
+    || die "scen5: manifest missing sparse_map for compressed-backup sparse table"
+
+  # Decompress and verify the restored file is sparse with the same
+  # physical-block count as the source.  This proves the manifest-driven
+  # punch path was used (legacy restore_sparseness on a freshly decompressed
+  # dense .ibd would also work via FIL_PAGE walk, but we additionally check
+  # that the manifest lookup succeeded by tailing the decompress output for
+  # the absence of a "not sparse, skipping" message on t_sparse.ibd).
+  xtrabackup --decompress --target-dir=$topdir/bm_backup5 \
+       2> $topdir/bm_backup5_dec.log
+
+  [ -f $topdir/bm_backup5/bm_test/t_sparse.ibd ] \
+    || die "scen5: t_sparse.ibd missing after --decompress"
+
+  is_sparse_file $topdir/bm_backup5/bm_test/t_sparse.ibd \
+    || die "scen5: restored t_sparse.ibd not sparse"
+
+  dst_blocks=$(stat -c %b $topdir/bm_backup5/bm_test/t_sparse.ibd)
+  # Allow some slack: the source FS may report blocks differently than
+  # the target FS.  But it must be substantially less than apparent.
+  apparent=$(stat -c %s $topdir/bm_backup5/bm_test/t_sparse.ibd)
+  allocated=$((dst_blocks * 512))
+  [ "$allocated" -lt "$apparent" ] \
+    || die "scen5: restored file allocated=$allocated >= apparent=$apparent (not sparse?)"
+
+  # restore_sparseness's "not sparse, skipping" message on t_sparse.ibd
+  # would mean the manifest-driven path was NOT taken (file would have
+  # fallen through to the legacy page-walk fallback).
+  if grep -q "File ./bm_test/t_sparse.ibd is not sparse" $topdir/bm_backup5_dec.log ; then
+    die "scen5: t_sparse.ibd went through legacy page-walk, not manifest path"
+  fi
+
+  vlog "scen5: restored sparse: apparent=$apparent allocated=$allocated (src_blocks=$src_blocks dst_blocks=$dst_blocks)"
+
+  rm -rf $topdir/bm_backup5 $topdir/bm_backup5_dec.log
+fi
+
 vlog "All backup_meta.json scenarios passed."

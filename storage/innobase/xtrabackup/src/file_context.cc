@@ -13,10 +13,23 @@ the Free Software Foundation; version 2 of the License.
 
 #include <my_rapidjson_size_t.h>
 #include <rapidjson/document.h>
+#include <rapidjson/istreamwrapper.h>
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <fstream>
 #include <memory>
+#include <string>
+#include <unordered_map>
+
+#ifdef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
+#include <linux/falloc.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -120,4 +133,158 @@ void file_context_registry_clear() {
   std::lock_guard<std::mutex> lock(r.mu);
   r.finalized.clear();
   r.all.clear();
+}
+
+/* ------------------------------------------------------------------
+   Restore-side lookup: load backup_meta.json once, answer queries
+   by relative path. Independent from the backup-time registry above
+   to avoid coupling the two ownership models.
+   ------------------------------------------------------------------ */
+
+namespace {
+
+struct RestoreEntry {
+  uint64_t logical_size = 0;
+  std::vector<file_region_t> regions;
+};
+
+struct RestoreLookup {
+  std::mutex mu;
+  std::string loaded_from_dir;  /* empty => not loaded */
+  bool ok = false;
+  std::unordered_map<std::string, RestoreEntry> by_path;
+};
+
+RestoreLookup &restore_lookup() {
+  static RestoreLookup l;
+  return l;
+}
+
+}  // namespace
+
+bool file_context_load_manifest_from(const char *target_dir) {
+  if (target_dir == nullptr) return false;
+
+  auto &l = restore_lookup();
+  std::lock_guard<std::mutex> lock(l.mu);
+
+  /* Idempotent if called again for the same dir. */
+  if (l.loaded_from_dir == target_dir) return l.ok;
+
+  l.loaded_from_dir = target_dir;
+  l.ok = false;
+  l.by_path.clear();
+
+  std::string manifest_path(target_dir);
+  if (!manifest_path.empty() && manifest_path.back() != '/') {
+    manifest_path.push_back('/');
+  }
+  manifest_path.append("backup_meta.json");
+
+  std::ifstream in(manifest_path);
+  if (!in.is_open()) return false;
+
+  rapidjson::IStreamWrapper isw(in);
+  rapidjson::Document doc;
+  doc.ParseStream(isw);
+  if (doc.HasParseError() || !doc.IsObject()) return false;
+  if (!doc.HasMember("files") || !doc["files"].IsArray()) return false;
+
+  for (auto &entry : doc["files"].GetArray()) {
+    if (!entry.IsObject()) continue;
+    if (!entry.HasMember("name") || !entry["name"].IsString()) continue;
+    const char *name = entry["name"].GetString();
+
+    RestoreEntry re;
+    if (entry.HasMember("logical_size") && entry["logical_size"].IsUint64()) {
+      re.logical_size = entry["logical_size"].GetUint64();
+    }
+    if (entry.HasMember("sparse_map") && entry["sparse_map"].IsArray()) {
+      for (auto &r : entry["sparse_map"].GetArray()) {
+        if (!r.IsObject()) continue;
+        if (!r.HasMember("offset") || !r.HasMember("length")) continue;
+        re.regions.push_back(
+            {r["offset"].GetUint64(), r["length"].GetUint64()});
+      }
+    }
+    l.by_path.emplace(std::string(name), std::move(re));
+  }
+
+  l.ok = true;
+  return true;
+}
+
+const std::vector<file_region_t> *file_context_lookup_regions(const char *path) {
+  if (path == nullptr) return nullptr;
+  auto &l = restore_lookup();
+  std::lock_guard<std::mutex> lock(l.mu);
+  if (!l.ok) return nullptr;
+  auto it = l.by_path.find(path);
+  if (it == l.by_path.end()) return nullptr;
+  if (it->second.regions.empty()) return nullptr;  /* dense; no holes */
+  return &it->second.regions;
+}
+
+uint64_t file_context_lookup_logical_size(const char *path) {
+  if (path == nullptr) return 0;
+  auto &l = restore_lookup();
+  std::lock_guard<std::mutex> lock(l.mu);
+  if (!l.ok) return 0;
+  auto it = l.by_path.find(path);
+  if (it == l.by_path.end()) return 0;
+  return it->second.logical_size;
+}
+
+bool file_context_punch_holes_from_regions(
+    const char *file_path, uint64_t logical_size,
+    const std::vector<file_region_t> &regions) {
+  if (file_path == nullptr) return false;
+
+#ifndef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
+  /* No FS support for punch_hole.  Treat as success: the file stays
+     dense on disk, which is functionally correct; only disk-space
+     reclaim is lost. */
+  (void)logical_size;
+  (void)regions;
+  return true;
+#else
+  int fd = ::open(file_path, O_WRONLY);
+  if (fd < 0) return false;
+
+  /* Walk consecutive regions and punch the gaps between them.  Also
+     punch the trailing tail from the last region's end to
+     logical_size, if any.  Regions are stored in file-offset order
+     by the backup-time write loop, but we don't assume sorted to be
+     safe -- the manifest is user-readable and could in principle be
+     rewritten; not worth a sort here, but we tolerate disorder by
+     requiring gap > 0. */
+  uint64_t cursor = 0;
+  bool any_err = false;
+  for (const auto &r : regions) {
+    if (r.offset > cursor) {
+      const uint64_t gap = r.offset - cursor;
+      if (::fallocate(fd,
+                      FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                      static_cast<off_t>(cursor),
+                      static_cast<off_t>(gap)) != 0) {
+        any_err = true;
+        break;
+      }
+    }
+    /* If regions are not sorted or overlap, just advance the cursor
+       monotonically -- we never want to walk backwards. */
+    if (r.offset + r.length > cursor) cursor = r.offset + r.length;
+  }
+  if (!any_err && logical_size > cursor) {
+    const uint64_t tail = logical_size - cursor;
+    if (::fallocate(fd,
+                    FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                    static_cast<off_t>(cursor),
+                    static_cast<off_t>(tail)) != 0) {
+      any_err = true;
+    }
+  }
+  ::close(fd);
+  return !any_err;
+#endif
 }

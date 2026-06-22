@@ -2766,11 +2766,31 @@ bool decrypt_decompress_file(const char *filepath, uint thread_n) {
     }
   }
   if (ds_data->fs_support_punch_hole) {
-    char error[512];
-    if (!restore_sparseness(dest_filepath, opt_read_buffer_size,
-                            error IF_DEBUG(, true))) {
-      xb::warn() << "restore_sparseness failed for file: " << dest_filepath
-                 << " Error: " << error;
+    /* Prefer manifest-driven hole punch when backup_meta.json has
+       sparse_map info for this file: O(1) lookup + one fallocate
+       per recorded gap, no need to re-parse IBD page headers.  We
+       lazily load the manifest on first restore call; subsequent
+       calls are pure lookups.  Falls back to the legacy
+       FIL_PAGE_COMPRESSED page-walk in restore_sparseness() when
+       the file is absent from the manifest (old-format backup) or
+       the manifest itself is absent. */
+    file_context_load_manifest_from(xtrabackup_target_dir);
+    const auto *regions = file_context_lookup_regions(dest_filepath);
+    if (regions != nullptr) {
+      const uint64_t logical_size =
+          file_context_lookup_logical_size(dest_filepath);
+      if (!file_context_punch_holes_from_regions(dest_filepath, logical_size,
+                                                 *regions)) {
+        xb::warn() << "manifest-driven hole punch failed for: "
+                   << dest_filepath << " (file remains dense on disk)";
+      }
+    } else {
+      char error[512];
+      if (!restore_sparseness(dest_filepath, opt_read_buffer_size,
+                              error IF_DEBUG(, true))) {
+        xb::warn() << "restore_sparseness failed for file: " << dest_filepath
+                   << " Error: " << error;
+      }
     }
   }
 
