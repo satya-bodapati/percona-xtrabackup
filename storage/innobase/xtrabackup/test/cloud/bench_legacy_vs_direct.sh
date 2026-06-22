@@ -65,13 +65,20 @@ python3 "$PROTOTYPE/fault_proxy.py" \
 PROXY_PID=$!
 sleep 1
 
+reset_bucket() {
+  aws --endpoint-url="$ENDPOINT_DIRECT" s3 rb "s3://$BUCKET" --force \
+      >/dev/null 2>&1 || true
+  aws --endpoint-url="$ENDPOINT_DIRECT" s3 mb "s3://$BUCKET" >/dev/null
+}
+
 run_legacy() {
+  reset_bucket
   local name="legacy-$(date +%s%N)"
-  rm -rf /tmp/legacy-tmp
+  rm -rf /home/satya/tmp/legacy-tmp
   local start=$(date +%s%N)
   "$XTRABACKUP" --backup \
       --user="$MYSQL_USER" --socket="$MYSQL_SOCKET" \
-      --target-dir=/tmp/legacy-tmp \
+      --target-dir=/home/satya/tmp/legacy-tmp \
       --parallel="$PARALLEL" \
       --stream=xbstream 2>"$WORK/legacy.err" \
    | "$XBCLOUD" put \
@@ -81,17 +88,20 @@ run_legacy() {
       --s3-access-key=test --s3-secret-key=test \
       --s3-region=us-east-1 --s3-bucket-lookup=path \
       --multipart-upload=ON --parallel="$PARALLEL" \
+      --multipart-memory-budget=268435456 \
       "$name" 2>"$WORK/legacy.xbc.err"
   local end=$(date +%s%N)
   echo $(( (end - start) / 1000000 ))
 }
 
 run_direct() {
+  reset_bucket
   local name="direct-$(date +%s%N)"
+  rm -rf /home/satya/tmp/direct-tmp
   local start=$(date +%s%N)
   "$XTRABACKUP" --backup \
       --user="$MYSQL_USER" --socket="$MYSQL_SOCKET" \
-      --target-dir="/tmp/$name" \
+      --target-dir="/home/satya/tmp/direct-tmp" \
       --parallel="$PARALLEL" \
       --cloud-storage=s3 \
       --cloud-endpoint="$ENDPOINT_PROXY" \
