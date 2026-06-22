@@ -125,4 +125,68 @@ fi
 
 rm -rf $topdir/bm_backup3
 
+############################################################################
+# Scenario 4: Sparse IBD picks up a sparse_map in the manifest
+############################################################################
+if grep -q 'PUNCH HOLE support not available' $MYSQLD_ERRFILE ; then
+  vlog "=== Scenario 4: SKIPPED (no PUNCH HOLE support) ==="
+else
+  vlog "=== Scenario 4: Sparse IBD records sparse_map in manifest ==="
+
+  mysql -e "CREATE TABLE bm_test.t_sparse (c1 INT AUTO_INCREMENT PRIMARY KEY, c2 BLOB)
+            COMPRESSION='zlib' ENGINE=InnoDB;"
+  mysql -e "INSERT INTO bm_test.t_sparse (c2) VALUES (REPEAT('x', 5000));"
+  for i in $(seq 1 6) ; do
+    mysql -e "INSERT INTO bm_test.t_sparse (c2) SELECT c2 FROM bm_test.t_sparse;"
+  done
+  innodb_wait_for_flush_all
+
+  is_sparse_file $mysql_datadir/bm_test/t_sparse.ibd \
+    || die "scen4: t_sparse.ibd is not sparse on disk"
+
+  xtrabackup --backup --target-dir=$topdir/bm_backup4
+
+  verify_manifest "$topdir/bm_backup4/backup_meta.json" "scen4"
+
+  # Sparse table MUST have a sparse_map in the manifest.
+  local_sparse_map_len=$(jq -r '.files[]
+                          | select(.name == "bm_test/t_sparse.ibd")
+                          | .sparse_map // [] | length' \
+                         < $topdir/bm_backup4/backup_meta.json)
+  [ "$local_sparse_map_len" -gt 0 ] \
+    || die "scen4: bm_test/t_sparse.ibd should have a non-empty sparse_map"
+
+  # Each region must have non-negative offset and positive length.
+  bad_regions=$(jq -r '.files[]
+                  | select(.name == "bm_test/t_sparse.ibd")
+                  | .sparse_map[]
+                  | select(.offset < 0 or .length <= 0)' \
+                < $topdir/bm_backup4/backup_meta.json | wc -l)
+  [ "$bad_regions" -eq 0 ] \
+    || die "scen4: $bad_regions sparse_map entries have bad offset/length"
+
+  # Sum of region lengths must not exceed the file's logical_size.
+  sum_data=$(jq -r '.files[]
+                | select(.name == "bm_test/t_sparse.ibd")
+                | [.sparse_map[].length] | add' \
+             < $topdir/bm_backup4/backup_meta.json)
+  logical=$(jq -r '.files[]
+                | select(.name == "bm_test/t_sparse.ibd")
+                | .logical_size' \
+             < $topdir/bm_backup4/backup_meta.json)
+  [ "$sum_data" -le "$logical" ] \
+    || die "scen4: sum of region lengths ($sum_data) exceeds logical_size ($logical)"
+
+  vlog "scen4: sparse_map has $local_sparse_map_len regions, $sum_data data bytes (logical=$logical)"
+
+  # Dense files MUST NOT have a sparse_map.
+  jq -e '.files[]
+          | select(.name == "bm_test/t1.ibd")
+          | has("sparse_map") | not' \
+     < $topdir/bm_backup4/backup_meta.json > /dev/null \
+    || die "scen4: dense bm_test/t1.ibd should not have sparse_map"
+
+  rm -rf $topdir/bm_backup4
+fi
+
 vlog "All backup_meta.json scenarios passed."

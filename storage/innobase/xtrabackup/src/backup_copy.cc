@@ -501,14 +501,25 @@ template bool run_data_threads<std::function<void(datadir_thread_ctxt_t *)>>(
     uint, const char *);
 
 /************************************************************************
-Write buffer into .ibd file and preserve it's sparsiness. */
+Write buffer into .ibd file and preserve it's sparsiness.
+@p buf_offset_in_file is the absolute byte offset of @p buf inside the
+source IBD; used to record per-file sparse_map regions in the
+FileContext attached to @p file (when present). */
 bool write_ibd_buffer(ds_file_t *file, unsigned char *buf, size_t buf_len,
                       size_t page_size, size_t block_size,
-                      bool punch_hole_supported) {
+                      bool punch_hole_supported,
+                      uint64_t buf_offset_in_file) {
   ut_a(buf_len % page_size == 0);
 
-  if (ds_is_sparse_write_supported(file) && page_size > block_size) {
-    std::vector<ds_sparse_chunk_t> sparse_map;
+  /* Per-page scan for the IBD-compressed sparse layout.  Build the
+     sparse_map ({skip-hole, data-length} pairs).  Doing this scan
+     unconditionally (rather than only when the chain supports
+     write_sparse) lets us populate the FileContext's regions[] in
+     ALL cases, so restore-time hole reconstruction via the manifest
+     works even when --compress/--encrypt sits above the leaf and
+     write_sparse is disabled. */
+  std::vector<ds_sparse_chunk_t> sparse_map;
+  if (page_size > block_size) {
     size_t skip = 0, len = 0;
     for (ulint i = 0, page_offs = 0; i < buf_len / page_size;
          ++i, page_offs += page_size) {
@@ -530,21 +541,48 @@ bool write_ibd_buffer(ds_file_t *file, unsigned char *buf, size_t buf_len,
       }
     }
     sparse_map.push_back(ds_sparse_chunk_t{skip, len});
+  }
 
-    if (sparse_map.size() > 1) {
-      size_t src_pos = 0, dst_pos = 0;
-      for (size_t i = 0; i < sparse_map.size(); ++i) {
-        src_pos += sparse_map[i].skip;
-        memmove(buf + dst_pos, buf + src_pos, sparse_map[i].len);
-        src_pos += sparse_map[i].len;
-        dst_pos += sparse_map[i].len;
+  /* Populate FileContext::regions[] from the local sparse_map by
+     walking it with an absolute-offset cursor that starts at this
+     buffer's position in the source file.  Each sparse_map entry's
+     skip advances past a hole; its len records a data region.
+     Empty regions[] in the manifest entry will mean "dense file --
+     restore writes bytes sequentially, no hole-punch needed".  We
+     only record when the file is genuinely sparse (>1 entry); the
+     1-entry case is a fully dense buffer and contributes nothing.
+
+     This runs once per write_ibd_buffer call and many calls per
+     file accumulate into the file's FileContext->regions vector. */
+  if (file->file_ctx != nullptr && sparse_map.size() > 1) {
+    FileContext *fc = static_cast<FileContext *>(file->file_ctx);
+    uint64_t cursor = buf_offset_in_file;
+    for (const auto &chunk : sparse_map) {
+      cursor += chunk.skip;
+      if (chunk.len > 0) {
+        fc->regions.push_back({cursor, chunk.len});
+        cursor += chunk.len;
       }
-      if (ds_write_sparse(file, buf, dst_pos, sparse_map.size(), &sparse_map[0],
-                          punch_hole_supported)) {
-        return (false);
-      }
-      return (true);
     }
+  }
+
+  /* Existing sparse-write fast path: when the chain leaf supports
+     write_sparse (ds_local, ds_xbstream), pack the data regions
+     contiguous in buf via memmove and emit a sparse write so the
+     leaf can scatter on the receiving side. */
+  if (ds_is_sparse_write_supported(file) && sparse_map.size() > 1) {
+    size_t src_pos = 0, dst_pos = 0;
+    for (size_t i = 0; i < sparse_map.size(); ++i) {
+      src_pos += sparse_map[i].skip;
+      memmove(buf + dst_pos, buf + src_pos, sparse_map[i].len);
+      src_pos += sparse_map[i].len;
+      dst_pos += sparse_map[i].len;
+    }
+    if (ds_write_sparse(file, buf, dst_pos, sparse_map.size(), &sparse_map[0],
+                        punch_hole_supported)) {
+      return (false);
+    }
+    return (true);
   }
 
   if (ds_write(file, buf, buf_len)) {
@@ -615,7 +653,8 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
         page_size.copy_from(fsp_header_get_page_size(cursor.buf));
       if (!write_ibd_buffer(dstfile, cursor.buf, cursor.buf_read,
                             page_size.physical(), cursor.statinfo.st_blksize,
-                            datasink->fs_support_punch_hole))
+                            datasink->fs_support_punch_hole,
+                            cursor.buf_offset))
         goto error;
     } else {
       if (ds_write(dstfile, cursor.buf, cursor.buf_read)) goto error;

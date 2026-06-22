@@ -49,10 +49,16 @@ enum file_purpose_t {
 };
 
 /************************************************************************
-Write buffer into .ibd file and preserve it's sparsiness. */
+Write buffer into .ibd file and preserve it's sparsiness.
+@p buf_offset_in_file is the absolute byte offset of @p buf inside the
+source IBD; used to record per-file sparse_map regions in the
+FileContext attached to @p file (when present).  The recorded regions
+drive manifest-based hole reconstruction at restore time without
+re-parsing FIL_PAGE headers. */
 bool write_ibd_buffer(ds_file_t *file, unsigned char *buf, size_t buf_len,
                       size_t page_size, size_t block_size,
-                      bool punch_hole_supported);
+                      bool punch_hole_supported,
+                      uint64_t buf_offset_in_file);
 
 /************************************************************************
 Copy file for backup/restore.

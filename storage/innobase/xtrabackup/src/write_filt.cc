@@ -217,5 +217,6 @@ static bool wf_wt_process(xb_write_filt_ctxt_t *ctxt, ds_file_t *dstfile) {
 
   return write_ibd_buffer(
       dstfile, cursor->buf, cursor->buf_npages * cursor->page_size,
-      cursor->page_size, cursor->block_size, punch_hole_supported);
+      cursor->page_size, cursor->block_size, punch_hole_supported,
+      cursor->buf_offset);
 }
