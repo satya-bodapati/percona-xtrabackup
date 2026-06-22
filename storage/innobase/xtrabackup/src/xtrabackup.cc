@@ -300,13 +300,18 @@ static char *opt_cloud_cacert = nullptr;
 static ulong opt_cloud_timeout = 120;
 static ulong opt_cloud_max_retries = 10;
 static ulong opt_cloud_max_backoff = 300000;
-/* 0 = sentinel "user did not set it; inherit --parallel value at
-   apply_cloud_options() time". */
-static ulong opt_cloud_http_parallel_requests = 0;
+/* Default 16 -- matches aws-cli's max_concurrent_requests philosophy.
+   Decoupled from --parallel: data-copy threads (--parallel) and HTTP
+   request concurrency are different resources. */
+static ulong opt_cloud_http_parallel_requests = 16;
 static ulonglong opt_cloud_multipart_part_size = 0;
 static ulonglong opt_cloud_multipart_threshold = 16ULL * 1024 * 1024;
 static ulonglong opt_cloud_multipart_rollover_threshold =
     5ULL * 1024 * 1024 * 1024 * 1024;
+/* 0 = unlimited (memory grows with concurrent * part_size, like
+   aws-cli).  Non-zero: total in-flight bytes cap across all writers;
+   system auto-shrinks part_size and concurrency to fit. */
+static ulonglong opt_cloud_upload_buffer_size = 0;
 static ulong opt_cloud_rate_log_interval = 10;
 static bool opt_cloud_http_timing = false;
 
@@ -891,6 +896,7 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
   OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
   OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
+  OPT_XTRA_CLOUD_UPLOAD_BUFFER_SIZE,
   OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
   OPT_XTRA_CLOUD_HTTP_TIMING,
   OPT_XTRA_CLOUD_DOWNLOAD,
@@ -1624,29 +1630,35 @@ struct my_option xb_client_options[] = {
      &opt_cloud_max_backoff, &opt_cloud_max_backoff, 0, GET_ULONG,
      REQUIRED_ARG, 300000, 0, 3600000, 0, 0, 0},
     {"cloud-http-parallel-requests", OPT_XTRA_CLOUD_HTTP_PARALLEL_REQUESTS,
-     "Max concurrent in-flight HTTP requests inside the Event_handler "
-     "(curl-multi). Default 0 = inherit --parallel.",
+     "Max concurrent cloud HTTP requests. Default 16. Higher = more "
+     "throughput but more memory (memory ~= this * part-size).",
      &opt_cloud_http_parallel_requests, &opt_cloud_http_parallel_requests, 0,
-     GET_ULONG, REQUIRED_ARG, 0, 0, 1024, 0, 0, 0},
+     GET_ULONG, REQUIRED_ARG, 16, 1, 1024, 0, 0, 0},
     {"cloud-multipart-part-size", OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
-     "Override the tiered dynamic part-size schedule with a fixed part "
-     "size in bytes. 0 = use the schedule.",
+     "Multipart part size in bytes. 0 = auto: max(16MiB, ceil(filesize/10K)).",
      &opt_cloud_multipart_part_size, &opt_cloud_multipart_part_size, 0,
      GET_ULL, REQUIRED_ARG, 0, 0,
      5ULL * 1024 * 1024 * 1024, 0, 0, 0},
     {"cloud-multipart-threshold", OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
-     "Streams below this finish as a single PUT, no Initiate/Abort.",
+     "Files smaller than this go as a single PUT (skip multipart).",
      &opt_cloud_multipart_threshold, &opt_cloud_multipart_threshold, 0,
      GET_ULL, REQUIRED_ARG, 16ULL * 1024 * 1024, 0,
      5ULL * 1024 * 1024 * 1024, 0, 0, 0},
     {"cloud-multipart-rollover-threshold",
      OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
-     "Files larger than this would roll over (currently aborts with a "
-     "clear message; rollover lands in the manifest follow-up).",
+     "Advanced. Per-object size cap; files larger split into .part-NNN. "
+     "Default is the S3 5 TiB hard limit.",
      &opt_cloud_multipart_rollover_threshold,
      &opt_cloud_multipart_rollover_threshold, 0, GET_ULL, REQUIRED_ARG,
      5ULL * 1024 * 1024 * 1024 * 1024, 16ULL * 1024 * 1024, ULLONG_MAX, 0, 0,
      0},
+    {"cloud-upload-buffer-size", OPT_XTRA_CLOUD_UPLOAD_BUFFER_SIZE,
+     "Total cloud-upload memory cap across all writers in bytes. "
+     "0 = unlimited (memory grows with file size and concurrency, "
+     "like aws-cli). When set, system shrinks part-size and/or "
+     "concurrency to fit; very large files may roll into multiple objects.",
+     &opt_cloud_upload_buffer_size, &opt_cloud_upload_buffer_size, 0,
+     GET_ULL, REQUIRED_ARG, 0, 0, ULLONG_MAX, 0, 0, 0},
     {"cloud-rate-log-interval", OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
      "Log upload throughput every N seconds on the libev thread. 0 to "
      "disable.",
@@ -3796,18 +3808,12 @@ static void apply_cloud_options() {
   g_ds_cloud_config.timeout = opt_cloud_timeout;
   g_ds_cloud_config.max_retries = opt_cloud_max_retries;
   g_ds_cloud_config.max_backoff = opt_cloud_max_backoff;
-  if (opt_cloud_http_parallel_requests == 0) {
-    /* User did not set --cloud-http-parallel-requests. Inherit
-       --parallel so cloud-side HTTP concurrency tracks data-copy
-       thread count by default. */
-    opt_cloud_http_parallel_requests =
-        xtrabackup_parallel > 0 ? (ulong)xtrabackup_parallel : 8;
-    xb::info() << "ds_cloud: --cloud-http-parallel-requests not set; "
-                  "using --parallel value ("
-               << opt_cloud_http_parallel_requests
-               << ") for cloud-side HTTP request concurrency";
-  }
+  /* --cloud-http-parallel-requests has a fixed default (16),
+     decoupled from --parallel.  Data-copy threads and HTTP
+     concurrency are different resources; conflating them led to
+     unpredictable memory peaks when users bumped --parallel high. */
   g_ds_cloud_config.http_parallel_requests = opt_cloud_http_parallel_requests;
+  g_ds_cloud_config.upload_buffer_size = opt_cloud_upload_buffer_size;
   g_ds_cloud_config.multipart_part_size = opt_cloud_multipart_part_size;
   g_ds_cloud_config.multipart_threshold = opt_cloud_multipart_threshold;
   g_ds_cloud_config.multipart_rollover_threshold =

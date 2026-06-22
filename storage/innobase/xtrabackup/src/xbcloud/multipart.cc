@@ -72,15 +72,26 @@ std::string build_rollover_manifest(
 }
 
 size_t dynamic_part_size(uint64_t bytes_so_far) {
-  /* Tiered ramp; see multipart.h for the rationale and parts-count
-     accounting. Both the streaming path and the known-size path call
-     this with their respective "bytes so far" value (running total for
-     streaming, stat'd file_size for known). */
-  if (bytes_so_far < 1ULL * GIB) return 16ULL * MIB;
-  if (bytes_so_far < 10ULL * GIB) return 64ULL * MIB;
-  if (bytes_so_far < 100ULL * GIB) return 256ULL * MIB;
-  if (bytes_so_far < 1ULL * TIB) return 512ULL * MIB;
-  return 600ULL * MIB;
+  /* Continuous formula: max(16 MiB, ceil(filesize / MAX_PARTS_PER_OBJECT))
+     where MAX_PARTS_PER_OBJECT = 10000 (S3 hard limit).
+
+     For files <= 160 GiB the 16 MiB floor wins (peak memory = 16 MiB *
+     concurrent, predictable and small).  Larger files auto-bump just
+     enough to stay under 10000 parts.
+
+     Matches aws-cli's boto3 S3Transfer model.  Replaces the discrete
+     tier schedule (16 -> 64 -> 256 -> 600 MiB by buckets), which had
+     awkward jumps and wasn't easy for users to reason about.
+
+     Note on the parameter name `bytes_so_far`: callers that know the
+     filesize up front pass it directly (recommended).  The streaming
+     path passes the running total of bytes appended -- behavior is
+     still correct because the formula is monotonic in the input
+     and only grows the part size, never shrinks. */
+  static constexpr uint64_t MIN_PART = 16ULL * MIB;
+  static constexpr uint64_t MAX_PARTS = 10000;
+  const uint64_t needed = (bytes_so_far + MAX_PARTS - 1) / MAX_PARTS;
+  return std::max(MIN_PART, needed);
 }
 
 Multipart_uploader::~Multipart_uploader() {

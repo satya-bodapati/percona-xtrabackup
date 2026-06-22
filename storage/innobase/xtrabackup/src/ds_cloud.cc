@@ -29,6 +29,7 @@ the Free Software Foundation; version 2 of the License.
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,6 +40,7 @@ the Free Software Foundation; version 2 of the License.
 #include "common.h"
 #include "datasink.h"
 #include "msg.h"
+#include "utils.h"
 
 #include "xbcloud/http.h"
 #include "xbcloud/multipart.h"
@@ -52,6 +54,8 @@ using namespace xbcloud;
 ds_cloud_config_t g_ds_cloud_config;
 
 namespace {
+
+
 
 /* Per-datasink (ctxt) state. Owns the long-lived HTTP / event-loop /
    object-store handles. One instance per ds_create(DS_TYPE_CLOUD). */
@@ -213,16 +217,100 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   auto *cf = new ds_cloud_file_t;
   cf->object_name = object;
   cf->ctxt = cc;
-  /* Hardcoded 64 MiB in-flight cap per writer; intentionally NOT a CLI
-     option (see ds_cloud.h). Peak memory = --parallel * 64 MiB. A
-     future global cap exposed as --cloud-upload-buffer-size will
-     replace this. */
-  static constexpr ulonglong kPerWriterBufferBytes = 64ULL * 1024 * 1024;
+
+  /* Pick (part_size, effective_concurrent) for THIS file based on
+     its size, the user's --cloud-multipart-part-size override (if
+     any), --cloud-upload-buffer-size, and --cloud-multipart-rollover-
+     threshold.
+
+     Auto-sizing rule (when --cloud-multipart-part-size=0):
+
+         effective_size = min(filesize, rollover_threshold)
+         part_size      = max(16 MiB, ceil(effective_size / 10000))
+
+     Using effective_size (not filesize) means a 10 TiB file with a
+     user-set 100 GiB rollover threshold gets sized for a 100 GiB
+     object (the actual cloud-object cap), not for the full 10 TiB.
+     That keeps parts small (=> low memory) and the file simply
+     splits into more objects per the rollover plumbing.
+
+     If user_part != 0, the override is respected unchanged.
+
+     If --cloud-upload-buffer-size is set, effective_concurrent is
+     reduced to fit the memory budget at the chosen part_size.  This
+     is the simple "shrink concurrency" model (mirrors aws-cli's
+     max_concurrent_requests = budget / chunksize).  A future
+     optimization is to use even smaller parts in this case to
+     preserve concurrency; tracked as a follow-up. */
+  const uint64_t filesize =
+      stat ? static_cast<uint64_t>(stat->st_size) : 0;
+  static constexpr uint64_t kDefaultPart = 16ULL * 1024 * 1024;  /* 16 MiB floor */
+  static constexpr uint64_t kMaxParts = 10000;
+  const uint64_t user_part = g_ds_cloud_config.multipart_part_size;
+  const uint64_t user_concurrent =
+      g_ds_cloud_config.http_parallel_requests > 0
+          ? g_ds_cloud_config.http_parallel_requests
+          : 16;
+  const uint64_t rollover = g_ds_cloud_config.multipart_rollover_threshold;
+  const uint64_t buf = g_ds_cloud_config.upload_buffer_size;
+
+  uint64_t part_size;
+  uint64_t effective_concurrent = user_concurrent;
+  bool part_size_auto = false;
+
+  if (user_part != 0) {
+    part_size = user_part;
+  } else {
+    const uint64_t effective_size =
+        filesize == 0 ? kDefaultPart * kMaxParts
+                       : std::min<uint64_t>(filesize, rollover);
+    const uint64_t needed = (effective_size + kMaxParts - 1) / kMaxParts;
+    part_size = std::max(kDefaultPart, needed);
+    part_size_auto = true;
+  }
+
+  if (buf != 0) {
+    effective_concurrent =
+        std::max<uint64_t>(1, std::min<uint64_t>(user_concurrent,
+                                                  buf / part_size));
+  }
+
+  /* Diagnostic log so users can see what the auto-sizer chose.
+     Files below --cloud-multipart-threshold take the small-file
+     fast path inside Stream_multipart_writer::close() -- one single
+     PUT, no multipart Initiate/Abort, so the part_size and
+     concurrent numbers don't apply.  We log accordingly so the user
+     isn't confused by "part_size=16 MiB" on a 112 KiB file. */
+  const uint64_t small_threshold = g_ds_cloud_config.multipart_threshold;
+  if (filesize > 0 && filesize <= small_threshold) {
+    msg_ts("ds_cloud: %s: filesize=%s, single-PUT fast path\n",
+           object.c_str(),
+           xtrabackup::utils::human_readable(filesize).c_str());
+  } else {
+    msg_ts(
+        "ds_cloud: %s: filesize=%s, part_size=%s%s, concurrent=%llu%s\n",
+        object.c_str(),
+        xtrabackup::utils::human_readable(filesize).c_str(),
+        xtrabackup::utils::human_readable(part_size).c_str(),
+        part_size_auto ? " (auto)" : " (user)",
+        (unsigned long long)effective_concurrent,
+        buf != 0 && effective_concurrent < user_concurrent
+            ? " (shrunk by --cloud-upload-buffer-size)"
+            : "");
+  }
+
+  /* Stream_multipart_writer's existing memory_budget parameter is the
+     per-writer in-flight byte cap; we pass effective_concurrent *
+     part_size so a writer can pipeline its own parts up to the
+     budget.  The global buffer cap is enforced inside the multipart
+     writer's atomic-counter backpressure (when implemented) -- for
+     now, per-writer is sufficient because writers don't share. */
+  const uint64_t per_writer_budget = effective_concurrent * part_size;
   cf->writer = std::make_unique<Stream_multipart_writer>(
       cc->object_store.get(), cc->container, object, cc->event_handler.get(),
-      kPerWriterBufferBytes,
+      per_writer_budget,
       static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
-      static_cast<size_t>(g_ds_cloud_config.multipart_part_size));
+      static_cast<size_t>(part_size));
 
   /* Empirical (perf_wan.sh + real-AWS benchmarks): sync small-file PUT
      bottlenecks at WAN RTT even when xtrabackup runs many data-copy

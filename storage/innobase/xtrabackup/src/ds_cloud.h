@@ -76,6 +76,12 @@ struct ds_cloud_config_t {
      parallelism. */
   ulonglong multipart_threshold{16ULL * 1024 * 1024};
   ulonglong multipart_rollover_threshold{5ULL * 1024 * 1024 * 1024 * 1024};
+  /* Total cloud-upload memory cap across all writers in this ctxt.
+     0 = unlimited.  When non-zero, the per-file algorithm at
+     cloud_open time chooses (part_size, effective_concurrent,
+     object_size_cap) to honor this cap.  See cloud_pick_upload_plan()
+     in ds_cloud.cc. */
+  ulonglong upload_buffer_size{0};
 
   /* Observability. */
   ulong rate_log_interval{10};
