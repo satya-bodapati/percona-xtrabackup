@@ -176,6 +176,7 @@ MYSQL_ADD_EXECUTABLE(xbstream
   ds_decompress_lz4.cc
   ds_decompress_zstd.cc
   datasink.cc
+  file_context.cc
   file_utils.cc
   quicklz/quicklz.c
   xbstream.cc
@@ -216,6 +217,7 @@ TARGET_LINK_LIBRARIES(xbstream
   ${GCRYPT_LIBS}
   mysys
   crc
+  extra::rapidjson
   ext::lz4
   )
 

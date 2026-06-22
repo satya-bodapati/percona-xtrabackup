@@ -39,6 +39,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "ds_decompress_lz4.h"
 #include "ds_decompress_zstd.h"
 #include "ds_decrypt.h"
+#include "file_context.h"
 #include "file_utils.h"
 #include "msg.h"
 #include "nulls.h"
@@ -593,11 +594,29 @@ static void extract_worker_thread_func(extract_ctxt_t &ctxt) {
           path[strlen(path) - compression_and_encryption_prefix_len +
                qpress_offset] = 0;
 
-        char error[512];
-        if (!restore_sparseness(path, XBSTREAM_BUFFER_SIZE, error,
-                                opt_verbose)) {
-          msg("%s: restore_sparseness failed for file %s: %s\n", my_progname,
-              chunk.path, error);
+        /* Manifest-driven punch_hole.  Lazy-load backup_meta.json on
+           first call; idempotent so the worker threads that race
+           through this point all see the loaded state.  Look up the
+           file's regions in the manifest and punch directly -- no
+           IBD page-walk.  backup_meta.json absence aborts the
+           extraction (the new-format manifest is mandatory). */
+        if (!file_context_load_manifest_from(".")) {
+          msg("%s: backup_meta.json missing or unreadable in extraction "
+              "directory; cannot reconstruct sparse files (file %s left "
+              "dense on disk)\n",
+              my_progname, chunk.path);
+          ctxt.has_errors->store(true);
+        } else {
+          const auto *regions = file_context_lookup_regions(path);
+          if (regions != nullptr) {
+            uint64_t logical_size = file_context_lookup_logical_size(path);
+            if (!file_context_punch_holes_from_regions(path, logical_size,
+                                                       *regions)) {
+              msg("%s: manifest-driven punch failed for %s (continuing "
+                  "without sparse reclaim)\n",
+                  my_progname, path);
+            }
+          }
         }
       }
 
