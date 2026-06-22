@@ -3702,9 +3702,51 @@ Otherwise (i.e. when streaming in the 'tar' format) we need 2 separate datasinks
 for the data stream (and don't allow parallel data copying) and for metainfo
 files (including xtrabackup_logfile). The second datasink writes to temporary
 files first, and then streams them in a serialized way when closed. */
+/* Pick up cloud credentials and endpoints from environment variables
+   when the CLI flags weren't explicitly set. Same precedence model as
+   xbcloud's get_env_args(): S3_* first, then AWS_*, then bare
+   ACCESS_KEY_ID. STS callers must have AWS_SESSION_TOKEN set or pass
+   --cloud-session-token; without it the access key is rejected by
+   AWS with InvalidAccessKeyId. */
+static void pick_cloud_env_vars() {
+  /* S3_* takes precedence (lets the user override AWS_* env vars
+     just for backup purposes without disturbing the AWS CLI). */
+  get_env_value(opt_cloud_access_key, "S3_ACCESS_KEY_ID");
+  get_env_value(opt_cloud_secret_key, "S3_SECRET_ACCESS_KEY");
+  get_env_value(opt_cloud_session_token, "S3_SESSION_TOKEN");
+  get_env_value(opt_cloud_storage_class, "S3_STORAGE_CLASS");
+  get_env_value(opt_cloud_region, "S3_DEFAULT_REGION");
+  get_env_value(opt_cloud_cacert, "S3_CA_BUNDLE");
+  get_env_value(opt_cloud_endpoint, "S3_ENDPOINT");
+
+  /* Standard AWS_* env vars. */
+  get_env_value(opt_cloud_access_key, "AWS_ACCESS_KEY_ID");
+  get_env_value(opt_cloud_secret_key, "AWS_SECRET_ACCESS_KEY");
+  get_env_value(opt_cloud_session_token, "AWS_SESSION_TOKEN");
+  get_env_value(opt_cloud_storage_class, "AWS_STORAGE_CLASS");
+  get_env_value(opt_cloud_region, "AWS_DEFAULT_REGION");
+  get_env_value(opt_cloud_cacert, "AWS_CA_BUNDLE");
+  get_env_value(opt_cloud_endpoint, "AWS_ENDPOINT");
+
+  /* Generic naming for non-AWS S3-compatible endpoints. */
+  get_env_value(opt_cloud_access_key, "ACCESS_KEY_ID");
+  get_env_value(opt_cloud_secret_key, "SECRET_ACCESS_KEY");
+  get_env_value(opt_cloud_session_token, "SESSION_TOKEN");
+  get_env_value(opt_cloud_region, "DEFAULT_REGION");
+  get_env_value(opt_cloud_endpoint, "ENDPOINT");
+
+  /* Azure. */
+  get_env_value(opt_cloud_azure_account, "AZURE_STORAGE_ACCOUNT");
+  get_env_value(opt_cloud_bucket, "AZURE_CONTAINER_NAME");
+  get_env_value(opt_cloud_azure_access_key, "AZURE_ACCESS_KEY");
+  get_env_value(opt_cloud_storage_class, "AZURE_STORAGE_CLASS");
+  get_env_value(opt_cloud_azure_endpoint, "AZURE_ENDPOINT");
+}
+
 /* Fold the raw --cloud-* option storage into g_ds_cloud_config that
    ds_cloud reads. Called from main() after the option parser runs. */
 static void apply_cloud_options() {
+  pick_cloud_env_vars();
   if (opt_cloud_storage) g_ds_cloud_config.storage = opt_cloud_storage;
   if (opt_cloud_url) g_ds_cloud_config.url = opt_cloud_url;
   if (opt_cloud_bucket) g_ds_cloud_config.container = opt_cloud_bucket;
