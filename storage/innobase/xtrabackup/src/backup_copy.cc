@@ -73,6 +73,7 @@ extern ulong srv_undo_tablespaces;
 
 #include <cstdlib>
 #include "backup_copy.h"
+#include "file_context.h"
 #include "backup_mysql.h"
 #include "file_utils.h"
 #include "keyring_components.h"
@@ -588,6 +589,17 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
     goto error;
   }
 
+  /* Create a FileContext entry for the backup_meta.json manifest.
+     Today the entry carries name + logical_size; later commits add
+     sparse_map and other per-file fields. */
+  {
+    FileContext *fc = file_context_create(trim_dotslash(dst_file_path));
+    if (fc != nullptr) {
+      fc->logical_size = static_cast<uint64_t>(cursor.statinfo.st_size);
+      ds_track_file_ctx(dstfile, fc);
+    }
+  }
+
   action = xb_get_copy_action();
   if (pos >= 0) {
     xb::info() << action << " " << src_file_path << " to " << dstfile->path
@@ -626,6 +638,10 @@ bool copy_file(ds_ctxt_t *datasink, const char *src_file_path,
   xb::info() << "Done: " << action << " " << src_file_path << " to "
              << dstfile->path;
   datafile_close(&cursor);
+  /* Finalize the file's manifest entry before destroying the file
+     handle.  After ds_close the file struct is freed; the FileContext
+     pointer lives in the registry. */
+  file_context_finalize(static_cast<FileContext *>(dstfile->file_ctx));
   if (ds_close(dstfile)) {
     goto error_close;
   }
@@ -1698,6 +1714,41 @@ bool backup_finish(Backup_context &context) {
 
   if (!write_xtrabackup_info(mysql_connection)) {
     return (false);
+  }
+
+  /* Write the per-file metadata manifest (backup_meta.json).  The
+     manifest is always written; entries are minimal today (name +
+     logical_size) but become the carrier for sparse_map and other
+     per-file fields in follow-up commits.
+
+     Routed through the leaf of ds_meta's chain, not through ds_meta
+     itself, because ds_meta is wrapped with encrypt/compress when
+     those are enabled.  We deliberately want the manifest to remain
+     plaintext-readable -- it carries the keys to interpret the
+     backup (sparse_map regions, transform history), and users must
+     be able to inspect it operationally without decryption.  Other
+     metadata files (xtrabackup_info, xtrabackup_checkpoints) keep
+     going through ds_meta and inherit its transforms; that
+     behavior is unchanged. */
+  {
+    std::string manifest_json;
+    if (file_context_build_manifest(manifest_json)) {
+      const ds_ctxt_t *leaf = ds_leaf(ds_meta);
+      MY_STAT mystat;
+      memset(&mystat, 0, sizeof(mystat));
+      mystat.st_size = manifest_json.size();
+      mystat.st_mtime = time(nullptr);
+      ds_file_t *mf =
+          ds_open(const_cast<ds_ctxt_t *>(leaf), "backup_meta.json", &mystat);
+      if (mf != nullptr) {
+        if (ds_write(mf, manifest_json.data(), manifest_json.size()) != 0) {
+          xb::warn() << "Failed to write backup_meta.json";
+        }
+        ds_close(mf);
+      } else {
+        xb::warn() << "Failed to open backup_meta.json for writing";
+      }
+    }
   }
 
   report_backup_size();

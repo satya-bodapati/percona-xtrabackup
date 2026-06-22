@@ -89,6 +89,17 @@ typedef struct {
   on this file.  NULL disables tracking.  Set by ds_track_uncomp() or
   by the ds_open_track_uncomp() convenience. */
   xb_uncomp_bytes *uncomp_bytes = nullptr;
+  /* Optional opaque per-file metadata pointer used by the
+  backup_meta.json manifest framework.  The pointed-to object is a
+  FileContext (see file_context.h) carrying per-file fields such as
+  logical_size, sparse_map regions, etc.  NULL means no per-file
+  metadata is being tracked for this file (backup_meta.json not
+  emitted, or this file isn't covered by the manifest).  Set by
+  ds_track_file_ctx() or the ds_open_with_file_ctx() convenience.
+  Like uncomp_bytes, only the top-level ds_file_t carries the
+  pointer; wrapper-internal opens leave it null, so per-file fields
+  are populated exactly once at the top of the pipeline. */
+  void *file_ctx = nullptr;
 } ds_file_t;
 
 typedef struct {
@@ -190,6 +201,26 @@ the top.
 @return newly opened file, or nullptr on error. */
 ds_file_t *ds_open_track_uncomp(ds_ctxt_t *ctxt, const char *path,
                                 MY_STAT *stat, xb_uncomp_bytes *uncomp_bytes);
+
+/** Attach an opaque per-file metadata object (e.g. FileContext) to an
+already-opened ds_file_t.  After this call, the manifest framework
+will associate per-file fields written into *@p file_ctx with this
+backup file.  Safe to call with file == nullptr (no-op).
+@param[in,out] file     file to bind; nullptr makes the call a no-op
+@param[in]     file_ctx opaque metadata object; nullptr disables tracking. */
+void ds_track_file_ctx(ds_file_t *file, void *file_ctx);
+
+/** Convenience: ds_open() followed by ds_track_file_ctx().  Use at
+top-level backup opens that participate in the backup_meta.json
+manifest.  Wrapper-internal opens inside datasinks keep using plain
+ds_open() so the metadata object is attached exactly once at the top.
+@param[in]     ctxt     pipeline to open through
+@param[in]     path     path relative to the pipeline root
+@param[in]     stat     size/mode hints for downstream datasinks
+@param[in,out] file_ctx opaque metadata object; nullptr disables tracking
+@return newly opened file, or nullptr on error. */
+ds_file_t *ds_open_with_file_ctx(ds_ctxt_t *ctxt, const char *path,
+                                 MY_STAT *stat, void *file_ctx);
 
 /************************************************************************
 Write to a datasink file.

@@ -101,6 +101,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "common.h"
 #include "datasink.h"
 #include "ds_cloud.h"
+#include "file_context.h"
 #include "ds_cloud_lifecycle.h"
 #include "xtrabackup_version.h"
 
@@ -3491,6 +3492,17 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
     goto error;
   }
 
+  /* Manifest entry for backup_meta.json.  Carries name + logical_size
+     today; sparse_map and transform records are added in follow-up
+     commits. */
+  {
+    FileContext *fc = file_context_create(dst_name);
+    if (fc != nullptr) {
+      fc->logical_size = static_cast<uint64_t>(cursor.statinfo.st_size);
+      ds_track_file_ctx(dstfile, fc);
+    }
+  }
+
   action = xb_get_copy_action();
 
   if (xtrabackup_stream) {
@@ -3565,6 +3577,10 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
     }
   }
 
+  /* Mark the manifest entry as finalized BEFORE closing the file
+     (which destroys the dstfile struct).  The FileContext itself
+     lives in the registry. */
+  file_context_finalize(static_cast<FileContext *>(dstfile->file_ctx));
   if (ds_close(dstfile)) {
     rc = true;
   }

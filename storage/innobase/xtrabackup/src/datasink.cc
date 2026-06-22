@@ -126,6 +126,7 @@ ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
     the ds_open_track_uncomp() convenience. */
     file->ctxt = ctxt;
     file->uncomp_bytes = nullptr;
+    file->file_ctx = nullptr;
   }
 
   return file;
@@ -141,6 +142,19 @@ ds_file_t *ds_open_track_uncomp(ds_ctxt_t *ctxt, const char *path,
                                 MY_STAT *stat, xb_uncomp_bytes *uncomp_bytes) {
   ds_file_t *file = ds_open(ctxt, path, stat);
   ds_track_uncomp(file, uncomp_bytes);
+  return file;
+}
+
+void ds_track_file_ctx(ds_file_t *file, void *file_ctx) {
+  if (file != nullptr) {
+    file->file_ctx = file_ctx;
+  }
+}
+
+ds_file_t *ds_open_with_file_ctx(ds_ctxt_t *ctxt, const char *path,
+                                 MY_STAT *stat, void *file_ctx) {
+  ds_file_t *file = ds_open(ctxt, path, stat);
+  ds_track_file_ctx(file, file_ctx);
   return file;
 }
 
