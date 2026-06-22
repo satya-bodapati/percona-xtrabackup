@@ -278,32 +278,27 @@ class Stream_multipart_writer {
      PUT itself fires async). When unset, close() falls back to a
      synchronous store->upload_object.
 
-     Why two modes instead of always-async:
+     In practice ALL current callers install an async uploader.
+     Empirical measurement (perf_wan.sh + real AWS backups): sync
+     small-file PUT bottlenecks at WAN RTT regardless of whether the
+     caller is single-producer (xbcloud's xbstream-reader) or
+     multi-worker (xtrabackup's --parallel=N data-copy threads).
 
-     xbcloud's put_func is single-producer -- one thread reads xbstream
-     frames in a tight loop. Blocking that thread on each small file's
-     PUT stalls the pipe, so xbcloud installs an async uploader that
-     fires-and-forgets through Event_handler. Failures bubble back
-     through a has_errors atomic in the caller's callback; the final
-     h.stop() / ev.join() drains everything before exit.
+     For multi-worker callers the per-worker serialization is the
+     killer -- worker N still walks its assigned files in sequence and
+     stalls ~RTT per file on a sync PUT, regardless of what workers
+     1..N-1 and N+1..K are doing. At --parallel=4 this halves
+     throughput on small-file-heavy backups.
 
-     ds_cloud is multi-worker -- xtrabackup spins up --parallel=N
-     data-copy threads, each iterating files independently. Worker N's
-     block in cloud_close on a sync upload doesn't prevent workers
-     1..N-1, N+1..K from making progress on other files; parallelism
-     comes from having multiple workers, not from per-worker async.
-     ds_cloud therefore uses the sync default. The benefits:
+     For continuous-stream callers like ds_redo (xtrabackup's redo log
+     reader feeding ds_cloud) blocking the producer is functionally
+     unacceptable -- the redo reader must keep consuming for the
+     backup to complete.
 
-       - ds_close returns the true upload result directly; no separate
-         atomic / drain machinery on the ctxt.
-       - No risk of an xtrabackup_checkpoints upload completing before
-         a still-in-flight data file (the would-be commit-marker race).
-       - One fewer state machine in ds_cloud's per-file lifecycle.
-
-     Connection reuse (CURLSH sharing DNS / TLS / connection pool) is
-     equal for sync and async paths -- both go through the same
-     Http_client. So the choice is purely about whose thread blocks,
-     not about wire efficiency. */
+     The sync default is retained as a fallback for future callers
+     that explicitly don't want async (e.g., a small CLI tool with no
+     Event_handler scaffolding). The expected pattern is: any caller
+     wired to an Event_handler installs the async uploader. */
   using async_small_file_fn =
       std::function<bool(const std::string &object,
                          const Http_buffer &body)>;

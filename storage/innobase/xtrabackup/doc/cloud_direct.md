@@ -114,34 +114,52 @@ file fast path at close. Both xbcloud's `put_func` and ds_cloud's
 `cloud_write`/`cloud_close` use it; there is no duplicated multipart
 state machine.
 
-### Why xbcloud uses async small-file PUT but ds_cloud uses sync
+### Both xbcloud and ds_cloud use async small-file PUT
 
-`Stream_multipart_writer::set_async_small_file_uploader()` lets the
-small-file fast path go async; without it, the writer uses sync
-`upload_object`. The two callers choose differently on purpose:
+`Stream_multipart_writer::set_async_small_file_uploader()` is the
+seam between the writer and the cloud transport. Both xbcloud and
+ds_cloud install it; the small-file fast path goes through
+`Event_handler` in both cases.
 
-- **xbcloud's `put_func` is single-producer**. One thread reads
-  xbstream frames in a tight loop. Blocking on each small file's PUT
-  would stall the pipe, so xbcloud installs the async uploader that
-  fires-and-forgets through `Event_handler`. Errors bubble back via a
-  `has_errors` atomic in the caller's callback, and `h.stop(); ev.join()`
-  drains everything before exit.
+Empirical measurement (`prototype/perf_wan.sh` + real AWS backups)
+showed sync small-file PUT bottlenecks at WAN RTT in BOTH single-
+producer (xbcloud's xbstream-reader) and multi-worker
+(xtrabackup's `--parallel=N` data-copy threads) cases:
 
-- **ds_cloud is multi-worker**. xtrabackup spins up `--parallel=N`
-  data-copy threads, each iterating files independently. Worker N
-  blocking in `cloud_close` on a sync upload does NOT prevent the
-  other N−1 workers from progressing — parallelism comes from having
-  multiple workers, not from per-worker async. So sync is fine, and
-  it brings three concrete simplifications: `cloud_close` returns the
-  true upload result directly (no separate atomic / drain machinery
-  on the ctxt), no risk of `xtrabackup_checkpoints` racing ahead of
-  a still-in-flight data file (the commit-marker hazard), and one
-  fewer state machine in ds_cloud's per-file lifecycle.
+- **Multi-worker doesn't save you.** Worker N still walks its assigned
+  files in sequence and stalls ~RTT per small file. At
+  `--parallel=4` to `--parallel=16` (common in practice, not just
+  the `--parallel=256` extreme), small-file-heavy backups halve in
+  throughput on the sync path. At lower parallelism the cost is
+  proportionally worse.
+
+- **ds_redo cannot block.** xtrabackup's Redo Log reader thread is a
+  single producer feeding ds_cloud's redo writer. If `cloud_close` on
+  the redo file's small final part (or any internal block) ever
+  blocks, the reader stops consuming, and the backup either stalls
+  or overflows redo space depending on workload.
+
+So both callers go async. The `set_async_small_file_uploader()` seam
+remains because in principle a future caller without an
+`Event_handler` (e.g., a small CLI utility) could use the sync
+fallback — but no current caller does. Failures from the async path
+land in a `has_errors` atomic on the caller's ctxt; the
+`Event_handler` drain at deinit ensures all async PUTs complete
+before the process declares the backup done.
+
+### Known async-failure-reporting gap
+
+`ds_destroy` returns void in the datasink API, so when `cloud_deinit`
+discovers a failed async PUT during its drain, it logs the failure
+but has no clean channel to refuse the backup's commit step
+(`xtrabackup_checkpoints`). Phase 3 cleanup: add a `ds_drain()` or
+return-bearing `ds_destroy` variant so xtrabackup's backup_finish
+can refuse to write the commit marker when uploads have failed.
 
 Connection reuse (CURLSH sharing DNS / TLS / connection pool) is the
 same for sync and async paths — both route through one `Http_client`
-with the share handle installed. So this choice is purely about whose
-thread blocks, not about wire efficiency.
+with the share handle installed. So the async choice is about whose
+thread blocks, not about wire efficiency per call.
 
 ```
 xtrabackup --backup
