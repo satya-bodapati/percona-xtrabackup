@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <cstring>
 #include <sstream>
 
+#include "xbcloud/log.h"
 #include "xbcloud/util.h"
 
 #include <my_sys.h>
@@ -64,29 +65,30 @@ static void dump_one(const char *label, const Bucket &b) {
   uint64_t pre = b.pretransfer_us.load(std::memory_order_relaxed);
   uint64_t st = b.starttransfer_us.load(std::memory_order_relaxed);
   uint64_t fresh = b.calls_with_fresh_connect.load(std::memory_order_relaxed);
-  msg_ts(
-      "%s:   sync %-6s calls=%lu total=%lu ms avg=%.2f ms | "
-      "dns=%.2f connect=%.2f tls=%.2f pretx=%.2f startx=%.2f | "
-      "fresh_connects=%lu (%.1f%%)\n",
-      my_progname, label, n, total / 1000,
-      (double)total / 1000.0 / (double)n,
-      (double)nl / 1000.0 / (double)n,
-      (double)cn / 1000.0 / (double)n,
-      (double)app / 1000.0 / (double)n,
-      (double)pre / 1000.0 / (double)n,
-      (double)st / 1000.0 / (double)n, fresh,
-      100.0 * (double)fresh / (double)n);
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "  sync %-6s calls=%lu total=%lu ms avg=%.2f ms | "
+           "dns=%.2f connect=%.2f tls=%.2f pretx=%.2f startx=%.2f | "
+           "fresh_connects=%lu (%.1f%%)",
+           label, n, total / 1000, (double)total / 1000.0 / (double)n,
+           (double)nl / 1000.0 / (double)n,
+           (double)cn / 1000.0 / (double)n,
+           (double)app / 1000.0 / (double)n,
+           (double)pre / 1000.0 / (double)n,
+           (double)st / 1000.0 / (double)n, fresh,
+           100.0 * (double)fresh / (double)n);
+  log_info() << buf;
 }
 
 void dump_summary() {
   if (!enabled.load(std::memory_order_relaxed)) return;
-  msg_ts("%s: ----- sync HTTP timing summary -----\n", my_progname);
+  log_info() << "----- sync HTTP timing summary -----";
   dump_one("GET", sync_get);
   dump_one("POST", sync_post);
   dump_one("PUT", sync_put);
   dump_one("DELETE", sync_delete);
   dump_one("HEAD", sync_head);
-  msg_ts("%s: ------------------------------------\n", my_progname);
+  log_info() << "------------------------------------";
 }
 
 static Bucket *bucket_for(Http_request::method_t m) {
@@ -480,11 +482,13 @@ void Event_handler::ev_rate_log_callback(EV_P_ struct ev_timer *timer,
   double rate_up_mibs = (double)d_up / (1024.0 * 1024.0) / dt;
   double rate_app_mibs = (double)d_app / (1024.0 * 1024.0) / dt;
 
-  msg_ts(
-      "%s: rate up=%.1f MiB/s in=%.1f MiB/s "
-      "(uploaded=%lu MiB appended=%lu MiB) parts_inflight=%d files=%d\n",
-      my_progname, rate_up_mibs, rate_app_mibs,
-      uploaded / (1024 * 1024), appended / (1024 * 1024), parts, files);
+  char rate_buf[256];
+  snprintf(rate_buf, sizeof(rate_buf),
+           "rate up=%.1f MiB/s in=%.1f MiB/s (uploaded=%lu MiB "
+           "appended=%lu MiB) parts_inflight=%d files=%d",
+           rate_up_mibs, rate_app_mibs, uploaded / (1024 * 1024),
+           appended / (1024 * 1024), parts, files);
+  log_info() << rate_buf;
 
   self->rate_log_last_time = now;
   self->rate_log_last_uploaded = uploaded;
@@ -575,8 +579,7 @@ void Http_client::async_result_callback(async_callback_t user_callback,
                                         Event_handler *h, CURLcode rc,
                                         Http_connection *conn) {
   if (rc != CURLE_OK) {
-    msg_ts("%s: Operation failed. Error: %s\n", my_progname,
-           curl_easy_strerror(rc));
+    log_error() << "Operation failed. Error: " << curl_easy_strerror(rc);
   }
   if (user_callback) {
     user_callback(rc, conn);
@@ -860,8 +863,7 @@ bool Http_client::make_request(const Http_request &request,
        create noise during probe-iteration where some failures are
        expected. Behind --verbose we still emit it for debugging. */
     if (verbose) {
-      msg_ts("%s: http request failed: %s\n", my_progname,
-             curl_easy_strerror(res));
+      log_warn() << "http request failed: " << curl_easy_strerror(res);
     }
     curl_slist_free_all(headers);
     return false;
@@ -934,10 +936,10 @@ bool Http_client::make_request_with_retry(CLIENT *client,
       if (retriable_curl_error(rc)) {
         retry_error = true;
       } else if (get_verbose()) {
-        msg_ts(
-            "%s: Curl error (%d) %s is not configured as retriable. You can "
-            "allow it by adding --curl-retriable-errors=%d parameter\n",
-            my_progname, rc, curl_easy_strerror(rc), rc);
+        log_warn() << "Curl error (" << rc << ") " << curl_easy_strerror(rc)
+                   << " is not configured as retriable. You can allow it "
+                   << "by adding --curl-retriable-errors=" << rc
+                   << " parameter";
       }
     } else if (retriable_http_error(response.http_code())) {
       retry_error = true;
@@ -950,13 +952,13 @@ bool Http_client::make_request_with_retry(CLIENT *client,
 
     if (!retry_error) return transport_ok;
     if (count >= client->get_max_retries()) {
-      msg_ts("%s: No more retries for %s\n", my_progname, name.c_str());
+      log_error() << "No more retries for " << name;
       return false;
     }
 
     ulong delay = get_exponential_backoff(count + 1, client->get_max_backoff());
-    msg_ts("%s: Sleeping for %lu ms before retrying %s [%lu]\n", my_progname,
-           delay, name.c_str(), count + 1);
+    log_info() << "Sleeping for " << delay << " ms before retrying " << name
+               << " [" << (count + 1) << "]";
     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     ++count;
   }
@@ -1003,21 +1005,17 @@ void Http_client::callback(CLIENT *client, std::string container,
   if (http_client->retriable_curl_error(rc)) {
     retry_error = true;
   } else if (!retry_error && rc != CURLE_OK && http_client->get_verbose()) {
-    msg_ts(
-        "%s: Curl error (%d) %s is not configured as retriable. You can allow "
-        "it by "
-        "adding --curl-retriable-errors=%d parameter\n",
-        my_progname, rc, curl_easy_strerror(rc), rc);
+    log_warn() << "Curl error (" << rc << ") " << curl_easy_strerror(rc)
+               << " is not configured as retriable. You can allow it by "
+               << "adding --curl-retriable-errors=" << rc << " parameter";
   }
   if (http_client->retriable_http_error(conn->response().http_code())) {
     retry_error = true;
   } else if (!retry_error && rc != CURLE_OK && http_client->get_verbose()) {
-    msg_ts(
-        "%s: http error (%lu) is not configured as retriable. You can allow it "
-        "by "
-        "adding --http-retriable-errors=%lu parameter\n",
-        my_progname, conn->response().http_code(),
-        conn->response().http_code());
+    log_warn() << "http error (" << conn->response().http_code()
+               << ") is not configured as retriable. You can allow it by "
+               << "adding --http-retriable-errors="
+               << conn->response().http_code() << " parameter";
   }
   if (rc == CURLE_OK && !resp->ok()) {
     client->retry_error(resp, &retry_error);
@@ -1025,8 +1023,8 @@ void Http_client::callback(CLIENT *client, std::string container,
 
   if (retry_error && count <= client->get_max_retries()) {
     ulong delay = get_exponential_backoff(count, client->get_max_backoff());
-    msg_ts("%s: Sleeping for %lu ms before retrying %s [%lu]\n", my_progname,
-           delay, name.c_str(), count);
+    log_info() << "Sleeping for " << delay << " ms before retrying " << name
+               << " [" << count << "]";
     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     resp->reset_body();
     client->signer->sign_request(client->hostname(container), container, *req,
@@ -1039,7 +1037,7 @@ void Http_client::callback(CLIENT *client, std::string container,
         true);
     return;
   } else if (retry_error && count > client->get_max_retries())
-    msg_ts("%s: No more retries for %s\n", my_progname, name.c_str());
+    log_error() << "No more retries for " << name;
 
   if (callback) {
     callback(rc == CURLE_OK && resp->ok(), resp->body());
@@ -1101,13 +1099,13 @@ bool Http_client::make_request_with_retry(Http_request &request,
 
     if (!retry_error) return transport_ok;
     if (count >= max_retries) {
-      msg_ts("%s: No more retries for %s\n", my_progname, name.c_str());
+      log_error() << "No more retries for " << name;
       return false;
     }
 
     ulong delay = get_exponential_backoff(count + 1, max_backoff);
-    msg_ts("%s: Sleeping for %lu ms before retrying %s [%lu]\n", my_progname,
-           delay, name.c_str(), count + 1);
+    log_info() << "Sleeping for " << delay << " ms before retrying " << name
+               << " [" << (count + 1) << "]";
     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     ++count;
   }

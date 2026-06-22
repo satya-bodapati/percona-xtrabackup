@@ -120,6 +120,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   redo_log_consumer.cc
   redo_log.cc
   ${CMAKE_SOURCE_DIR}/sql-common/client_authentication.cc
+  xbcloud/log_xbinfo.cc
   $<TARGET_OBJECTS:xbcloud_internal>
   )
 

@@ -18,6 +18,7 @@ GNU General Public License for more details.
 
 #include <algorithm>
 
+#include "log.h"
 #include "msg.h"
 #include "my_sys.h"
 
@@ -116,10 +117,9 @@ size_t dynamic_part_size(uint64_t bytes_so_far) {
 
 Multipart_uploader::~Multipart_uploader() {
   if (m_started && !m_failed.load()) {
-    msg_ts(
-        "%s: Multipart_uploader destroyed without commit/abort; cancelling "
-        "%s upload_id=%s\n",
-        my_progname, display_name().c_str(), m_upload_id.c_str());
+    log_warn() << "Multipart_uploader destroyed without commit/abort; "
+               << "cancelling " << display_name() << " upload_id="
+               << m_upload_id;
     abort();
   }
 }
@@ -132,8 +132,8 @@ bool Multipart_uploader::start() {
   }
   m_started = true;
   stats::total_files_inflight.fetch_add(1, std::memory_order_relaxed);
-  msg_ts("%s: multipart start %s upload_id=%s\n", my_progname,
-         display_name().c_str(), m_upload_id.c_str());
+  log_info() << "multipart start " << display_name()
+             << " upload_id=" << m_upload_id;
   return true;
 }
 
@@ -162,8 +162,8 @@ void Multipart_uploader::on_part_complete(int part_number, size_t bytes,
      ds_cloud per-file diagnostic that says everything users need
      to see.  Failures stay logged. */
   if (!ok) {
-    msg_ts("%s: multipart %s part #%d FAILED (%s)\n", my_progname,
-           display_name().c_str(), part_number, human_bytes(bytes).c_str());
+    log_error() << "multipart " << display_name() << " part #"
+                << part_number << " FAILED (" << human_bytes(bytes) << ")";
   }
 }
 
@@ -299,9 +299,9 @@ bool Stream_multipart_writer::flush_full_parts() {
     if (m_part_buf.size() < part_size) break;
     if (!m_uploader.upload_part(m_next_part_num, m_part_buf.begin(),
                                  part_size)) {
-      msg_ts(
-          "%s: Stream_multipart_writer: upload_part #%d failed for %s\n",
-          my_progname, m_next_part_num, m_object.c_str());
+      log_error() << "Stream_multipart_writer: upload_part #"
+                  << m_next_part_num << " failed for "
+                  << m_uploader.display_name();
       return false;
     }
     Http_buffer leftover;
@@ -317,8 +317,8 @@ bool Stream_multipart_writer::flush_full_parts() {
 
 bool Stream_multipart_writer::append(const char *data, size_t size) {
   if (m_closed) {
-    msg_ts("%s: Stream_multipart_writer: append after close on %s\n",
-           my_progname, m_object.c_str());
+    log_error() << "Stream_multipart_writer: append after close on "
+                << m_uploader.display_name();
     return false;
   }
   if (size > 0) {
@@ -360,17 +360,17 @@ bool Stream_multipart_writer::close() {
   if (m_part_buf.size() > 0) {
     if (!m_uploader.upload_part(m_next_part_num, m_part_buf.begin(),
                                  m_part_buf.size())) {
-      msg_ts(
-          "%s: Stream_multipart_writer: final upload_part #%d failed for %s\n",
-          my_progname, m_next_part_num, m_object.c_str());
+      log_error() << "Stream_multipart_writer: final upload_part #"
+                  << m_next_part_num << " failed for "
+                  << m_uploader.display_name();
       return false;
     }
     m_part_buf = Http_buffer{};
     ++m_next_part_num;
   }
   if (!m_uploader.commit()) {
-    msg_ts("%s: Stream_multipart_writer: commit failed for %s\n",
-           my_progname, m_object.c_str());
+    log_error() << "Stream_multipart_writer: commit failed for "
+                << m_uploader.display_name();
     return false;
   }
   return true;

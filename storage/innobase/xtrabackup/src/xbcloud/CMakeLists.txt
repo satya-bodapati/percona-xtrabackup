@@ -70,6 +70,7 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   ../xbcrypt_common.cc
   ../file_utils.cc
   library_version_check.cc
+  log_msg.cc
   $<TARGET_OBJECTS:xbcloud_internal>
   )
 
@@ -98,6 +99,7 @@ IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
       )
 
     ADD_EXECUTABLE(xbcloud-t xbcloud-t.cc
+      log_msg.cc
       $<TARGET_OBJECTS:xbcloud_internal>
       )
 
