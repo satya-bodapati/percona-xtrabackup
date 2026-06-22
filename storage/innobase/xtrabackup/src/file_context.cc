@@ -214,7 +214,18 @@ bool file_context_load_manifest_from(const char *target_dir) {
   return true;
 }
 
+/* Normalize a caller-supplied path before lookup: strip a single
+   leading "./" if present.  Callers like the decompress pipeline
+   pass paths like "./db/t.ibd" while the manifest stores them as
+   "db/t.ibd"; we want both to hit. */
+static const char *normalize_lookup_path(const char *path) {
+  if (path == nullptr) return nullptr;
+  if (path[0] == '.' && path[1] == '/') return path + 2;
+  return path;
+}
+
 const std::vector<file_region_t> *file_context_lookup_regions(const char *path) {
+  path = normalize_lookup_path(path);
   if (path == nullptr) return nullptr;
   auto &l = restore_lookup();
   std::lock_guard<std::mutex> lock(l.mu);
@@ -226,6 +237,7 @@ const std::vector<file_region_t> *file_context_lookup_regions(const char *path) 
 }
 
 uint64_t file_context_lookup_logical_size(const char *path) {
+  path = normalize_lookup_path(path);
   if (path == nullptr) return 0;
   auto &l = restore_lookup();
   std::lock_guard<std::mutex> lock(l.mu);

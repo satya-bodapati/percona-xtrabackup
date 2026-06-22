@@ -164,19 +164,9 @@ void datafile_close(datafile_cur_t *cursor);
 */
 xb_fil_cur_result_t datafile_read(datafile_cur_t *cursor);
 
-/**
-  Restore sparseness of a file. This is used by xtrabackup & xbstream when
-  --decompress options is used. This will restore sparseness (punch hole) on
-  IBD files that have page compression (COMPRESSION="xxx")
-
-  @param [in]       file          path to file
-  @param [in]       buffer_size   size of read buffer
-  @param [in/out]   error         error message in case of error
-
-  @return false in case of error, true otherwise
-*/
-bool restore_sparseness(const char *src_file_path, uint buffer_size,
-                        char error[512], bool opt_verbose = false);
+/* restore_sparseness() removed; sparse restore now uses
+   file_context_punch_holes_from_regions() driven by backup_meta.json.
+   See file_context.h.  PXB-3754 / PXB-3671. */
 
 /**
   Open FIFO file for writing. Wait up to timeout seconds for it to return a

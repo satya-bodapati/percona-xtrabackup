@@ -282,118 +282,13 @@ xb_fil_cur_result_t datafile_read(datafile_cur_t *cursor) {
   return (XB_FIL_CUR_SUCCESS);
 }
 
-/** Check if an IBD file is IO compressed or not. We just check page numbers
-1 & 2. This is because the first 7 pages are created when an IBD file is
-created. This is the minimum size of a tablespace. So it is sufficient to check
-only two pages.
-Note that page 0 is not compressed. So we check page number 1 & 2 only. */
-class PageCompressionTracker {
- public:
-  explicit PageCompressionTracker(ulint page_size)
-      : page_size_{page_size},
-        is_compressed_{false, false},
-        checked_exit_{false} {}
-
-  // Call this for every page
-  bool record(ulint buf_offset, const byte *page) {
-    const ulint page_num = buf_offset / page_size_;
-
-    if (page_num == 1 || page_num == 2) {
-      is_compressed_[page_num - 1] = is_page_io_compressed(page);
-    }
-
-    if (page_num == 3 && !checked_exit_) {
-      checked_exit_ = true;  // Ensure we only check once
-      return !is_compressed_[0] && !is_compressed_[1];  // true = can exit early
-    }
-
-    return false;
-  }
-
- private:
-  const ulint page_size_;
-  bool is_compressed_[2];  // 0 => page 1, 1 => page 2
-  bool checked_exit_;      // ensures we only check once at page 3
-};
-
-bool restore_sparseness(const char *src_file_path, uint buffer_size,
-                        char error[512], bool opt_verbose) {
-  datafile_cur_t cursor;
-  size_t page_size = 0;
-  size_t seek = 0;
-  if (!file_has_suffix("ibd", src_file_path)) return true;
-
-  if (!datafile_open(src_file_path, &cursor, false, buffer_size)) {
-    strcpy(error, "Cannot open file");
-    return false;
-  }
-  auto punch_hole_func = [&](const auto page) {
-    if (is_page_io_compressed(page)) {
-#ifdef UNIV_DEBUG
-      assert(page_size % (size_t)cursor.statinfo.st_blksize == 0);
-#endif
-      size_t compressed_len =
-          ut_calc_align(mach_read_from_2(page + XB_FIL_PAGE_COMPRESS_SIZE_V1) +
-                            XB_FIL_PAGE_DATA,
-                        cursor.statinfo.st_blksize);
-      if (compressed_len < page_size) {
-#ifdef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
-        int ret =
-            fallocate(cursor.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      seek + compressed_len, page_size - compressed_len);
-        if (ret != 0) {
-          strcpy(error, "fallocate returned ");
-          std::string err = std::to_string(errno);
-          strcat(error, err.c_str());
-          return false;
-        }
-#endif  // HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
-      }
-    }
-    return true;
-  };
-
-  while (datafile_read(&cursor) == XB_FIL_CUR_SUCCESS) {
-    size_t buf_offset = 0;
-    if (cursor.buf_offset == cursor.buf_read) {
-      const uint32_t flags = fsp_header_get_flags(cursor.buf);
-      const ulint ssize = FSP_FLAGS_GET_PAGE_SSIZE(flags);
-      if (ssize == 0) {
-        page_size = XB_UNIV_PAGE_SIZE_ORIG;
-      } else {
-        page_size = ((XB_UNIV_ZIP_SIZE_MIN >> 1) << ssize);
-      }
-#ifdef UNIV_DEBUG
-      /* Check this is a valid page size. We might get compressed min page size
-       * and uncompressed max page size here */
-      assert(page_size >= XB_UNIV_ZIP_SIZE_MIN &&
-             page_size <= XB_UNIV_PAGE_SIZE_MAX);
-#endif
-    }
-
-    PageCompressionTracker compression_tracker(page_size);
-
-    for (ulint i = 0; i < cursor.buf_read / page_size; ++i) {
-      const auto page = cursor.buf + buf_offset;
-
-      if (compression_tracker.record(buf_offset, page)) {
-        if (opt_verbose) {
-          msg("File %s is not sparse, skipping restore_sparseness\n",
-              src_file_path);
-        }
-        datafile_close(&cursor);
-        return true;
-      }
-
-      if (!punch_hole_func(page)) return false;
-
-      buf_offset += page_size;
-      seek += page_size;
-    }
-  }
-  datafile_close(&cursor);
-  return true;
-}
+/* restore_sparseness() and PageCompressionTracker were removed when
+   sparse-restore moved to the manifest-driven path
+   (file_context_punch_holes_from_regions, driven by
+   backup_meta.json's sparse_map).  Pre-9.7 backups without the
+   manifest can no longer be sparse-restored via xtrabackup -- they
+   restore as dense files, which is functionally correct (just loses
+   disk-space reclaim).  See PXB-3754 / PXB-3671. */
 
 File open_fifo_for_write_with_timeout(const char *path, uint timeout) {
   File fd;

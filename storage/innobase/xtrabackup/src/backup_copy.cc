@@ -2766,15 +2766,21 @@ bool decrypt_decompress_file(const char *filepath, uint thread_n) {
     }
   }
   if (ds_data->fs_support_punch_hole) {
-    /* Prefer manifest-driven hole punch when backup_meta.json has
-       sparse_map info for this file: O(1) lookup + one fallocate
-       per recorded gap, no need to re-parse IBD page headers.  We
-       lazily load the manifest on first restore call; subsequent
-       calls are pure lookups.  Falls back to the legacy
-       FIL_PAGE_COMPRESSED page-walk in restore_sparseness() when
-       the file is absent from the manifest (old-format backup) or
-       the manifest itself is absent. */
-    file_context_load_manifest_from(xtrabackup_target_dir);
+    /* backup_meta.json is mandatory for new-format backups; it
+       carries the per-file sparse_map needed to re-create holes
+       after --decompress writes a dense file to disk.  Lazy-load
+       on first call (idempotent across worker threads).  Missing
+       manifest is a fatal error -- we refuse to silently leave
+       compressed-page sparse tables dense on disk, since that
+       would defeat the disk-space-reclaim story. */
+    if (!file_context_load_manifest_from(xtrabackup_target_dir)) {
+      xb::error() << "backup_meta.json missing or unreadable in target "
+                     "dir; cannot restore sparseness for --decompress. "
+                     "If you are restoring a pre-9.7 backup without a "
+                     "manifest, this path is not supported.";
+      free(dest_filepath);
+      return false;
+    }
     const auto *regions = file_context_lookup_regions(dest_filepath);
     if (regions != nullptr) {
       const uint64_t logical_size =
@@ -2784,14 +2790,9 @@ bool decrypt_decompress_file(const char *filepath, uint thread_n) {
         xb::warn() << "manifest-driven hole punch failed for: "
                    << dest_filepath << " (file remains dense on disk)";
       }
-    } else {
-      char error[512];
-      if (!restore_sparseness(dest_filepath, opt_read_buffer_size,
-                              error IF_DEBUG(, true))) {
-        xb::warn() << "restore_sparseness failed for file: " << dest_filepath
-                   << " Error: " << error;
-      }
     }
+    /* When regions == nullptr the file is dense (not in manifest at
+       all, or manifest entry without sparse_map).  No work to do. */
   }
 
   free(dest_filepath);
