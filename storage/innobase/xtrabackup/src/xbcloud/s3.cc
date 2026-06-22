@@ -41,6 +41,47 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 namespace xbcloud {
 
+/* AWS sometimes echoes the access key back in error bodies / messages
+   (e.g., "The Access Key Id 'ASIAXXXX...' is invalid"). Diagnostic
+   logs that print such bodies verbatim end up leaking the access
+   key into xtrabackup.log / support tickets / JIRA. This helper
+   redacts the standard AWS key prefixes (AKIA permanent, ASIA STS,
+   AROA role, AIDA user, ANPA non-paginated, AGPA group, etc.) plus
+   the 16 base32 chars that follow.
+
+   Access keys are less sensitive than secret keys / session tokens
+   (which we never log, by design), but they're still credentials and
+   the principle of "no creds in logs" is the safe default. */
+static std::string redact_aws_key_pattern(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size();) {
+    /* Match 4-letter prefix from the standard AWS set followed by
+       16 [A-Z0-9] characters. */
+    if (i + 20 <= s.size() &&
+        (s.compare(i, 4, "AKIA") == 0 || s.compare(i, 4, "ASIA") == 0 ||
+         s.compare(i, 4, "AROA") == 0 || s.compare(i, 4, "AIDA") == 0 ||
+         s.compare(i, 4, "ANPA") == 0 || s.compare(i, 4, "AGPA") == 0 ||
+         s.compare(i, 4, "APKA") == 0 || s.compare(i, 4, "AIPA") == 0)) {
+      bool tail_ok = true;
+      for (size_t j = 4; j < 20; ++j) {
+        char c = s[i + j];
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+          tail_ok = false;
+          break;
+        }
+      }
+      if (tail_ok) {
+        out.append("AWS_KEY_REDACTED");
+        i += 20;
+        continue;
+      }
+    }
+    out.push_back(s[i]);
+    ++i;
+  }
+  return out;
+}
 
 bool S3_response::parse_http_response(Http_response &http_response) {
   using namespace rapidxml;
@@ -633,14 +674,21 @@ bool S3_client::bucket_exists(const std::string &name, bool &exists) {
       S3_response s3_resp;
       if (s3_resp.parse_http_response(get_resp) && s3_resp.error()) {
         std::string code = s3_resp.error_code();
+        /* AWS error messages occasionally echo the access key
+           ("The Access Key Id 'ASIA...' is invalid"); redact. */
+        std::string msg_redacted =
+            redact_aws_key_pattern(s3_resp.error_message());
         msg_ts("%s:   S3 error code='%s' message='%s'\n", my_progname,
-               code.c_str(), s3_resp.error_message().c_str());
+               code.c_str(), msg_redacted.c_str());
         log_actionable_hint(code);
       } else {
-        /* Body present but not parseable as <Error>. Dump up to 512 bytes
-           verbatim so the user can see what AWS actually returned. */
+        /* Body present but not parseable as <Error>. Dump up to 512
+           bytes for diagnostics. Redact any AWS access key patterns
+           first so we don't accidentally surface credentials from
+           AWS error messages that echo them back. */
         std::string body(get_resp.body().begin(), get_resp.body().end());
         if (body.size() > 512) body.resize(512);
+        body = redact_aws_key_pattern(body);
         msg_ts("%s:   raw response body: %s\n", my_progname, body.c_str());
       }
     } else {
@@ -902,8 +950,10 @@ void S3_client::retry_error(Http_response *resp, bool *retry) {
     }
   } else if (s3_resp.error()) {
     if (!quiet_diagnostics) {
-      msg_ts("%s: S3 error message: %s\n", my_progname,
-             s3_resp.error_message().c_str());
+      /* Redact in case AWS echoed the access key in the message. */
+      std::string msg_redacted =
+          redact_aws_key_pattern(s3_resp.error_message());
+      msg_ts("%s: S3 error message: %s\n", my_progname, msg_redacted.c_str());
     }
     if (s3_resp.error_code() == "RequestTimeout") {
       *retry = true;

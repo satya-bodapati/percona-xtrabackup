@@ -2114,8 +2114,21 @@ bool check_if_param_set(const char *param) {
 }
 
 bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
-  static const char *hide_value[] = {"password", "encrypt-key",
-                                     "transition-key"};
+  /* Option names whose values must NOT land in the "recognized
+     client arguments" log line that xtrabackup prints at startup.
+     That log goes to stdout / xtrabackup.log / support tickets /
+     JIRA tickets -- secrets in it leak everywhere. Cloud creds
+     (access key, secret key, session token, Azure account key)
+     join the password / encryption-key family for the same reason. */
+  static const char *hide_value[] = {
+      "password",
+      "encrypt-key",
+      "transition-key",
+      "cloud-access-key",
+      "cloud-secret-key",
+      "cloud-session-token",
+      "cloud-azure-access-key",
+  };
 
   param_str << "--" << opt->name;
   if (argument) {
