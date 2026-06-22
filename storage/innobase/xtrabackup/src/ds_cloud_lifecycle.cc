@@ -24,6 +24,7 @@ the Free Software Foundation; version 2 of the License.
 
 #include "common.h"
 #include "ds_cloud.h"
+#include "file_context.h"
 #include "file_utils.h"
 #include "msg.h"
 
@@ -144,7 +145,73 @@ bool xb_cloud_download(const std::string &target_dir) {
   msg_ts("--download: %zu objects under %s/%s\n", objects.size(),
          g_ds_cloud_config.container.c_str(), prefix.c_str());
 
+  /* Locate backup_meta.json in the listing.  It MUST be present --
+     the new-format manifest is mandatory and drives sparse-restore
+     decisions.  We fetch it first, write it to target_dir, then load
+     the lookup table before processing data files. */
+  std::string manifest_obj;
   for (const auto &obj : objects) {
+    if (strip_prefix(obj, prefix) == "backup_meta.json") {
+      manifest_obj = obj;
+      break;
+    }
+  }
+  if (manifest_obj.empty()) {
+    msg_ts("--download: backup_meta.json missing from bucket under %s/%s; "
+           "refusing to restore (manifest is mandatory in new-format "
+           "backups)\n",
+           g_ds_cloud_config.container.c_str(), prefix.c_str());
+    return false;
+  }
+  {
+    bool ok = false;
+    Http_buffer body =
+        store->download_object(g_ds_cloud_config.container, manifest_obj, ok);
+    if (!ok) {
+      msg_ts("--download: failed to fetch %s\n", manifest_obj.c_str());
+      return false;
+    }
+    std::string full = target_dir;
+    if (full.empty() || full.back() != '/') full.push_back('/');
+    full.append("backup_meta.json");
+    int fd = open(full.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      msg_ts("--download: cannot open %s: %s\n", full.c_str(),
+             strerror(errno));
+      return false;
+    }
+    if (write(fd, body.begin(), body.size()) !=
+        static_cast<ssize_t>(body.size())) {
+      msg_ts("--download: short write to %s\n", full.c_str());
+      close(fd);
+      return false;
+    }
+    close(fd);
+    msg_ts("--download: wrote %s (%zu bytes)\n", full.c_str(), body.size());
+  }
+  if (!file_context_load_manifest_from(target_dir.c_str())) {
+    msg_ts(
+        "--download: failed to parse backup_meta.json after fetch; "
+        "aborting restore\n");
+    return false;
+  }
+
+  /* Now fetch every other object.  For each file:
+     1. Download the body into memory.
+     2. Write it to <full>.de-sparse (atomic-rename staging).
+     3. If the manifest says this file has a sparse_map AND the
+        filesystem supports PUNCH_HOLE, apply the manifest-driven
+        hole punch on the .de-sparse copy.
+     4. Rename .de-sparse -> final path.
+
+     The rename pattern keeps a partial / failed download from
+     leaving a half-written file with the canonical name, and
+     guarantees that a successfully-named file has been punched
+     (or determined to need no punching).  --prepare and
+     --copy-back can therefore trust the layout they find. */
+  for (const auto &obj : objects) {
+    if (obj == manifest_obj) continue;  /* already fetched */
+
     bool ok = false;
     Http_buffer body =
         store->download_object(g_ds_cloud_config.container, obj, ok);
@@ -160,19 +227,45 @@ bool xb_cloud_download(const std::string &target_dir) {
     std::string full = target_dir;
     if (full.empty() || full.back() != '/') full.push_back('/');
     full.append(rel);
-    int fd = open(full.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    std::string staging = full + ".de-sparse";
+
+    int fd = open(staging.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-      msg_ts("--download: cannot open %s: %s\n", full.c_str(),
+      msg_ts("--download: cannot open %s: %s\n", staging.c_str(),
              strerror(errno));
       return false;
     }
-    ssize_t w = write(fd, body.begin(), body.size());
-    if (w != static_cast<ssize_t>(body.size())) {
-      msg_ts("--download: short write to %s\n", full.c_str());
+    if (write(fd, body.begin(), body.size()) !=
+        static_cast<ssize_t>(body.size())) {
+      msg_ts("--download: short write to %s\n", staging.c_str());
       close(fd);
+      ::unlink(staging.c_str());
       return false;
     }
     close(fd);
+
+    /* Manifest-driven punch_hole when applicable.  Returns true
+       (no-op) on filesystems without PUNCH_HOLE support; file
+       stays dense, only disk-space reclaim is lost. */
+    const auto *regions = file_context_lookup_regions(rel.c_str());
+    if (regions != nullptr) {
+      uint64_t logical_size =
+          file_context_lookup_logical_size(rel.c_str());
+      if (!file_context_punch_holes_from_regions(staging.c_str(),
+                                                  logical_size, *regions)) {
+        msg_ts(
+            "--download: manifest-driven punch failed for %s (continuing "
+            "without sparse reclaim)\n",
+            rel.c_str());
+      }
+    }
+
+    if (::rename(staging.c_str(), full.c_str()) != 0) {
+      msg_ts("--download: rename %s -> %s failed: %s\n", staging.c_str(),
+             full.c_str(), strerror(errno));
+      ::unlink(staging.c_str());
+      return false;
+    }
     msg_ts("--download: wrote %s (%zu bytes)\n", full.c_str(), body.size());
   }
   return true;
