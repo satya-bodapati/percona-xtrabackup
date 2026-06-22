@@ -178,7 +178,9 @@ ds_ctxt_t *cloud_init(const char *root) {
   }
 
   cc->event_handler = std::make_unique<Event_handler>(
-      g_ds_cloud_config.parallel > 0 ? g_ds_cloud_config.parallel : 1);
+      g_ds_cloud_config.http_parallel_requests > 0
+          ? g_ds_cloud_config.http_parallel_requests
+          : 1);
   if (!cc->event_handler->init()) {
     msg_ts("ds_cloud: Event_handler init failed\n");
     return nullptr;
@@ -211,9 +213,14 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   auto *cf = new ds_cloud_file_t;
   cf->object_name = object;
   cf->ctxt = cc;
+  /* Hardcoded 64 MiB in-flight cap per writer; intentionally NOT a CLI
+     option (see ds_cloud.h). Peak memory = --parallel * 64 MiB. A
+     future global cap exposed as --cloud-upload-buffer-size will
+     replace this. */
+  static constexpr ulonglong kPerWriterBufferBytes = 64ULL * 1024 * 1024;
   cf->writer = std::make_unique<Stream_multipart_writer>(
       cc->object_store.get(), cc->container, object, cc->event_handler.get(),
-      g_ds_cloud_config.multipart_memory_budget,
+      kPerWriterBufferBytes,
       static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
       static_cast<size_t>(g_ds_cloud_config.multipart_part_size));
 

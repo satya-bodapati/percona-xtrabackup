@@ -55,22 +55,25 @@ struct ds_cloud_config_t {
   ulong timeout{120};
   ulong max_retries{10};
   ulong max_backoff{300000};
-  ulong parallel{8};
+  /* Max concurrent in-flight HTTP requests inside the libev / curl-multi
+     Event_handler. This is HTTP-side concurrency, NOT the count of
+     data-copy threads (that's --parallel). Inherits --parallel by
+     default; override with --cloud-http-parallel-requests. */
+  ulong http_parallel_requests{8};
 
-  /* Multipart knobs. */
-  bool multipart_upload{true};
+  /* Multipart knobs. ds_cloud is multipart-only by design -- there is
+     no chunk-PUT fallback like xbcloud's legacy mode -- so there's no
+     enable/disable switch. */
   ulonglong multipart_part_size{0};  /* 0 = dynamic schedule */
-  /* Per-writer in-flight byte cap. With --parallel=8 data-copy threads
-     each running their own Stream_multipart_writer, total peak in-flight
-     memory is parallel * memory_budget. We size this conservatively for
-     the typical case (16 MiB parts at the lowest dynamic tier, 2-3 parts
-     in flight saturates a typical WAN connection at 100ms RTT). Files
-     in the higher tiers (>=1 GiB total, >=64 MiB parts) get fewer
-     simultaneous parts which is fine -- they're large enough that even
-     one in-flight saturates the wire. Not exposed as a CLI option; the
-     previous tunable was both too high a default and wrong granularity
-     (per-writer, not global). */
-  ulonglong multipart_memory_budget{64ULL * 1024 * 1024};
+  /* In-flight byte cap per Stream_multipart_writer is hardcoded to
+     64 MiB at the writer construction site in ds_cloud.cc -- NOT a
+     config field, by design. Exposing it as a tunable historically
+     led to the 4 GiB-per-writer * --parallel = 32 GiB OOM footgun.
+     Followup: when we add a shared pool across all writers in one
+     ds_cloud_ctxt, expose it as --cloud-upload-buffer-size (default
+     256 MiB total, not per-writer). Until then, peak memory is
+     --parallel * 64 MiB which is a sensible 256-512 MiB at typical
+     parallelism. */
   ulonglong multipart_threshold{16ULL * 1024 * 1024};
   ulonglong multipart_rollover_threshold{5ULL * 1024 * 1024 * 1024 * 1024};
 

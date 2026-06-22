@@ -299,8 +299,9 @@ static char *opt_cloud_cacert = nullptr;
 static ulong opt_cloud_timeout = 120;
 static ulong opt_cloud_max_retries = 10;
 static ulong opt_cloud_max_backoff = 300000;
-static ulong opt_cloud_parallel = 8;
-static bool opt_cloud_multipart_upload = true;
+/* 0 = sentinel "user did not set it; inherit --parallel value at
+   apply_cloud_options() time". */
+static ulong opt_cloud_http_parallel_requests = 0;
 static ulonglong opt_cloud_multipart_part_size = 0;
 static ulonglong opt_cloud_multipart_threshold = 16ULL * 1024 * 1024;
 static ulonglong opt_cloud_multipart_rollover_threshold =
@@ -885,8 +886,7 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_TIMEOUT,
   OPT_XTRA_CLOUD_MAX_RETRIES,
   OPT_XTRA_CLOUD_MAX_BACKOFF,
-  OPT_XTRA_CLOUD_PARALLEL,
-  OPT_XTRA_CLOUD_MULTIPART_UPLOAD,
+  OPT_XTRA_CLOUD_HTTP_PARALLEL_REQUESTS,
   OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
   OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
   OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
@@ -1513,7 +1513,13 @@ struct my_option xb_client_options[] = {
 
     {"fifo-streams", OPT_XTRA_FIFO_STREAMS,
      "Number of FIFO files to use for parallel datafiles stream. Setting this "
-     "parameter to 1 disables FIFO and stream is sent to STDOUT.",
+     "parameter to 1 disables FIFO and stream is sent to STDOUT. "
+     "For cloud destinations, prefer --cloud-storage over "
+     "--fifo-streams + xbcloud; ds_cloud uploads each file in parallel "
+     "without the xbstream pipe and is the recommended path. "
+     "--fifo-streams remains the way to parallel-stream into non-cloud "
+     "consumers (custom pipelines, host-to-host transfer). "
+     "Mutually exclusive with --cloud-storage.",
      (G_PTR *)&xtrabackup_fifo_streams, (G_PTR *)&xtrabackup_fifo_streams, 0,
      GET_INT, REQUIRED_ARG, 1, 1, INT_MAX, 0, 0, 0},
 
@@ -1616,15 +1622,11 @@ struct my_option xb_client_options[] = {
      "Max retry backoff in ms.",
      &opt_cloud_max_backoff, &opt_cloud_max_backoff, 0, GET_ULONG,
      REQUIRED_ARG, 300000, 0, 3600000, 0, 0, 0},
-    {"cloud-parallel", OPT_XTRA_CLOUD_PARALLEL,
-     "Max concurrent in-flight HTTP requests inside the Event_handler.",
-     &opt_cloud_parallel, &opt_cloud_parallel, 0, GET_ULONG, REQUIRED_ARG, 8,
-     1, 1024, 0, 0, 0},
-    {"cloud-multipart-upload", OPT_XTRA_CLOUD_MULTIPART_UPLOAD,
-     "Enable multipart upload (one object per file). OFF falls back to "
-     "single-PUT per file.",
-     &opt_cloud_multipart_upload, &opt_cloud_multipart_upload, 0, GET_BOOL,
-     NO_ARG, 1, 0, 0, 0, 0, 0},
+    {"cloud-http-parallel-requests", OPT_XTRA_CLOUD_HTTP_PARALLEL_REQUESTS,
+     "Max concurrent in-flight HTTP requests inside the Event_handler "
+     "(curl-multi). Default 0 = inherit --parallel.",
+     &opt_cloud_http_parallel_requests, &opt_cloud_http_parallel_requests, 0,
+     GET_ULONG, REQUIRED_ARG, 0, 0, 1024, 0, 0, 0},
     {"cloud-multipart-part-size", OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
      "Override the tiered dynamic part-size schedule with a fixed part "
      "size in bytes. 0 = use the schedule.",
@@ -3778,8 +3780,18 @@ static void apply_cloud_options() {
   g_ds_cloud_config.timeout = opt_cloud_timeout;
   g_ds_cloud_config.max_retries = opt_cloud_max_retries;
   g_ds_cloud_config.max_backoff = opt_cloud_max_backoff;
-  g_ds_cloud_config.parallel = opt_cloud_parallel;
-  g_ds_cloud_config.multipart_upload = opt_cloud_multipart_upload;
+  if (opt_cloud_http_parallel_requests == 0) {
+    /* User did not set --cloud-http-parallel-requests. Inherit
+       --parallel so cloud-side HTTP concurrency tracks data-copy
+       thread count by default. */
+    opt_cloud_http_parallel_requests =
+        xtrabackup_parallel > 0 ? (ulong)xtrabackup_parallel : 8;
+    xb::info() << "ds_cloud: --cloud-http-parallel-requests not set; "
+                  "using --parallel value ("
+               << opt_cloud_http_parallel_requests
+               << ") for cloud-side HTTP request concurrency";
+  }
+  g_ds_cloud_config.http_parallel_requests = opt_cloud_http_parallel_requests;
   g_ds_cloud_config.multipart_part_size = opt_cloud_multipart_part_size;
   g_ds_cloud_config.multipart_threshold = opt_cloud_multipart_threshold;
   g_ds_cloud_config.multipart_rollover_threshold =
@@ -3796,8 +3808,23 @@ static void xtrabackup_init_datasinks(void) {
      the "root") becomes the prefix inside the bucket. Mutually
      exclusive with --stream and with local target-dir output. */
   if (!g_ds_cloud_config.storage.empty()) {
+    /* --fifo-streams check first because --fifo-streams auto-promotes
+       --stream=xbstream earlier (see option-parser path), so by the
+       time we get here xtrabackup_stream is set even if the user only
+       wrote --fifo-streams. Reporting the more specific cause helps. */
+    if (xtrabackup_fifo_streams_set) {
+      xb::error() << "--cloud-storage is incompatible with --fifo-streams. "
+                     "Both replace the default datasink chain; use only "
+                     "one. For cloud destinations, --cloud-storage is the "
+                     "recommended path. --fifo-streams remains the way to "
+                     "parallel-stream into non-cloud consumers (custom "
+                     "pipelines, host-to-host transfer).";
+      exit(EXIT_FAILURE);
+    }
     if (xtrabackup_stream) {
-      xb::error() << "--cloud-storage is incompatible with --stream";
+      xb::error() << "--cloud-storage is incompatible with --stream. "
+                     "ds_cloud already provides direct parallel uploads to "
+                     "the bucket; the xbstream pipe is not used.";
       exit(EXIT_FAILURE);
     }
     if (!ds_cloud_probe()) {
