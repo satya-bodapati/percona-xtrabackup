@@ -192,11 +192,12 @@ MY_ADD_COMPILE_DEFINITIONS(
 
 # xbstream does not need ds_cloud; gate it out so we don't drag libev
 # and the xbcloud OBJECT library into a tool that doesn't use them.
-MY_ADD_COMPILE_DEFINITIONS(
-  datasink.cc
-  COMPILE_DEFINITIONS XB_NO_CLOUD
-  TARGETS xbstream
-  )
+# NOTE: must use target_compile_definitions (PER-TARGET) here, not
+# MY_ADD_COMPILE_DEFINITIONS which is per-source-file globally. The
+# previous version leaked XB_NO_CLOUD into xtrabackup's datasink.cc
+# build too, leaving DS_TYPE_CLOUD unregistered and causing
+# "Unknown datasink type: 14" at runtime.
+TARGET_COMPILE_DEFINITIONS(xbstream PRIVATE XB_NO_CLOUD)
 ADD_COMPILE_FLAGS(
     ${BUNDLED_LZ4_PATH}/xxhash.c
     ds_decompress_lz4.cc
