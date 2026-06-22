@@ -60,7 +60,17 @@ struct ds_cloud_config_t {
   /* Multipart knobs. */
   bool multipart_upload{true};
   ulonglong multipart_part_size{0};  /* 0 = dynamic schedule */
-  ulonglong multipart_memory_budget{4ULL * 1024 * 1024 * 1024};
+  /* Per-writer in-flight byte cap. With --parallel=8 data-copy threads
+     each running their own Stream_multipart_writer, total peak in-flight
+     memory is parallel * memory_budget. We size this conservatively for
+     the typical case (16 MiB parts at the lowest dynamic tier, 2-3 parts
+     in flight saturates a typical WAN connection at 100ms RTT). Files
+     in the higher tiers (>=1 GiB total, >=64 MiB parts) get fewer
+     simultaneous parts which is fine -- they're large enough that even
+     one in-flight saturates the wire. Not exposed as a CLI option; the
+     previous tunable was both too high a default and wrong granularity
+     (per-writer, not global). */
+  ulonglong multipart_memory_budget{64ULL * 1024 * 1024};
   ulonglong multipart_threshold{16ULL * 1024 * 1024};
   ulonglong multipart_rollover_threshold{5ULL * 1024 * 1024 * 1024 * 1024};
 

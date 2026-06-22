@@ -302,8 +302,6 @@ static ulong opt_cloud_max_backoff = 300000;
 static ulong opt_cloud_parallel = 8;
 static bool opt_cloud_multipart_upload = true;
 static ulonglong opt_cloud_multipart_part_size = 0;
-static ulonglong opt_cloud_multipart_memory_budget =
-    4ULL * 1024 * 1024 * 1024;
 static ulonglong opt_cloud_multipart_threshold = 16ULL * 1024 * 1024;
 static ulonglong opt_cloud_multipart_rollover_threshold =
     5ULL * 1024 * 1024 * 1024 * 1024;
@@ -890,7 +888,6 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_PARALLEL,
   OPT_XTRA_CLOUD_MULTIPART_UPLOAD,
   OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
-  OPT_XTRA_CLOUD_MULTIPART_MEMORY_BUDGET,
   OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
   OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
   OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
@@ -1634,11 +1631,6 @@ struct my_option xb_client_options[] = {
      &opt_cloud_multipart_part_size, &opt_cloud_multipart_part_size, 0,
      GET_ULL, REQUIRED_ARG, 0, 0,
      5ULL * 1024 * 1024 * 1024, 0, 0, 0},
-    {"cloud-multipart-memory-budget", OPT_XTRA_CLOUD_MULTIPART_MEMORY_BUDGET,
-     "Per-file in-flight buffer cap in bytes.",
-     &opt_cloud_multipart_memory_budget, &opt_cloud_multipart_memory_budget,
-     0, GET_ULL, REQUIRED_ARG, 4ULL * 1024 * 1024 * 1024,
-     16ULL * 1024 * 1024, ULLONG_MAX, 0, 0, 0},
     {"cloud-multipart-threshold", OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
      "Streams below this finish as a single PUT, no Initiate/Abort.",
      &opt_cloud_multipart_threshold, &opt_cloud_multipart_threshold, 0,
@@ -3789,8 +3781,6 @@ static void apply_cloud_options() {
   g_ds_cloud_config.parallel = opt_cloud_parallel;
   g_ds_cloud_config.multipart_upload = opt_cloud_multipart_upload;
   g_ds_cloud_config.multipart_part_size = opt_cloud_multipart_part_size;
-  g_ds_cloud_config.multipart_memory_budget =
-      opt_cloud_multipart_memory_budget;
   g_ds_cloud_config.multipart_threshold = opt_cloud_multipart_threshold;
   g_ds_cloud_config.multipart_rollover_threshold =
       opt_cloud_multipart_rollover_threshold;
