@@ -30,6 +30,35 @@ legacy `--stream=xbstream | xbcloud put` pipeline still works but is
 ~2× slower than `--cloud-storage` (see Benchmark below); prefer
 `--cloud-storage` for any new cloud-destination workflow.
 
+## Bucket and prefix syntax
+
+Each backend has its own bucket / container option, taking either
+`BUCKET` or `BUCKET/PREFIX` form:
+
+| Backend | Option                          | Example value                       |
+|---------|---------------------------------|-------------------------------------|
+| S3      | `--cloud-s3-bucket`             | `my-backups/2026-06-21-full`        |
+| GCS     | `--cloud-google-bucket`         | `my-backups/2026-06-21-full`        |
+| Azure   | `--cloud-azure-container-name`  | `my-container/2026-06-21-full`      |
+| Swift   | `--cloud-swift-container`       | `my-container/2026-06-21-full`      |
+
+The portion after the first `/` is the **prefix** -- the sub-directory
+where THIS backup's objects live. With the example above, S3 keys land
+at `my-backups/2026-06-21-full/<file>`. The prefix may contain multiple
+`/` characters for deeper namespacing
+(`my-backups/year/2026/06/21-full`).
+
+**HNS safety.** The parser strips leading and trailing `/` from the
+prefix, and ds_cloud never PUTs an object whose key ends in `/`. This
+matters on Azure Data Lake Storage Gen2 (Hierarchical Namespace
+enabled), where a key ending in `/` is a directory placeholder, not a
+blob; an upload that PUT such a key would lose the object data.
+
+**`--target-dir` is local-only** in cloud modes. It is required by the
+xtrabackup option parser (every mode uses it) but its value does not
+affect cloud object keys. The prefix is exclusively driven by
+`BUCKET/PREFIX` above.
+
 ## Backup
 
 ```bash
@@ -37,14 +66,13 @@ xtrabackup --backup \
   --user=root --socket=/var/lib/mysql/mysql.sock \
   --target-dir=2026-06-21-full \
   --cloud-storage=s3 \
-  --cloud-bucket=my-backups \
+  --cloud-s3-bucket=my-backups/2026-06-21-full \
   --cloud-region=us-east-2 \
   --cloud-endpoint=s3.us-east-2.amazonaws.com \
   --cloud-access-key=AKIA... \
   --cloud-secret-key=...
 ```
 
-The basename of `--target-dir` becomes the prefix inside the bucket.
 Backup files land at `my-backups/2026-06-21-full/<file>` -- one object
 per file, identical bytes to a local backup. `aws s3 cp` returns the
 original file directly with no unwrap.
@@ -60,14 +88,14 @@ no broken-pipe cascade).
 xtrabackup --download \
   --target-dir=/restore/2026-06-21-full \
   --cloud-storage=s3 \
-  --cloud-bucket=my-backups \
+  --cloud-s3-bucket=my-backups/2026-06-21-full \
   --cloud-region=us-east-2 \
   --cloud-endpoint=s3.us-east-2.amazonaws.com \
   --cloud-access-key=AKIA... --cloud-secret-key=...
 ```
 
-Lists every object under `my-backups/2026-06-21-full/` and writes each
-to the matching relative path inside `--target-dir`. Then run
+Lists every object under the configured prefix and writes each to the
+matching relative path inside `--target-dir`. Then run
 `xtrabackup --prepare --target-dir=/restore/2026-06-21-full` as you
 would for any local backup.
 
@@ -75,9 +103,9 @@ would for any local backup.
 
 ```bash
 xtrabackup --delete \
-  --target-dir=2026-06-21-full \
+  --target-dir=any-local-path \
   --cloud-storage=s3 \
-  --cloud-bucket=my-backups \
+  --cloud-s3-bucket=my-backups/2026-06-21-full \
   --cloud-region=us-east-2 \
   ...
 ```
@@ -86,26 +114,28 @@ Interactive confirmation by default. (A `--force` flag will follow.)
 
 ## CLI option catalog
 
+### Common (all backends)
+
 | Option                            | Purpose                                   |
 |-----------------------------------|-------------------------------------------|
 | `--cloud-storage`                 | `s3` / `gcs` / `azure` / `swift`          |
 | `--cloud-url`                     | Cloud target URL (Swift / custom backends)|
-| `--cloud-bucket`                  | Bucket name                               |
-| `--cloud-region`                  | Region                                    |
-| `--cloud-endpoint`                | Endpoint host                             |
-| `--cloud-access-key`              | Access key                                |
-| `--cloud-secret-key`              | Secret key                                |
+| `--cloud-region`                  | Region (S3 / GCS)                         |
+| `--cloud-endpoint`                | Endpoint host (S3 / GCS)                  |
+| `--cloud-access-key`              | Access key (S3 / GCS)                     |
+| `--cloud-secret-key`              | Secret key (S3 / GCS)                     |
 | `--cloud-session-token`           | AWS STS session token                     |
 | `--cloud-bucket-lookup`           | `auto` / `path` / `dns`                   |
-| `--cloud-storage-class`           | Storage tier                              |
-| `--cloud-azure-account`           | Azure storage account                     |
-| `--cloud-azure-access-key`        | Azure account key                         |
-| `--cloud-azure-endpoint`          | Azure endpoint                            |
+| `--cloud-storage-class`           | Storage tier (S3 / GCS / Azure)           |
 | `--cloud-insecure`                | Skip TLS verification                     |
 | `--cloud-cacert`                  | CA bundle path                            |
+| `--cloud-verbose`                 | `CURLOPT_VERBOSE`: stream libcurl trace   |
 | `--cloud-timeout`                 | Per-request timeout (s)                   |
 | `--cloud-max-retries`             | Retry budget                              |
 | `--cloud-max-backoff`             | Max retry backoff (ms)                    |
+| `--cloud-curl-retriable-errors`   | Extra curl error codes to retry (CSV)     |
+| `--cloud-http-retriable-errors`   | Extra HTTP status codes to retry (CSV)    |
+| `--cloud-header`                  | Extra `Name: Value` HTTP header (repeatable) |
 | `--cloud-max-concurrent-requests` | Max concurrent in-flight HTTP requests (default 16) |
 | `--cloud-upload-buffer-size`      | Total upload-memory cap (default 0 = unlimited; aws-cli-like) |
 | `--cloud-multipart-part-size`     | Part size in bytes (0 = auto: `max(16 MiB, ceil(filesize/10K))`) |
@@ -114,20 +144,167 @@ Interactive confirmation by default. (A `--force` flag will follow.)
 | `--cloud-rate-log-interval`       | Throughput log cadence (s, 0 = off)       |
 | `--cloud-http-timing`             | Curl phase timing dump                    |
 
-Two flags from earlier prototypes are intentionally NOT on this list:
+### S3
 
-- **`--cloud-multipart-upload=ON|OFF`** — removed. ds_cloud is multipart-only
-  by design (the `Stream_multipart_writer` already short-circuits to a single
-  PUT for files below `--cloud-multipart-threshold`, so there's no
-  non-multipart code path to fall back to). xbcloud keeps the equivalent
-  option because xbcloud has a legacy chunk-per-PUT path for backward
-  compatibility; ds_cloud never did.
+| Option                            | Purpose                                   |
+|-----------------------------------|-------------------------------------------|
+| `--cloud-s3-bucket`               | Bucket (`BUCKET` or `BUCKET/PREFIX`)      |
+| `--cloud-s3-api-version`          | `AUTO` (default) / `2` / `4` -- signing version |
 
-- **`--cloud-multipart-memory-budget`** — removed. The control was per-writer
-  (one writer per file held by an xtrabackup data-copy thread), which means
-  setting it to N silently multiplied to `N × --parallel` total peak memory.
-  With the default 4 GiB and `--parallel=8`, that's 32 GiB → OOM. Hardcoded
-  today to 64 MiB per writer; the eventual single global cap will be
+### Google Cloud Storage
+
+| Option                            | Purpose                                   |
+|-----------------------------------|-------------------------------------------|
+| `--cloud-google-bucket`           | Bucket (`BUCKET` or `BUCKET/PREFIX`)      |
+
+### Azure Blob Storage
+
+| Option                            | Purpose                                   |
+|-----------------------------------|-------------------------------------------|
+| `--cloud-azure-container-name`    | Container (`CONTAINER` or `CONTAINER/PREFIX`) |
+| `--cloud-azure-account`           | Storage account                           |
+| `--cloud-azure-access-key`        | Account key                               |
+| `--cloud-azure-endpoint`          | Endpoint                                  |
+| `--cloud-azure-development-storage` | Use Azurite emulator defaults           |
+
+### Swift (OpenStack)
+
+| Option                            | Purpose                                   |
+|-----------------------------------|-------------------------------------------|
+| `--cloud-swift-container`         | Container (`CONTAINER` or `CONTAINER/PREFIX`) |
+| `--cloud-swift-auth-url`          | Base URL of Keystone / TempAuth           |
+| `--cloud-swift-auth-version`      | `1` / `2` / `3` (default 1 / TempAuth)    |
+| `--cloud-swift-user`              | User name                                 |
+| `--cloud-swift-user-id`           | User ID                                   |
+| `--cloud-swift-key`               | TempAuth key                              |
+| `--cloud-swift-password`          | User password                             |
+| `--cloud-swift-tenant`            | Tenant name                               |
+| `--cloud-swift-tenant-id`         | Tenant ID                                 |
+| `--cloud-swift-project`           | Project name                              |
+| `--cloud-swift-project-id`        | Project ID                                |
+| `--cloud-swift-domain`            | User domain name                          |
+| `--cloud-swift-domain-id`         | User domain ID                            |
+| `--cloud-swift-project-domain`    | Project domain name                       |
+| `--cloud-swift-project-domain-id` | Project domain ID                         |
+| `--cloud-swift-region`            | Region                                    |
+| `--cloud-swift-storage-url`       | Override URL returned by Keystone         |
+
+## xbcloud → xtrabackup option migration
+
+Existing scripts that use `xbcloud put` translate mechanically: rename
+`--<provider>-<opt>` to `--cloud-<provider>-<opt>`, fold the positional
+backup name into the bucket option as `BUCKET/PREFIX`, drop the
+`xtrabackup --stream=xbstream | xbcloud put ...` pipe.
+
+### S3
+
+| xbcloud option            | xtrabackup equivalent                |
+|---------------------------|--------------------------------------|
+| `--storage=s3`            | `--cloud-storage=s3`                 |
+| `--s3-bucket=B`           | `--cloud-s3-bucket=B[/PREFIX]`       |
+| `--s3-region=R`           | `--cloud-region=R`                   |
+| `--s3-endpoint=E`         | `--cloud-endpoint=E`                 |
+| `--s3-access-key=K`       | `--cloud-access-key=K`               |
+| `--s3-secret-key=K`       | `--cloud-secret-key=K`               |
+| `--s3-session-token=T`    | `--cloud-session-token=T`            |
+| `--s3-storage-class=C`    | `--cloud-storage-class=C`            |
+| `--s3-bucket-lookup=M`    | `--cloud-bucket-lookup=M`            |
+| `--s3-api-version=V`      | `--cloud-s3-api-version=V`           |
+
+### Google
+
+| xbcloud option            | xtrabackup equivalent                |
+|---------------------------|--------------------------------------|
+| `--storage=google`        | `--cloud-storage=gcs`                |
+| `--google-bucket=B`       | `--cloud-google-bucket=B[/PREFIX]`   |
+| `--google-region=R`       | `--cloud-region=R`                   |
+| `--google-endpoint=E`     | `--cloud-endpoint=E`                 |
+| `--google-access-key=K`   | `--cloud-access-key=K`               |
+| `--google-secret-key=K`   | `--cloud-secret-key=K`               |
+| `--google-session-token=T`| `--cloud-session-token=T`            |
+| `--google-storage-class=C`| `--cloud-storage-class=C`            |
+
+### Azure
+
+| xbcloud option                | xtrabackup equivalent                       |
+|-------------------------------|---------------------------------------------|
+| `--storage=azure`             | `--cloud-storage=azure`                     |
+| `--azure-storage-account=A`   | `--cloud-azure-account=A`                   |
+| `--azure-container-name=C`    | `--cloud-azure-container-name=C[/PREFIX]`   |
+| `--azure-access-key=K`        | `--cloud-azure-access-key=K`                |
+| `--azure-endpoint=E`          | `--cloud-azure-endpoint=E`                  |
+| `--azure-tier-class=T`        | `--cloud-storage-class=T`                   |
+| `--azure-development-storage` | `--cloud-azure-development-storage`         |
+
+### Swift
+
+| xbcloud option                | xtrabackup equivalent                       |
+|-------------------------------|---------------------------------------------|
+| `--storage=swift`             | `--cloud-storage=swift`                     |
+| `--swift-container=C`         | `--cloud-swift-container=C[/PREFIX]`        |
+| `--swift-auth-url=U`          | `--cloud-swift-auth-url=U`                  |
+| `--swift-auth-version=N`      | `--cloud-swift-auth-version=N`              |
+| `--swift-user=U`              | `--cloud-swift-user=U`                      |
+| `--swift-user-id=U`           | `--cloud-swift-user-id=U`                   |
+| `--swift-key=K`               | `--cloud-swift-key=K`                       |
+| `--swift-password=P`          | `--cloud-swift-password=P`                  |
+| `--swift-tenant=T`            | `--cloud-swift-tenant=T`                    |
+| `--swift-tenant-id=T`         | `--cloud-swift-tenant-id=T`                 |
+| `--swift-project=P`           | `--cloud-swift-project=P`                   |
+| `--swift-project-id=P`        | `--cloud-swift-project-id=P`                |
+| `--swift-domain=D`            | `--cloud-swift-domain=D`                    |
+| `--swift-domain-id=D`         | `--cloud-swift-domain-id=D`                 |
+| `--swift-project-domain=D`    | `--cloud-swift-project-domain=D`            |
+| `--swift-project-domain-id=D` | `--cloud-swift-project-domain-id=D`         |
+| `--swift-region=R`            | `--cloud-swift-region=R`                    |
+| `--swift-storage-url=U`       | `--cloud-swift-storage-url=U`               |
+
+### Common HTTP / retry knobs
+
+| xbcloud option              | xtrabackup equivalent                |
+|-----------------------------|--------------------------------------|
+| `--insecure`                | `--cloud-insecure`                   |
+| `--cacert=F`                | `--cloud-cacert=F`                   |
+| `--verbose`                 | `--cloud-verbose`                    |
+| `--timeout=N`               | `--cloud-timeout=N`                  |
+| `--max-retries=N`           | `--cloud-max-retries=N`              |
+| `--max-backoff=N`           | `--cloud-max-backoff=N`              |
+| `--curl-retriable-errors=CSV` | `--cloud-curl-retriable-errors=CSV`|
+| `--http-retriable-errors=CSV` | `--cloud-http-retriable-errors=CSV`|
+| `--header="K: V"`           | `--cloud-header="K: V"`              |
+| `--parallel=N`              | `--cloud-max-concurrent-requests=N`  |
+
+### Multipart knobs
+
+| xbcloud option                       | xtrabackup equivalent                       |
+|--------------------------------------|---------------------------------------------|
+| `--multipart-upload`                 | (removed; ds_cloud is always multipart)     |
+| `--multipart-memory-budget`          | (removed; see Memory model)                 |
+| `--multipart-part-size=N`            | `--cloud-multipart-part-size=N`             |
+| `--multipart-threshold=N`            | `--cloud-multipart-threshold=N`             |
+| `--multipart-rollover-threshold=N`   | `--cloud-multipart-rollover-threshold=N`    |
+
+### Removed options
+
+- **`--cloud-bucket` (generic)** -- replaced by provider-explicit
+  `--cloud-s3-bucket` / `--cloud-google-bucket` /
+  `--cloud-azure-container-name` / `--cloud-swift-container`.
+- **`--md5`** -- xbcloud's per-chunk MD5 sidecar is tied to its
+  chunked-filename format. The new one-file-per-object model needs
+  per-FILE SHA-256 verification, designed via `backup_meta.json` and
+  tracked separately (task #54). Not in this release.
+- **`--cloud-multipart-upload=ON|OFF`** -- ds_cloud is multipart-only by
+  design (the `Stream_multipart_writer` already short-circuits to a
+  single PUT for files below `--cloud-multipart-threshold`, so there's
+  no non-multipart code path to fall back to). xbcloud keeps the
+  equivalent option because xbcloud has a legacy chunk-per-PUT path
+  for backward compatibility; ds_cloud never did.
+- **`--cloud-multipart-memory-budget`** -- removed. The control was
+  per-writer (one writer per file held by an xtrabackup data-copy
+  thread), which means setting it to N silently multiplied to
+  `N × --parallel` total peak memory. With the default 4 GiB and
+  `--parallel=8`, that's 32 GiB → OOM. Hardcoded today to 64 MiB per
+  writer; the eventual single global cap will be
   `--cloud-upload-buffer-size` (see Memory model below).
 
 ## Memory model
@@ -345,27 +522,35 @@ xtrabackup --download
 
 ## Limitations and follow-ups
 
-This is the Phase 2 MVP. Known gaps:
+- **Per-file SHA-256 verification** is deferred to a separate task (see
+  `task #54` in the internal tracker / PXB-3754 acceptance criteria).
+  Backups today carry a `backup_meta.json` manifest with `logical_size`
+  and `sparse_map`; per-file `sha256` and `--verify`-on-download are
+  the next iteration. Open design question: hashing semantics for
+  sparse-frame xbstream output need careful resolution before shipping.
 
-- **Sparse files**: ds_cloud's `cloud_write_sparse` currently falls
-  back to a dense write (the bytes go up; the sparse map is not
-  carried). Sparse fidelity needs the unified `backup_meta.json`
-  manifest from PXB-3754 to carry per-file `sparse_map`; that work is
-  the next ticket. As a workaround, sparse files restore as dense
-  files (full size, no holes), which is functionally correct.
+- **Streaming rollover** (single file >5 TiB on the wire) aborts with
+  a clear error. Streaming rollover via the unified manifest is
+  queued behind PXB-3754 follow-up work.
 
-- **Streaming rollover** (single file >5 TiB on the wire): aborts with
-  a clear error pointing at `--cloud-multipart-from-file`. Streaming
-  rollover via the unified manifest is queued behind PXB-3754.
+- **No `--force` on `--delete`** yet: confirmation is always
+  interactive.
 
-- **No --force on --delete yet**: confirmation is always interactive.
-
-- **No parallel range GETs in --download**: each object is fetched
+- **No parallel range GETs in `--download`**: each object is fetched
   sequentially as a whole. Range-GET split for large files comes with
   the per-object segment list in the manifest.
 
-- **No ListMultipartUploads cleanup in --delete**: orphaned multipart
-  sessions from crashed backups aren't garbage-collected by --delete.
+- **HNS-aware `--delete`**: Azure HNS-enabled containers need a
+  directory-aware bottom-up delete (delete blobs first, then directory
+  placeholders). xbcloud already does this via the partitioned listing
+  API (`ResourceType` parse in `azure.cc`); ds_cloud's `--delete`
+  currently uses the same `list_objects_in_directory` helper, so it
+  also walks HNS containers correctly. Confirmed via the PXB-3643 /
+  PR #1726 path.
+
+- **No `ListMultipartUploads` cleanup in `--delete`**: orphaned
+  multipart sessions from crashed backups aren't garbage-collected by
+  `--delete`.
 
 ## Testing
 
