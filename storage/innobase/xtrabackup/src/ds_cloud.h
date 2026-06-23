@@ -101,4 +101,16 @@ extern ds_cloud_config_t g_ds_cloud_config;
 */
 bool ds_cloud_probe();
 
+/* ---- Lifecycle ops (CLI commands, not datasink interface) ---- */
+
+/* Download every object under the configured bucket/prefix into the
+   supplied target_dir. Returns true on success. Manifest
+   (backup_meta.json) is fetched first; sparse files are
+   reconstructed via lseek+pwrite + manifest-driven punch_hole. */
+bool xb_cloud_download(const std::string &target_dir);
+
+/* Delete every object under the configured bucket/prefix. Confirmation
+   is interactive unless @p force is true. */
+bool xb_cloud_delete(bool force);
+
 #endif /* XB_DS_CLOUD_H */

@@ -102,7 +102,6 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "datasink.h"
 #include "ds_cloud.h"
 #include "file_context.h"
-#include "ds_cloud_lifecycle.h"
 #include "xtrabackup_version.h"
 
 #include "backup_copy.h"

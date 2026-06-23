@@ -26,7 +26,14 @@ the Free Software Foundation; version 2 of the License.
 
 #include "ds_cloud.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -39,6 +46,8 @@ the Free Software Foundation; version 2 of the License.
 
 #include "common.h"
 #include "datasink.h"
+#include "file_context.h"
+#include "file_utils.h"
 #include "msg.h"
 #include "srv0srv.h"
 #include "ut0log.h"
@@ -87,8 +96,26 @@ struct ds_cloud_file_t {
   ds_cloud_ctxt_t *ctxt{nullptr};
 };
 
-/* ----- Object_store factory based on g_ds_cloud_config ----- */
+/* ----- Shared helpers (used by both backup-time cloud_init and the
+         lifecycle CLI commands xb_cloud_download/delete) ----- */
 
+/* Build an Http_client configured from g_ds_cloud_config (retries,
+   backoff, timeout, TLS).  Caller takes ownership. */
+std::unique_ptr<Http_client> make_cloud_http_client() {
+  auto hc = std::make_unique<Http_client>();
+  hc->set_max_retries(g_ds_cloud_config.max_retries);
+  hc->set_max_backoff(g_ds_cloud_config.max_backoff);
+  hc->set_timeout(g_ds_cloud_config.timeout);
+  if (g_ds_cloud_config.insecure) hc->set_insecure(true);
+  if (!g_ds_cloud_config.cacert.empty()) {
+    hc->set_cacaert(g_ds_cloud_config.cacert);
+  }
+  return hc;
+}
+
+/* Build an Object_store from g_ds_cloud_config + the supplied
+   Http_client.  Does NOT probe (see probe_object_store below);
+   callers run the probe at the point that makes sense for them. */
 std::unique_ptr<Object_store> build_object_store(Http_client *http_client) {
   const auto &c = g_ds_cloud_config;
   if (c.storage == "s3" || c.storage == "gcs" || c.storage == "google") {
@@ -119,33 +146,71 @@ std::unique_ptr<Object_store> build_object_store(Http_client *http_client) {
   return nullptr;
 }
 
-bool probe_and_setup_store(ds_cloud_ctxt_t *cc) {
-  /* For S3/GCS, probe runs the api-version + bucket-lookup detection that
-     xbcloud's probe_api_version_and_lookup does. */
+/* Probe the store: for S3/GCS the SDK's probe_api_version_and_lookup
+   adjusts the api version / bucket-lookup based on what the server
+   responds with; for Azure/Swift a container_exists check is enough.
+   Returns true iff the bucket is reachable with the configured
+   credentials. */
+bool probe_object_store(Object_store *store, const std::string &container) {
   if (g_ds_cloud_config.storage == "s3" ||
       g_ds_cloud_config.storage == "gcs" ||
       g_ds_cloud_config.storage == "google") {
-    auto *s3_store = static_cast<S3_object_store *>(cc->object_store.get());
-    if (!s3_store->probe_api_version_and_lookup(cc->container)) {
-      xb::error() << "ds_cloud: probe failed for bucket '"
-                  << cc->container << "'";
+    auto *s3_store = static_cast<S3_object_store *>(store);
+    if (!s3_store->probe_api_version_and_lookup(container)) {
+      xb::error() << "ds_cloud: probe failed for bucket '" << container << "'";
       return false;
     }
   } else {
-    /* For Azure/Swift, container_exists is sufficient. */
     bool exists;
-    if (!cc->object_store->container_exists(cc->container, exists)) {
+    if (!store->container_exists(container, exists)) {
       xb::error() << "ds_cloud: container_exists check failed for '"
-                  << cc->container << "'";
+                  << container << "'";
       return false;
     }
     if (!exists) {
-      xb::error() << "ds_cloud: container '" << cc->container
+      xb::error() << "ds_cloud: container '" << container
                   << "' does not exist";
       return false;
     }
   }
   return true;
+}
+
+/* Take the basename of a path (everything after the final '/').
+   Used to derive the bucket prefix from xtrabackup_target_dir for
+   the lifecycle CLI commands (--download / --delete) so the
+   on-bucket layout matches what cloud_init() chose at backup time. */
+std::string basename_of(const std::string &path) {
+  std::string p = path;
+  while (!p.empty() && p.back() == '/') p.pop_back();
+  size_t slash = p.find_last_of('/');
+  if (slash != std::string::npos) p.erase(0, slash + 1);
+  return p;
+}
+
+/* Strip the bucket-prefix from a returned object key.  Object listings
+   return "<prefix>/<rel-path>"; lifecycle CLI commands write to disk
+   at "<target_dir>/<rel-path>", so they need the rel-path part. */
+std::string strip_prefix(const std::string &obj, const std::string &prefix) {
+  if (prefix.empty()) return obj;
+  if (obj.rfind(prefix, 0) == 0) {
+    size_t off = prefix.size();
+    if (off < obj.size() && obj[off] == '/') ++off;
+    return obj.substr(off);
+  }
+  return obj;
+}
+
+/* Create any missing parent directories under target_dir for a file
+   landing at target_dir + "/" + rel.  Used by xb_cloud_download. */
+bool mkdir_for(const std::string &target_dir, const std::string &rel) {
+  std::string full = target_dir;
+  if (full.empty() || full.back() != '/') full.push_back('/');
+  full.append(rel);
+  size_t slash = full.find_last_of('/');
+  if (slash == std::string::npos) return true;
+  std::string dir = full.substr(0, slash);
+  return mkdirp(dir.c_str(), 0755, MYF(0)) == 0;
 }
 
 /* ----- datasink ops ----- */
@@ -164,14 +229,7 @@ ds_ctxt_t *cloud_init(const char *root) {
   cc->container = g_ds_cloud_config.container;
   cc->backup_prefix = (root != nullptr ? root : "");
 
-  cc->http_client = std::make_unique<Http_client>();
-  cc->http_client->set_max_retries(g_ds_cloud_config.max_retries);
-  cc->http_client->set_max_backoff(g_ds_cloud_config.max_backoff);
-  cc->http_client->set_timeout(g_ds_cloud_config.timeout);
-  if (g_ds_cloud_config.insecure) cc->http_client->set_insecure(true);
-  if (!g_ds_cloud_config.cacert.empty())
-    cc->http_client->set_cacaert(g_ds_cloud_config.cacert);
-
+  cc->http_client = make_cloud_http_client();
   cc->object_store = build_object_store(cc->http_client.get());
   if (!cc->object_store) {
     xb::error() << "ds_cloud: unknown storage backend '"
@@ -179,7 +237,7 @@ ds_ctxt_t *cloud_init(const char *root) {
     return nullptr;
   }
 
-  if (!probe_and_setup_store(cc.get())) {
+  if (!probe_object_store(cc->object_store.get(), cc->container)) {
     return nullptr;
   }
 
@@ -474,39 +532,240 @@ bool ds_cloud_probe() {
     return false;
   }
 
-  Http_client hc;
-  hc.set_max_retries(g_ds_cloud_config.max_retries);
-  hc.set_max_backoff(g_ds_cloud_config.max_backoff);
-  hc.set_timeout(g_ds_cloud_config.timeout);
-  if (g_ds_cloud_config.insecure) hc.set_insecure(true);
-  if (!g_ds_cloud_config.cacert.empty())
-    hc.set_cacaert(g_ds_cloud_config.cacert);
-
-  auto store = build_object_store(&hc);
+  auto hc = make_cloud_http_client();
+  auto store = build_object_store(hc.get());
   if (!store) {
     xb::error() << "ds_cloud: unknown storage backend '"
                 << g_ds_cloud_config.storage << "'";
     return false;
   }
+  return probe_object_store(store.get(), g_ds_cloud_config.container);
+}
 
-  if (g_ds_cloud_config.storage == "s3" ||
-      g_ds_cloud_config.storage == "gcs" ||
-      g_ds_cloud_config.storage == "google") {
-    auto *s3 = static_cast<S3_object_store *>(store.get());
-    if (!s3->probe_api_version_and_lookup(g_ds_cloud_config.container)) {
+/* =====================================================================
+   Lifecycle CLI commands (--download / --delete).  These ARE NOT
+   datasink operations; they're standalone entry points called from
+   xtrabackup's main() when the corresponding mode is set.  They share
+   the helpers above (build_object_store, make_cloud_http_client,
+   probe_object_store) with the backup-time cloud_init path.
+   ===================================================================== */
+
+bool xb_cloud_download(const std::string &target_dir) {
+  if (g_ds_cloud_config.storage.empty()) {
+    xb::error() << "--download requires --cloud-storage to be set";
+    return false;
+  }
+  if (g_ds_cloud_config.container.empty()) {
+    xb::error() << "--download requires --cloud-bucket to be set";
+    return false;
+  }
+  if (mkdirp(target_dir.c_str(), 0755, MYF(0)) < 0 && errno != EEXIST) {
+    xb::error() << "--download: cannot create target dir " << target_dir
+                << ": " << strerror(errno);
+    return false;
+  }
+
+  auto hc = make_cloud_http_client();
+  auto store = build_object_store(hc.get());
+  if (!store) {
+    xb::error() << "--download: unknown storage backend '"
+                << g_ds_cloud_config.storage << "'";
+    return false;
+  }
+  if (!probe_object_store(store.get(), g_ds_cloud_config.container)) {
+    return false;
+  }
+
+  const std::string prefix = basename_of(target_dir);
+
+  std::vector<std::string> objects;
+  if (!store->list_objects_in_directory(g_ds_cloud_config.container, prefix,
+                                         objects)) {
+    xb::error() << "--download: list_objects_in_directory failed";
+    return false;
+  }
+  if (objects.empty()) {
+    xb::error() << "--download: no objects found under "
+                << g_ds_cloud_config.container << "/" << prefix;
+    return false;
+  }
+  xb::info() << "--download: " << objects.size() << " objects under "
+             << g_ds_cloud_config.container << "/" << prefix;
+
+  /* Locate backup_meta.json in the listing.  It MUST be present --
+     the new-format manifest is mandatory and drives sparse-restore
+     decisions.  Fetch it first, write to target_dir, then load the
+     lookup table before processing data files. */
+  std::string manifest_obj;
+  for (const auto &obj : objects) {
+    if (strip_prefix(obj, prefix) == "backup_meta.json") {
+      manifest_obj = obj;
+      break;
+    }
+  }
+  if (manifest_obj.empty()) {
+    xb::error() << "--download: backup_meta.json missing from bucket under "
+                << g_ds_cloud_config.container << "/" << prefix
+                << "; refusing to restore (manifest is mandatory in "
+                << "new-format backups)";
+    return false;
+  }
+  {
+    bool ok = false;
+    Http_buffer body =
+        store->download_object(g_ds_cloud_config.container, manifest_obj, ok);
+    if (!ok) {
+      xb::error() << "--download: failed to fetch " << manifest_obj;
       return false;
     }
-  } else {
-    bool exists;
-    if (!store->container_exists(g_ds_cloud_config.container, exists)) {
+    std::string full = target_dir;
+    if (full.empty() || full.back() != '/') full.push_back('/');
+    full.append("backup_meta.json");
+    int fd = open(full.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      xb::error() << "--download: cannot open " << full << ": "
+                  << strerror(errno);
       return false;
     }
-    if (!exists) {
-      xb::error() << "ds_cloud: bucket '" << g_ds_cloud_config.container
-                  << "' does not exist";
+    if (write(fd, body.begin(), body.size()) !=
+        static_cast<ssize_t>(body.size())) {
+      xb::error() << "--download: short write to " << full;
+      close(fd);
+      return false;
+    }
+    close(fd);
+    xb::info() << "--download: wrote " << full << " ("
+               << xtrabackup::utils::human_readable(body.size()) << ")";
+  }
+  if (!file_context_load_manifest_from(target_dir.c_str())) {
+    xb::error() << "--download: failed to parse backup_meta.json after "
+                << "fetch; aborting restore";
+    return false;
+  }
+
+  /* For each non-manifest object:
+       1. Download body into memory.
+       2. Write to <full>.de-sparse (atomic-rename staging).
+       3. If the manifest has a sparse_map for this file, apply the
+          manifest-driven punch_hole on the .de-sparse copy.
+       4. rename(.de-sparse -> canonical).
+     The rename pattern keeps a partial fetch from leaving a half-
+     written canonical-named file on disk. */
+  for (const auto &obj : objects) {
+    if (obj == manifest_obj) continue;  /* already fetched */
+
+    bool ok = false;
+    Http_buffer body =
+        store->download_object(g_ds_cloud_config.container, obj, ok);
+    if (!ok) {
+      xb::error() << "--download: failed to fetch " << obj;
+      return false;
+    }
+    std::string rel = strip_prefix(obj, prefix);
+    if (!mkdir_for(target_dir, rel)) {
+      xb::error() << "--download: mkdir_for failed for " << rel;
+      return false;
+    }
+    std::string full = target_dir;
+    if (full.empty() || full.back() != '/') full.push_back('/');
+    full.append(rel);
+    std::string staging = full + ".de-sparse";
+
+    int fd = open(staging.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      xb::error() << "--download: cannot open " << staging << ": "
+                  << strerror(errno);
+      return false;
+    }
+    if (write(fd, body.begin(), body.size()) !=
+        static_cast<ssize_t>(body.size())) {
+      xb::error() << "--download: short write to " << staging;
+      close(fd);
+      ::unlink(staging.c_str());
+      return false;
+    }
+    close(fd);
+
+    /* Manifest-driven punch_hole when applicable.  Returns true
+       (no-op) on filesystems without PUNCH_HOLE support; file stays
+       dense, only disk-space reclaim is lost. */
+    const auto *regions = file_context_lookup_regions(rel.c_str());
+    if (regions != nullptr) {
+      uint64_t logical_size = file_context_lookup_logical_size(rel.c_str());
+      if (!file_context_punch_holes_from_regions(staging.c_str(),
+                                                  logical_size, *regions)) {
+        xb::warn() << "--download: manifest-driven punch failed for " << rel
+                   << " (continuing without sparse reclaim)";
+      }
+    }
+
+    if (::rename(staging.c_str(), full.c_str()) != 0) {
+      xb::error() << "--download: rename " << staging << " -> " << full
+                  << " failed: " << strerror(errno);
+      ::unlink(staging.c_str());
+      return false;
+    }
+    xb::info() << "--download: wrote " << rel << " ("
+               << xtrabackup::utils::human_readable(body.size()) << ")";
+  }
+  return true;
+}
+
+bool xb_cloud_delete(bool force) {
+  if (g_ds_cloud_config.storage.empty()) {
+    xb::error() << "--delete requires --cloud-storage to be set";
+    return false;
+  }
+  if (g_ds_cloud_config.container.empty()) {
+    xb::error() << "--delete requires --cloud-bucket to be set";
+    return false;
+  }
+
+  auto hc = make_cloud_http_client();
+  auto store = build_object_store(hc.get());
+  if (!store) {
+    xb::error() << "--delete: unknown storage backend '"
+                << g_ds_cloud_config.storage << "'";
+    return false;
+  }
+  if (!probe_object_store(store.get(), g_ds_cloud_config.container)) {
+    return false;
+  }
+
+  /* Prefix = basename of target-dir, same as download / cloud_init. */
+  extern char *xtrabackup_target_dir;
+  const std::string prefix = basename_of(xtrabackup_target_dir);
+
+  std::vector<std::string> objects;
+  if (!store->list_objects_in_directory(g_ds_cloud_config.container, prefix,
+                                         objects)) {
+    xb::error() << "--delete: list failed";
+    return false;
+  }
+  if (objects.empty()) {
+    xb::info() << "--delete: no objects to remove under "
+               << g_ds_cloud_config.container << "/" << prefix;
+    return true;
+  }
+
+  if (!force) {
+    std::cerr << "About to delete " << objects.size() << " objects under "
+              << g_ds_cloud_config.container << "/" << prefix
+              << ". Type 'yes' to confirm: " << std::flush;
+    std::string line;
+    std::getline(std::cin, line);
+    if (line != "yes") {
+      xb::info() << "--delete: cancelled by user";
       return false;
     }
   }
 
+  for (const auto &obj : objects) {
+    if (!store->delete_object(g_ds_cloud_config.container, obj)) {
+      xb::error() << "--delete: failed to delete " << obj;
+      return false;
+    }
+  }
+  xb::info() << "--delete: removed " << objects.size() << " objects";
   return true;
 }
