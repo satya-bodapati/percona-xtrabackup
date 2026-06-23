@@ -160,10 +160,85 @@ std::unique_ptr<Object_store> build_object_store(Http_client *http_client) {
     return store;
   }
   if (c.storage == "swift") {
-    /* Swift requires Keystone auth first; not exercised on the Phase 2
-       MVP path. Skeleton stays here so the ctor compiles. */
-    return std::make_unique<Swift_object_store>(http_client, c.url,
-                                                c.session_token, c.max_retries,
+    /* Swift Keystone auth (PXB-3671 commit 3).  Mirrors xbcloud's flow:
+       normalize the auth URL to ".../v<N>/", run the temp_auth / v2 /
+       v3 dance, then construct the Swift_object_store from the returned
+       (storage_url, token).  --cloud-swift-storage-url overrides the
+       URL returned by Keystone (useful when the auth response points
+       to an internal endpoint). */
+    if (c.swift_auth_url.empty()) {
+      xb::error()
+          << "ds_cloud: --cloud-swift-auth-url is required when "
+             "--cloud-storage=swift";
+      return nullptr;
+    }
+    std::string auth_url = c.swift_auth_url;
+    if (auth_url.back() != '/') auth_url.push_back('/');
+
+    /* If the URL already carries /v<N>/ at the end, take that as the
+       auth version.  Otherwise append /v<auth_version>/.  Default is
+       v1 (TempAuth). */
+    std::string auth_version = c.swift_auth_version;
+    const char *valid_versions[] = {"/v1/",  "/v2/",   "/v3/",
+                                    "/v1.0/", "/v2.0/", "/v3.0/"};
+    bool versioned_url = false;
+    for (const char *v : valid_versions) {
+      size_t vl = strlen(v);
+      if (auth_url.size() >= vl &&
+          auth_url.compare(auth_url.size() - vl, vl, v) == 0) {
+        /* extract the version digit between '/v' and '/' (or '.') */
+        auth_version.assign(v + 2, strlen(v + 2) - 1);
+        versioned_url = true;
+        break;
+      }
+    }
+    if (!versioned_url) {
+      if (auth_version.empty()) auth_version = "1.0";
+      auth_url.append("v").append(auth_version).append("/");
+    }
+
+    Keystone_client keystone(http_client, auth_url);
+    if (!c.swift_key.empty()) keystone.set_key(c.swift_key);
+    if (!c.swift_user.empty()) keystone.set_user(c.swift_user);
+    if (!c.swift_password.empty()) keystone.set_password(c.swift_password);
+    if (!c.swift_tenant.empty()) keystone.set_tenant(c.swift_tenant);
+    if (!c.swift_tenant_id.empty()) keystone.set_tenant_id(c.swift_tenant_id);
+    if (!c.swift_domain.empty()) keystone.set_domain(c.swift_domain);
+    if (!c.swift_domain_id.empty()) keystone.set_domain_id(c.swift_domain_id);
+    if (!c.swift_project_domain.empty())
+      keystone.set_project_domain(c.swift_project_domain);
+    if (!c.swift_project_domain_id.empty())
+      keystone.set_project_domain_id(c.swift_project_domain_id);
+    if (!c.swift_project.empty()) keystone.set_project(c.swift_project);
+    if (!c.swift_project_id.empty())
+      keystone.set_project_id(c.swift_project_id);
+
+    Keystone_client::auth_info_t auth_info;
+    bool ok = false;
+    if (auth_version.empty() || auth_version[0] == '1') {
+      ok = keystone.temp_auth(auth_info);
+    } else if (auth_version[0] == '2') {
+      ok = keystone.auth_v2(c.swift_region, auth_info);
+    } else if (auth_version[0] == '3') {
+      ok = keystone.auth_v3(c.swift_region, auth_info);
+    } else {
+      xb::error() << "ds_cloud: unsupported --cloud-swift-auth-version '"
+                  << auth_version << "'";
+      return nullptr;
+    }
+    if (!ok) {
+      xb::error() << "ds_cloud: Keystone authentication failed (version "
+                  << auth_version << ")";
+      return nullptr;
+    }
+
+    if (!c.swift_storage_url.empty()) {
+      auth_info.url = c.swift_storage_url;
+    }
+    xb::info() << "ds_cloud: Swift object-store URL " << auth_info.url;
+
+    return std::make_unique<Swift_object_store>(http_client, auth_info.url,
+                                                auth_info.token, c.max_retries,
                                                 c.max_backoff);
   }
   return nullptr;

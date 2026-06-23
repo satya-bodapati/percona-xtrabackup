@@ -116,6 +116,28 @@ struct ds_cloud_config_t {
   std::map<std::string, std::string> extra_http_headers;
   std::vector<long> curl_retriable_errors;
   std::vector<long> http_retriable_errors;
+
+  /* Swift / OpenStack Keystone v3 auth chain (PXB-3671 commit 3).
+     1:1 with the equivalent xbcloud --swift-* options.  build_object_
+     store() (ds_cloud.cc) runs the Keystone dance from these at backup-
+     time to resolve (storage_url, token), then constructs the
+     Swift_object_store -- same flow as xbcloud's main(). */
+  std::string swift_user;
+  std::string swift_user_id;
+  std::string swift_password;
+  std::string swift_tenant;
+  std::string swift_tenant_id;
+  std::string swift_project;
+  std::string swift_project_id;
+  std::string swift_domain;
+  std::string swift_domain_id;
+  std::string swift_project_domain;
+  std::string swift_project_domain_id;
+  std::string swift_region;
+  std::string swift_storage_url;
+  std::string swift_auth_url;
+  std::string swift_key;
+  std::string swift_auth_version;  /* "1" | "2" | "3"; empty=1/TempAuth */
 };
 
 extern ds_cloud_config_t g_ds_cloud_config;

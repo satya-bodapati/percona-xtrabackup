@@ -334,6 +334,28 @@ static char *opt_cloud_curl_retriable_errors = nullptr;
 static char *opt_cloud_http_retriable_errors = nullptr;
 static std::vector<std::string> opt_cloud_headers;
 
+/* Swift (OpenStack object store) options -- Keystone v3 auth chain
+   ported 1:1 from xbcloud (PXB-3671 commit 3).  Each variable is the
+   same name as its xbcloud counterpart with the --cloud- prefix on the
+   option side. */
+static char *opt_cloud_swift_user = nullptr;
+static char *opt_cloud_swift_user_id = nullptr;
+static char *opt_cloud_swift_password = nullptr;
+static char *opt_cloud_swift_tenant = nullptr;
+static char *opt_cloud_swift_tenant_id = nullptr;
+static char *opt_cloud_swift_project = nullptr;
+static char *opt_cloud_swift_project_id = nullptr;
+static char *opt_cloud_swift_domain = nullptr;
+static char *opt_cloud_swift_domain_id = nullptr;
+static char *opt_cloud_swift_project_domain = nullptr;
+static char *opt_cloud_swift_project_domain_id = nullptr;
+static char *opt_cloud_swift_region = nullptr;
+static char *opt_cloud_swift_container = nullptr;
+static char *opt_cloud_swift_storage_url = nullptr;
+static char *opt_cloud_swift_auth_url = nullptr;
+static char *opt_cloud_swift_key = nullptr;
+static char *opt_cloud_swift_auth_version = nullptr;
+
 const char *cloud_s3_api_version_names[] = {"AUTO", "2", "4", NullS};
 TYPELIB cloud_s3_api_version_typelib = {
     array_elements(cloud_s3_api_version_names) - 1, "",
@@ -934,6 +956,24 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_CURL_RETRIABLE_ERRORS,
   OPT_XTRA_CLOUD_HTTP_RETRIABLE_ERRORS,
   OPT_XTRA_CLOUD_HEADER,
+  /* Swift / OpenStack Keystone v3 auth chain (PXB-3671 commit 3). */
+  OPT_XTRA_CLOUD_SWIFT_CONTAINER,
+  OPT_XTRA_CLOUD_SWIFT_AUTH_URL,
+  OPT_XTRA_CLOUD_SWIFT_KEY,
+  OPT_XTRA_CLOUD_SWIFT_USER,
+  OPT_XTRA_CLOUD_SWIFT_USER_ID,
+  OPT_XTRA_CLOUD_SWIFT_PASSWORD,
+  OPT_XTRA_CLOUD_SWIFT_TENANT,
+  OPT_XTRA_CLOUD_SWIFT_TENANT_ID,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT_ID,
+  OPT_XTRA_CLOUD_SWIFT_DOMAIN,
+  OPT_XTRA_CLOUD_SWIFT_DOMAIN_ID,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN_ID,
+  OPT_XTRA_CLOUD_SWIFT_REGION,
+  OPT_XTRA_CLOUD_SWIFT_STORAGE_URL,
+  OPT_XTRA_CLOUD_SWIFT_AUTH_VERSION,
 };
 
 struct my_option xb_client_options[] = {
@@ -1746,6 +1786,74 @@ struct my_option xb_client_options[] = {
      "Extra HTTP header to send with every cloud request, in 'Name: Value' "
      "form. May be repeated.",
      0, 0, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    /* Swift / OpenStack Keystone v3 auth chain (PXB-3671 commit 3).
+       1:1 with xbcloud's --swift-* options, just with --cloud- prefix.
+       --cloud-swift-container accepts BUCKET or BUCKET/PREFIX form via
+       the same parser as the other backends. */
+    {"cloud-swift-container", OPT_XTRA_CLOUD_SWIFT_CONTAINER,
+     "Swift container to store backups into. May be CONTAINER or "
+     "CONTAINER/PREFIX (same semantics as --cloud-s3-bucket).",
+     &opt_cloud_swift_container, &opt_cloud_swift_container, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-auth-url", OPT_XTRA_CLOUD_SWIFT_AUTH_URL,
+     "Base URL of the Swift / Keystone authentication service.",
+     &opt_cloud_swift_auth_url, &opt_cloud_swift_auth_url, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-key", OPT_XTRA_CLOUD_SWIFT_KEY, "Swift key (TempAuth).",
+     &opt_cloud_swift_key, &opt_cloud_swift_key, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-swift-user", OPT_XTRA_CLOUD_SWIFT_USER, "Swift user name.",
+     &opt_cloud_swift_user, &opt_cloud_swift_user, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-swift-user-id", OPT_XTRA_CLOUD_SWIFT_USER_ID, "Swift user ID.",
+     &opt_cloud_swift_user_id, &opt_cloud_swift_user_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-password", OPT_XTRA_CLOUD_SWIFT_PASSWORD,
+     "Password of the Keystone user.",
+     &opt_cloud_swift_password, &opt_cloud_swift_password, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-tenant", OPT_XTRA_CLOUD_SWIFT_TENANT,
+     "Tenant name (use --cloud-swift-tenant OR --cloud-swift-tenant-id, "
+     "not both).",
+     &opt_cloud_swift_tenant, &opt_cloud_swift_tenant, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-tenant-id", OPT_XTRA_CLOUD_SWIFT_TENANT_ID, "Tenant ID.",
+     &opt_cloud_swift_tenant_id, &opt_cloud_swift_tenant_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project", OPT_XTRA_CLOUD_SWIFT_PROJECT, "Project name.",
+     &opt_cloud_swift_project, &opt_cloud_swift_project, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project-id", OPT_XTRA_CLOUD_SWIFT_PROJECT_ID, "Project ID.",
+     &opt_cloud_swift_project_id, &opt_cloud_swift_project_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-domain", OPT_XTRA_CLOUD_SWIFT_DOMAIN, "User domain name.",
+     &opt_cloud_swift_domain, &opt_cloud_swift_domain, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-domain-id", OPT_XTRA_CLOUD_SWIFT_DOMAIN_ID,
+     "User domain ID.",
+     &opt_cloud_swift_domain_id, &opt_cloud_swift_domain_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project-domain", OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN,
+     "Project domain name.",
+     &opt_cloud_swift_project_domain, &opt_cloud_swift_project_domain, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project-domain-id", OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN_ID,
+     "Project domain ID.",
+     &opt_cloud_swift_project_domain_id, &opt_cloud_swift_project_domain_id,
+     0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-region", OPT_XTRA_CLOUD_SWIFT_REGION,
+     "Region for the Swift object-store endpoint.",
+     &opt_cloud_swift_region, &opt_cloud_swift_region, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-storage-url", OPT_XTRA_CLOUD_SWIFT_STORAGE_URL,
+     "Override the object-store URL returned by Keystone authentication.",
+     &opt_cloud_swift_storage_url, &opt_cloud_swift_storage_url, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-auth-version", OPT_XTRA_CLOUD_SWIFT_AUTH_VERSION,
+     "Swift authentication version (1, 2, or 3).  Default 1 (TempAuth).",
+     &opt_cloud_swift_auth_version, &opt_cloud_swift_auth_version, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 
     {"download", OPT_XTRA_CLOUD_DOWNLOAD,
      "Cloud lifecycle: fetch a previously uploaded backup from the cloud "
@@ -3869,6 +3977,23 @@ static void pick_cloud_env_vars() {
   get_env_value(opt_cloud_azure_access_key, "AZURE_ACCESS_KEY");
   get_env_value(opt_cloud_storage_class, "AZURE_STORAGE_CLASS");
   get_env_value(opt_cloud_azure_endpoint, "AZURE_ENDPOINT");
+
+  /* Swift / Keystone (OS_* env vars; xbcloud's get_env_args() uses
+     these too). */
+  get_env_value(opt_cloud_swift_auth_url, "OS_AUTH_URL");
+  get_env_value(opt_cloud_swift_tenant, "OS_TENANT_NAME");
+  get_env_value(opt_cloud_swift_tenant_id, "OS_TENANT_ID");
+  get_env_value(opt_cloud_swift_user, "OS_USERNAME");
+  get_env_value(opt_cloud_swift_password, "OS_PASSWORD");
+  get_env_value(opt_cloud_swift_project, "OS_PROJECT_NAME");
+  get_env_value(opt_cloud_swift_project_id, "OS_PROJECT_ID");
+  get_env_value(opt_cloud_swift_domain, "OS_USER_DOMAIN_NAME");
+  get_env_value(opt_cloud_swift_domain_id, "OS_USER_DOMAIN_ID");
+  get_env_value(opt_cloud_swift_project_domain, "OS_PROJECT_DOMAIN_NAME");
+  get_env_value(opt_cloud_swift_project_domain_id, "OS_PROJECT_DOMAIN_ID");
+  get_env_value(opt_cloud_swift_region, "OS_REGION_NAME");
+  get_env_value(opt_cloud_swift_storage_url, "OS_STORAGE_URL");
+  get_env_value(opt_cloud_swift_auth_version, "OS_AUTH_VERSION");
 }
 
 /* Bucket / prefix parser is in cloud_bucket_prefix.h so it can be
@@ -3898,6 +4023,8 @@ static void apply_cloud_options() {
       raw = opt_cloud_google_bucket;
     } else if (g_ds_cloud_config.storage == "azure") {
       raw = opt_cloud_azure_container_name;
+    } else if (g_ds_cloud_config.storage == "swift") {
+      raw = opt_cloud_swift_container;
     }
     if (raw != nullptr) {
       std::string bucket;
@@ -3975,6 +4102,34 @@ static void apply_cloud_options() {
       xb::warn() << "ignoring malformed --cloud-header '" << h << "'";
     }
   }
+
+  /* Swift / Keystone v3 (PXB-3671 commit 3). */
+  auto copy_swift_opt = [](const char *src, std::string &dst) {
+    if (src != nullptr) dst = src;
+  };
+  copy_swift_opt(opt_cloud_swift_user, g_ds_cloud_config.swift_user);
+  copy_swift_opt(opt_cloud_swift_user_id, g_ds_cloud_config.swift_user_id);
+  copy_swift_opt(opt_cloud_swift_password, g_ds_cloud_config.swift_password);
+  copy_swift_opt(opt_cloud_swift_tenant, g_ds_cloud_config.swift_tenant);
+  copy_swift_opt(opt_cloud_swift_tenant_id,
+                 g_ds_cloud_config.swift_tenant_id);
+  copy_swift_opt(opt_cloud_swift_project, g_ds_cloud_config.swift_project);
+  copy_swift_opt(opt_cloud_swift_project_id,
+                 g_ds_cloud_config.swift_project_id);
+  copy_swift_opt(opt_cloud_swift_domain, g_ds_cloud_config.swift_domain);
+  copy_swift_opt(opt_cloud_swift_domain_id,
+                 g_ds_cloud_config.swift_domain_id);
+  copy_swift_opt(opt_cloud_swift_project_domain,
+                 g_ds_cloud_config.swift_project_domain);
+  copy_swift_opt(opt_cloud_swift_project_domain_id,
+                 g_ds_cloud_config.swift_project_domain_id);
+  copy_swift_opt(opt_cloud_swift_region, g_ds_cloud_config.swift_region);
+  copy_swift_opt(opt_cloud_swift_storage_url,
+                 g_ds_cloud_config.swift_storage_url);
+  copy_swift_opt(opt_cloud_swift_auth_url, g_ds_cloud_config.swift_auth_url);
+  copy_swift_opt(opt_cloud_swift_key, g_ds_cloud_config.swift_key);
+  copy_swift_opt(opt_cloud_swift_auth_version,
+                 g_ds_cloud_config.swift_auth_version);
 }
 
 static void xtrabackup_init_datasinks(void) {

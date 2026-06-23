@@ -177,12 +177,16 @@ cloud_emu_xb_flags() {
            "--cloud-azure-access-key=$CLOUD_EMU_AZURE_KEY"
       ;;
     swift)
-      # Swift options will switch to --cloud-swift-* (Keystone v3) in
-      # a follow-up commit.  Until then, this helper does not emit a
-      # working swift command-line.  Tests that need swift will skip
-      # themselves until the swift batch lands.
-      die "cloud_emu_xb_flags: swift requires --cloud-swift-* options " \
-          "(not yet implemented); skip the test for now"
+      # openstackswift/saio defaults: TempAuth (--swift-auth-version 1)
+      # at /auth/v1.0 with credentials test:tester / testing.
+      # The CONTAINER value follows the same BUCKET/PREFIX parsing as
+      # the other backends.
+      echo "--cloud-storage=swift" \
+           "--cloud-swift-auth-url=$CLOUD_EMU_SWIFT_ENDPOINT" \
+           "--cloud-swift-auth-version=1.0" \
+           "--cloud-swift-user=$CLOUD_EMU_SWIFT_USER" \
+           "--cloud-swift-key=$CLOUD_EMU_SWIFT_KEY" \
+           "--cloud-swift-container=$bucket"
       ;;
     *) die "cloud_emu_xb_flags: unknown provider '$provider'" ;;
   esac
