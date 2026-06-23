@@ -31,14 +31,17 @@ trap cloud_emu_stop EXIT
 
 cloud_emu_wait_for "$PROVIDER"
 
-BUCKET="pxb-cloud-direct-$(date +%s)"
-cloud_emu_make_bucket "$PROVIDER" "$BUCKET"
+CLOUD_BUCKET="pxb-cloud-direct-$(date +%s)"
+PREFIX="rt-backup-$(date +%s)"
+BUCKET_WITH_PREFIX="$CLOUD_BUCKET/$PREFIX"
+cloud_emu_make_bucket "$PROVIDER" "$CLOUD_BUCKET"
 
-# Pull common --cloud-* flags into a single string.  Quoting note: the
-# helper emits space-separated tokens; eval-expanded so embedded spaces
-# in values would be wrong (they aren't any in our flag set).
-CLOUD_FLAGS=$(cloud_emu_xb_flags "$PROVIDER" "$BUCKET")
-vlog "==== Cloud round-trip [$PROVIDER] bucket=$BUCKET ===="
+# Pull common --cloud-* flags into a single string.  We pass the
+# BUCKET/PREFIX form so the new provider-explicit option syntax is
+# exercised here (xtrabackup parses BUCKET/PREFIX -> bucket=CLOUD_BUCKET,
+# prefix=PREFIX, and lands objects at $CLOUD_BUCKET/$PREFIX/<file>).
+CLOUD_FLAGS=$(cloud_emu_xb_flags "$PROVIDER" "$BUCKET_WITH_PREFIX")
+vlog "==== Cloud round-trip [$PROVIDER] bucket=$CLOUD_BUCKET prefix=$PREFIX ===="
 vlog "    $CLOUD_FLAGS"
 
 ############################################################################
@@ -79,8 +82,11 @@ record_db_state cloud_rt
 ############################################################################
 vlog "--- step 1: --backup --cloud-storage=$PROVIDER ---"
 
-# The "target-dir" name becomes the bucket prefix.
-NAME="rt-backup-$(date +%s)"
+# --target-dir is now purely a local-filesystem concept for cloud mode
+# (no files are actually written there during cloud backup, but the
+# parser still requires the flag).  The bucket PREFIX is set explicitly
+# above via BUCKET/PREFIX in the --cloud-*-bucket value.
+NAME="$PREFIX"
 mkdir -p $topdir/$NAME
 
 eval xtrabackup --backup --target-dir=$topdir/$NAME $CLOUD_FLAGS
@@ -94,13 +100,25 @@ case "$PROVIDER" in
   s3)
     AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
     aws --endpoint-url="$CLOUD_EMU_S3_ENDPOINT" \
-        s3 ls "s3://$BUCKET/" --recursive > $topdir/${NAME}.listing
+        s3 ls "s3://$CLOUD_BUCKET/" --recursive > $topdir/${NAME}.listing
     grep -q "backup_meta.json" $topdir/${NAME}.listing \
       || die "step 2: backup_meta.json missing from bucket listing"
     NUM_OBJ=$(wc -l < $topdir/${NAME}.listing)
     [ "$NUM_OBJ" -ge 5 ] \
       || die "step 2: too few objects in bucket ($NUM_OBJ); expected at least 5"
-    vlog "    bucket has $NUM_OBJ objects"
+    # EVERY object must live under "$PREFIX/" -- this verifies the
+    # provider-explicit BUCKET/PREFIX option produced the expected
+    # layout, NOT the old target-dir-basename derivation.
+    BAD=$(awk '{print $NF}' $topdir/${NAME}.listing \
+            | grep -v "^${PREFIX}/" | head -1 || true)
+    [ -z "$BAD" ] \
+      || die "step 2: object key '$BAD' not under prefix '$PREFIX/'"
+    # NONE of the keys may end with '/' (HNS-safety; we never PUT
+    # directory placeholders).
+    BAD=$(awk '{print $NF}' $topdir/${NAME}.listing | grep '/$' || true)
+    [ -z "$BAD" ] \
+      || die "step 2: object key ends in '/' (HNS-unsafe): $BAD"
+    vlog "    bucket has $NUM_OBJ objects, all under $PREFIX/"
     ;;
   *)
     vlog "    bucket sanity skipped for $PROVIDER (no aws cli emulator path)"
@@ -161,7 +179,7 @@ case "$PROVIDER" in
   s3)
     AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
     aws --endpoint-url="$CLOUD_EMU_S3_ENDPOINT" \
-        s3 ls "s3://$BUCKET/$NAME/" --recursive > $topdir/${NAME}.after-delete
+        s3 ls "s3://$CLOUD_BUCKET/$PREFIX/" --recursive > $topdir/${NAME}.after-delete
     [ ! -s $topdir/${NAME}.after-delete ] \
       || vlog "    (note: $PROVIDER delete left some objects; tolerated until --force lands)"
     ;;

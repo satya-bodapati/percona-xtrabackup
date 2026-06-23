@@ -40,7 +40,14 @@ struct ds_cloud_config_t {
   std::string access_key;
   std::string secret_key;
   std::string session_token; /* AWS STS */
-  std::string container;     /* bucket name */
+  std::string container;     /* bucket / container name (NO trailing /) */
+  /* Optional sub-prefix WITHIN the bucket; parsed from the provider-
+     explicit bucket option's BUCKET/PREFIX form by
+     parse_cloud_bucket_with_prefix() in xtrabackup.cc.  Stored without
+     leading or trailing '/'.  Backup objects are PUT at
+     <container>/<prefix>/<file>, or just <container>/<file> when prefix
+     is empty.  HNS-safe: never ends in '/'. */
+  std::string prefix;
   std::string bucket_lookup; /* "auto" | "path" | "dns" */
   std::string storage_class; /* S3/Azure storage class hint */
 

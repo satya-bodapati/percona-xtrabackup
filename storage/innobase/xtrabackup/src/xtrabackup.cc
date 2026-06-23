@@ -283,7 +283,14 @@ ulonglong xtrabackup_encrypt_chunk_size = 0;
    ds_cloud.cc reads at init/probe time. */
 static char *opt_cloud_storage = nullptr;
 static char *opt_cloud_url = nullptr;
-static char *opt_cloud_bucket = nullptr;
+/* Provider-explicit bucket/container options.  Each accepts BUCKET or
+   BUCKET/PREFIX form; the prefix part is stripped and stored separately
+   in g_ds_cloud_config.prefix after option parsing.  Only the option
+   matching --cloud-storage is consulted -- e.g. --cloud-s3-bucket is
+   ignored when --cloud-storage=azure. */
+static char *opt_cloud_s3_bucket = nullptr;
+static char *opt_cloud_google_bucket = nullptr;
+static char *opt_cloud_azure_container_name = nullptr;
 static char *opt_cloud_region = nullptr;
 static char *opt_cloud_endpoint = nullptr;
 static char *opt_cloud_access_key = nullptr;
@@ -875,7 +882,9 @@ enum options_xtrabackup {
      mirrored from xbcloud. */
   OPT_XTRA_CLOUD_STORAGE,
   OPT_XTRA_CLOUD_URL,
-  OPT_XTRA_CLOUD_BUCKET,
+  OPT_XTRA_CLOUD_S3_BUCKET,
+  OPT_XTRA_CLOUD_GOOGLE_BUCKET,
+  OPT_XTRA_CLOUD_AZURE_CONTAINER_NAME,
   OPT_XTRA_CLOUD_REGION,
   OPT_XTRA_CLOUD_ENDPOINT,
   OPT_XTRA_CLOUD_ACCESS_KEY,
@@ -1565,12 +1574,26 @@ struct my_option xb_client_options[] = {
      0, 0, 0, 0},
     {"cloud-url", OPT_XTRA_CLOUD_URL,
      "Cloud target URL (endpoint + optional path). Combined with "
-     "--cloud-bucket and --cloud-region to form per-object keys.",
+     "the provider's bucket option and --cloud-region to form per-object "
+     "keys.",
      &opt_cloud_url, &opt_cloud_url, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0,
      0},
-    {"cloud-bucket", OPT_XTRA_CLOUD_BUCKET, "Bucket / container name.",
-     &opt_cloud_bucket, &opt_cloud_bucket, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
-     0, 0, 0},
+    {"cloud-s3-bucket", OPT_XTRA_CLOUD_S3_BUCKET,
+     "S3 bucket name. May be BUCKET or BUCKET/PREFIX -- the prefix becomes "
+     "the subdirectory for this backup inside the bucket "
+     "(e.g. my-bucket/2026-06-23-full).",
+     &opt_cloud_s3_bucket, &opt_cloud_s3_bucket, 0, GET_STR, REQUIRED_ARG, 0,
+     0, 0, 0, 0, 0},
+    {"cloud-google-bucket", OPT_XTRA_CLOUD_GOOGLE_BUCKET,
+     "Google Cloud Storage bucket name. May be BUCKET or BUCKET/PREFIX "
+     "(same semantics as --cloud-s3-bucket).",
+     &opt_cloud_google_bucket, &opt_cloud_google_bucket, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-container-name", OPT_XTRA_CLOUD_AZURE_CONTAINER_NAME,
+     "Azure Blob Storage container name. May be CONTAINER or "
+     "CONTAINER/PREFIX (same semantics as --cloud-s3-bucket).",
+     &opt_cloud_azure_container_name, &opt_cloud_azure_container_name, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
     {"cloud-region", OPT_XTRA_CLOUD_REGION, "Region (S3-style).",
      &opt_cloud_region, &opt_cloud_region, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
      0, 0, 0},
@@ -3769,13 +3792,25 @@ static void pick_cloud_env_vars() {
   get_env_value(opt_cloud_region, "DEFAULT_REGION");
   get_env_value(opt_cloud_endpoint, "ENDPOINT");
 
+  /* S3 bucket env var (consistent with the per-provider option). */
+  get_env_value(opt_cloud_s3_bucket, "S3_BUCKET");
+
+  /* Google bucket env var. */
+  get_env_value(opt_cloud_google_bucket, "GOOGLE_BUCKET");
+
   /* Azure. */
   get_env_value(opt_cloud_azure_account, "AZURE_STORAGE_ACCOUNT");
-  get_env_value(opt_cloud_bucket, "AZURE_CONTAINER_NAME");
+  get_env_value(opt_cloud_azure_container_name, "AZURE_CONTAINER_NAME");
   get_env_value(opt_cloud_azure_access_key, "AZURE_ACCESS_KEY");
   get_env_value(opt_cloud_storage_class, "AZURE_STORAGE_CLASS");
   get_env_value(opt_cloud_azure_endpoint, "AZURE_ENDPOINT");
 }
+
+/* Bucket / prefix parser is in cloud_bucket_prefix.h so it can be
+   unit-tested independently of xtrabackup.cc.  See header for the
+   exact normalization rules (HNS-safe leading + trailing '/' strip,
+   embedded sub-prefix slashes preserved). */
+#include "cloud_bucket_prefix.h"
 
 /* Fold the raw --cloud-* option storage into g_ds_cloud_config that
    ds_cloud reads. Called from main() after the option parser runs. */
@@ -3783,7 +3818,31 @@ static void apply_cloud_options() {
   pick_cloud_env_vars();
   if (opt_cloud_storage) g_ds_cloud_config.storage = opt_cloud_storage;
   if (opt_cloud_url) g_ds_cloud_config.url = opt_cloud_url;
-  if (opt_cloud_bucket) g_ds_cloud_config.container = opt_cloud_bucket;
+
+  /* Route the provider-explicit bucket option matching --cloud-storage
+     into the shared g_ds_cloud_config.container slot, splitting off any
+     BUCKET/PREFIX form.  Only one of the three options is consulted --
+     mixing them is silently fine (the others are ignored).  Swift uses
+     --cloud-swift-container, handled in its own batch. */
+  {
+    const char *raw = nullptr;
+    if (g_ds_cloud_config.storage == "s3") {
+      raw = opt_cloud_s3_bucket;
+    } else if (g_ds_cloud_config.storage == "gcs" ||
+               g_ds_cloud_config.storage == "google") {
+      raw = opt_cloud_google_bucket;
+    } else if (g_ds_cloud_config.storage == "azure") {
+      raw = opt_cloud_azure_container_name;
+    }
+    if (raw != nullptr) {
+      std::string bucket;
+      std::string prefix;
+      xtrabackup::parse_cloud_bucket_with_prefix(raw, bucket, prefix);
+      g_ds_cloud_config.container = bucket;
+      g_ds_cloud_config.prefix = prefix;
+    }
+  }
+
   if (opt_cloud_region) g_ds_cloud_config.region = opt_cloud_region;
   if (opt_cloud_endpoint) g_ds_cloud_config.endpoint = opt_cloud_endpoint;
   if (opt_cloud_access_key)
@@ -3852,22 +3911,12 @@ static void xtrabackup_init_datasinks(void) {
       xb::error() << "ds_cloud probe failed; refusing to start the backup";
       exit(EXIT_FAILURE);
     }
-    /* Use the BASENAME of --target-dir as the bucket prefix.  Without
-       this, an absolute target-dir like "/tmp/2026-..." would land
-       cloud objects at keys "/tmp/2026-.../<file>" -- noisy and
-       confusing.  Strip leading "./" first, then take everything
-       after the final '/'. */
-    std::string prefix_buf(xtrabackup_target_dir);
-    while (prefix_buf.size() >= 2 && prefix_buf[0] == '.' &&
-           prefix_buf[1] == '/') {
-      prefix_buf.erase(0, 2);
-    }
-    while (!prefix_buf.empty() && prefix_buf.back() == '/') {
-      prefix_buf.pop_back();
-    }
-    size_t slash = prefix_buf.find_last_of('/');
-    if (slash != std::string::npos) prefix_buf.erase(0, slash + 1);
-    const char *prefix = prefix_buf.c_str();
+    /* Bucket prefix is taken from the provider-explicit bucket option
+       (the PREFIX part of BUCKET/PREFIX, parsed in apply_cloud_options).
+       --target-dir is purely a local-filesystem concept here and does
+       not influence cloud object keys.  Pass the prefix down via the
+       ds_create root arg so cloud_init sees it as backup_prefix. */
+    const char *prefix = g_ds_cloud_config.prefix.c_str();
     ds_data = ds_meta = ds_redo = ds_create(prefix, DS_TYPE_CLOUD);
     if (ds_data == nullptr) {
       xb::error() << "ds_cloud init failed";

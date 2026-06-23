@@ -105,10 +105,10 @@ run_direct() {
       --parallel="$PARALLEL" \
       --cloud-storage=s3 \
       --cloud-endpoint="$ENDPOINT_PROXY" \
-      --cloud-bucket="$BUCKET" \
+      --cloud-s3-bucket="$BUCKET" \
       --cloud-access-key=test --cloud-secret-key=test \
       --cloud-region=us-east-1 --cloud-bucket-lookup=path \
-      --cloud-parallel="$PARALLEL" \
+      --cloud-max-concurrent-requests="$PARALLEL" \
       >"$WORK/direct.out" 2>"$WORK/direct.err"
   local end=$(date +%s%N)
   echo $(( (end - start) / 1000000 ))

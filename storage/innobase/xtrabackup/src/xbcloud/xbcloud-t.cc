@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "azure.h"
+#include "cloud_bucket_prefix.h"
 #include "http.h"
 #include "s3.h"
 #include "swift.h"
@@ -588,4 +589,78 @@ TEST(azure_signer, storageClass) {
       req.headers().at("Authorization").c_str(),
       "SharedKey "
       "my-storage-account:vq5FiJaSj9mrTxeEyp3RRfptEFug4PEozawQG5A+ZHs=");
+}
+
+/* ---------------------------------------------------------------- *
+ * parse_cloud_bucket_with_prefix (cloud_bucket_prefix.h)
+ *
+ * BUCKET / BUCKET/PREFIX form parsing used by the provider-explicit
+ * cloud options (--cloud-s3-bucket, --cloud-google-bucket,
+ * --cloud-azure-container-name).  Critical invariants:
+ *   - bucket name never contains a '/'
+ *   - prefix never has a leading '/' (HNS would reject the resulting key)
+ *   - prefix never has a trailing '/' (HNS would treat as directory
+ *     placeholder rather than a blob)
+ *   - embedded '/' in the prefix is preserved (sub-directories)
+ * ---------------------------------------------------------------- */
+
+namespace {
+
+struct BucketPrefixCase {
+  const char *input;
+  const char *want_bucket;
+  const char *want_prefix;
+};
+
+void ExpectParse(const BucketPrefixCase &c) {
+  std::string bucket;
+  std::string prefix;
+  xtrabackup::parse_cloud_bucket_with_prefix(c.input, bucket, prefix);
+  EXPECT_EQ(bucket, c.want_bucket)
+      << "for input '" << c.input << "'";
+  EXPECT_EQ(prefix, c.want_prefix)
+      << "for input '" << c.input << "'";
+}
+
+}  // namespace
+
+TEST(parse_cloud_bucket_with_prefix, no_slash) {
+  ExpectParse({"my-bucket", "my-bucket", ""});
+  ExpectParse({"a", "a", ""});
+  ExpectParse({"", "", ""});
+}
+
+TEST(parse_cloud_bucket_with_prefix, single_level_prefix) {
+  ExpectParse({"my-bucket/foo", "my-bucket", "foo"});
+  ExpectParse({"my-bucket/2026-06-23-full", "my-bucket", "2026-06-23-full"});
+}
+
+TEST(parse_cloud_bucket_with_prefix, multi_level_prefix) {
+  ExpectParse({"my-bucket/a/b/c", "my-bucket", "a/b/c"});
+  ExpectParse({"my-bucket/year/month/day/backup", "my-bucket",
+               "year/month/day/backup"});
+}
+
+TEST(parse_cloud_bucket_with_prefix, trailing_slash_stripped_HNS_safety) {
+  /* HNS rejects keys ending in '/'; we MUST strip. */
+  ExpectParse({"my-bucket/foo/", "my-bucket", "foo"});
+  ExpectParse({"my-bucket/a/b/c/", "my-bucket", "a/b/c"});
+  ExpectParse({"my-bucket/foo///", "my-bucket", "foo"});
+}
+
+TEST(parse_cloud_bucket_with_prefix, leading_slash_stripped_HNS_safety) {
+  ExpectParse({"my-bucket//foo", "my-bucket", "foo"});
+  ExpectParse({"my-bucket///a/b", "my-bucket", "a/b"});
+}
+
+TEST(parse_cloud_bucket_with_prefix, only_slash_after_bucket) {
+  ExpectParse({"my-bucket/", "my-bucket", ""});
+  ExpectParse({"my-bucket///", "my-bucket", ""});
+}
+
+TEST(parse_cloud_bucket_with_prefix, embedded_slashes_preserved) {
+  /* Sub-prefix slashes are NOT collapsed; they're user-visible sub-
+     directories.  Only the leading and trailing '/' are stripped (the
+     HNS-relevant ones). */
+  ExpectParse({"my-bucket/a//b", "my-bucket", "a//b"});
 }

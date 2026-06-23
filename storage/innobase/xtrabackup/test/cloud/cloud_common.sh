@@ -95,11 +95,22 @@ cloud_create_bucket() {
 # Print the --cloud-* flag set for the configured backend.
 cloud_xtrabackup_flags() {
   case "$PXB_CLOUD_BACKEND" in
-    s3|gcs)
+    s3)
       cat <<EOF
---cloud-storage=$PXB_CLOUD_BACKEND
+--cloud-storage=s3
 --cloud-endpoint=$LOCALSTACK_ENDPOINT
---cloud-bucket=$PXB_BUCKET
+--cloud-s3-bucket=$PXB_BUCKET
+--cloud-region=$AWS_DEFAULT_REGION
+--cloud-access-key=$AWS_ACCESS_KEY_ID
+--cloud-secret-key=$AWS_SECRET_ACCESS_KEY
+--cloud-bucket-lookup=path
+EOF
+      ;;
+    gcs)
+      cat <<EOF
+--cloud-storage=gcs
+--cloud-endpoint=$LOCALSTACK_ENDPOINT
+--cloud-google-bucket=$PXB_BUCKET
 --cloud-region=$AWS_DEFAULT_REGION
 --cloud-access-key=$AWS_ACCESS_KEY_ID
 --cloud-secret-key=$AWS_SECRET_ACCESS_KEY
@@ -112,7 +123,7 @@ EOF
 --cloud-azure-endpoint=http://localhost:10000/devstoreaccount1
 --cloud-azure-account=devstoreaccount1
 --cloud-azure-access-key=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
---cloud-bucket=$PXB_BUCKET
+--cloud-azure-container-name=$PXB_BUCKET
 EOF
       ;;
     swift)

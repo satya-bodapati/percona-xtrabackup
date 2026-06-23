@@ -176,18 +176,6 @@ bool probe_object_store(Object_store *store, const std::string &container) {
   return true;
 }
 
-/* Take the basename of a path (everything after the final '/').
-   Used to derive the bucket prefix from xtrabackup_target_dir for
-   the lifecycle CLI commands (--download / --delete) so the
-   on-bucket layout matches what cloud_init() chose at backup time. */
-std::string basename_of(const std::string &path) {
-  std::string p = path;
-  while (!p.empty() && p.back() == '/') p.pop_back();
-  size_t slash = p.find_last_of('/');
-  if (slash != std::string::npos) p.erase(0, slash + 1);
-  return p;
-}
-
 /* Strip the bucket-prefix from a returned object key.  Object listings
    return "<prefix>/<rel-path>"; lifecycle CLI commands write to disk
    at "<target_dir>/<rel-path>", so they need the rel-path part. */
@@ -221,13 +209,25 @@ ds_ctxt_t *cloud_init(const char *root) {
     return nullptr;
   }
   if (g_ds_cloud_config.container.empty()) {
-    xb::error() << "ds_cloud: --cloud-bucket / container is not set";
+    xb::error() << "ds_cloud: bucket / container is not set (use one of "
+                   "--cloud-s3-bucket / --cloud-google-bucket / "
+                   "--cloud-azure-container-name / --cloud-swift-container "
+                   "matching --cloud-storage)";
     return nullptr;
   }
 
   auto cc = std::make_unique<ds_cloud_ctxt_t>();
   cc->container = g_ds_cloud_config.container;
+  /* Prefix WITHIN the bucket: prefer the explicit one parsed from the
+     provider-explicit bucket option (BUCKET/PREFIX form), and fall back
+     to whatever ds_create's caller passed as `root`.  In practice the
+     ds_cloud ds_create call passes g_ds_cloud_config.prefix.c_str() so
+     these are the same string; the fallback keeps the API contract
+     intact for any future internal caller. */
   cc->backup_prefix = (root != nullptr ? root : "");
+  if (cc->backup_prefix.empty() && !g_ds_cloud_config.prefix.empty()) {
+    cc->backup_prefix = g_ds_cloud_config.prefix;
+  }
 
   cc->http_client = make_cloud_http_client();
   cc->object_store = build_object_store(cc->http_client.get());
@@ -270,9 +270,17 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
                       [[maybe_unused]]) {
   auto *cc = static_cast<ds_cloud_ctxt_t *>(ctxt->ptr);
 
+  /* Normalize the relative path: strip any leading "./" so the cloud
+     object key is plain "<prefix>/dbname/t1.ibd" rather than
+     "<prefix>/./dbname/t1.ibd".  Leading slashes are also stripped,
+     for HNS-safety. */
+  const char *rel = path;
+  while (rel[0] == '.' && rel[1] == '/') rel += 2;
+  while (rel[0] == '/') ++rel;
+
   std::string object = cc->backup_prefix;
   if (!object.empty() && object.back() != '/') object.append("/");
-  object.append(path);
+  object.append(rel);
 
   auto *cf = new ds_cloud_file_t;
   cf->object_name = object;
@@ -556,7 +564,10 @@ bool xb_cloud_download(const std::string &target_dir) {
     return false;
   }
   if (g_ds_cloud_config.container.empty()) {
-    xb::error() << "--download requires --cloud-bucket to be set";
+    xb::error() << "--download requires the bucket / container option for "
+                   "the chosen --cloud-storage (one of --cloud-s3-bucket / "
+                   "--cloud-google-bucket / --cloud-azure-container-name / "
+                   "--cloud-swift-container)";
     return false;
   }
   if (mkdirp(target_dir.c_str(), 0755, MYF(0)) < 0 && errno != EEXIST) {
@@ -576,7 +587,10 @@ bool xb_cloud_download(const std::string &target_dir) {
     return false;
   }
 
-  const std::string prefix = basename_of(target_dir);
+  /* Cloud-side prefix: BUCKET/PREFIX as configured.  Local destination
+     for downloaded files: target_dir (the function arg).  The two are
+     decoupled. */
+  const std::string prefix = g_ds_cloud_config.prefix;
 
   std::vector<std::string> objects;
   if (!store->list_objects_in_directory(g_ds_cloud_config.container, prefix,
@@ -717,7 +731,10 @@ bool xb_cloud_delete(bool force) {
     return false;
   }
   if (g_ds_cloud_config.container.empty()) {
-    xb::error() << "--delete requires --cloud-bucket to be set";
+    xb::error() << "--delete requires the bucket / container option for "
+                   "the chosen --cloud-storage (one of --cloud-s3-bucket / "
+                   "--cloud-google-bucket / --cloud-azure-container-name / "
+                   "--cloud-swift-container)";
     return false;
   }
 
@@ -732,9 +749,9 @@ bool xb_cloud_delete(bool force) {
     return false;
   }
 
-  /* Prefix = basename of target-dir, same as download / cloud_init. */
-  extern char *xtrabackup_target_dir;
-  const std::string prefix = basename_of(xtrabackup_target_dir);
+  /* Prefix WITHIN the bucket comes from the BUCKET/PREFIX form of the
+     provider-explicit bucket option (same as backup / download). */
+  const std::string prefix = g_ds_cloud_config.prefix;
 
   std::vector<std::string> objects;
   if (!store->list_objects_in_directory(g_ds_cloud_config.container, prefix,

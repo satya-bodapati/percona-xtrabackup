@@ -19,9 +19,14 @@
 #   cloud_emu_env_for s3         # exports AWS_* / S3_* env vars
 #   xtrabackup --backup --cloud-storage=s3 \
 #       --cloud-endpoint=$S3_ENDPOINT \
-#       --cloud-bucket=my-bucket --cloud-region=us-east-1 \
-#       --cloud-bucket-lookup=path \
+#       --cloud-s3-bucket=my-bucket/2026-06-23-full \
+#       --cloud-region=us-east-1 --cloud-bucket-lookup=path \
 #       --target-dir=$topdir/B
+#
+# The provider-explicit bucket option (--cloud-s3-bucket / --cloud-google-
+# bucket / --cloud-azure-container-name) accepts either BUCKET or
+# BUCKET/PREFIX form -- the prefix portion is the sub-directory inside
+# the bucket where THIS backup's objects land.
 #
 # The emulator stack is shared across tests in a single test-run.  Each
 # test must use a unique bucket name (or call cloud_emu_reset_bucket).
@@ -141,11 +146,15 @@ cloud_emu_make_bucket() {
 # pass these directly into xtrabackup invocations.
 cloud_emu_xb_flags() {
   local provider="$1" bucket="$2"
+  # The `bucket' argument here may be a plain name ("my-bucket") OR
+  # a BUCKET/PREFIX combination ("my-bucket/2026-06-23-full"); the
+  # PREFIX part lands inside the bucket under a sub-directory and is
+  # parsed by xtrabackup's parse_cloud_bucket_with_prefix() helper.
   case "$provider" in
     s3)
       echo "--cloud-storage=s3" \
            "--cloud-endpoint=$CLOUD_EMU_S3_ENDPOINT" \
-           "--cloud-bucket=$bucket" \
+           "--cloud-s3-bucket=$bucket" \
            "--cloud-region=us-east-1" \
            "--cloud-bucket-lookup=path" \
            "--cloud-access-key=test" \
@@ -154,7 +163,7 @@ cloud_emu_xb_flags() {
     gcs)
       echo "--cloud-storage=gcs" \
            "--cloud-endpoint=$CLOUD_EMU_GCS_ENDPOINT" \
-           "--cloud-bucket=$bucket" \
+           "--cloud-google-bucket=$bucket" \
            "--cloud-region=auto" \
            "--cloud-bucket-lookup=path" \
            "--cloud-access-key=test" \
@@ -163,16 +172,17 @@ cloud_emu_xb_flags() {
     azure)
       echo "--cloud-storage=azure" \
            "--cloud-azure-endpoint=$CLOUD_EMU_AZURE_BLOB_ENDPOINT" \
-           "--cloud-bucket=$bucket" \
+           "--cloud-azure-container-name=$bucket" \
            "--cloud-azure-account=$CLOUD_EMU_AZURE_ACCOUNT" \
            "--cloud-azure-access-key=$CLOUD_EMU_AZURE_KEY"
       ;;
     swift)
-      echo "--cloud-storage=swift" \
-           "--cloud-url=$CLOUD_EMU_SWIFT_ENDPOINT" \
-           "--cloud-bucket=$bucket" \
-           "--cloud-access-key=$CLOUD_EMU_SWIFT_USER" \
-           "--cloud-secret-key=$CLOUD_EMU_SWIFT_KEY"
+      # Swift options will switch to --cloud-swift-* (Keystone v3) in
+      # a follow-up commit.  Until then, this helper does not emit a
+      # working swift command-line.  Tests that need swift will skip
+      # themselves until the swift batch lands.
+      die "cloud_emu_xb_flags: swift requires --cloud-swift-* options " \
+          "(not yet implemented); skip the test for now"
       ;;
     *) die "cloud_emu_xb_flags: unknown provider '$provider'" ;;
   esac
