@@ -101,6 +101,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "common.h"
 #include "datasink.h"
 #include "ds_cloud.h"
+#include "xbcloud/util.h"  /* xbcloud::parse_http_header */
 #include "file_context.h"
 #include "xtrabackup_version.h"
 
@@ -320,6 +321,23 @@ static ulonglong opt_cloud_multipart_rollover_threshold =
 static ulonglong opt_cloud_upload_buffer_size = 0;
 static ulong opt_cloud_rate_log_interval = 10;
 static bool opt_cloud_http_timing = false;
+
+/* xbcloud-parity knobs (PXB-3671 commit 2): verbose curl tracing, S3
+   API version override, Azure dev-storage (Azurite) shortcut, comma-
+   separated lists of curl/HTTP error codes to retry, multi-value
+   --cloud-header (each occurrence pushes onto opt_cloud_headers via the
+   get_one_option callback below). */
+static bool opt_cloud_verbose = false;
+static ulong opt_cloud_s3_api_version = 0;  /* AUTO=0 v2=1 v4=2 */
+static bool opt_cloud_azure_development_storage = false;
+static char *opt_cloud_curl_retriable_errors = nullptr;
+static char *opt_cloud_http_retriable_errors = nullptr;
+static std::vector<std::string> opt_cloud_headers;
+
+const char *cloud_s3_api_version_names[] = {"AUTO", "2", "4", NullS};
+TYPELIB cloud_s3_api_version_typelib = {
+    array_elements(cloud_s3_api_version_names) - 1, "",
+    cloud_s3_api_version_names, nullptr};
 
 size_t redo_memory = 0;
 ulint redo_frames = 0;
@@ -909,6 +927,13 @@ enum options_xtrabackup {
   OPT_XTRA_CLOUD_HTTP_TIMING,
   OPT_XTRA_CLOUD_DOWNLOAD,
   OPT_XTRA_CLOUD_DELETE,
+  /* xbcloud option-parity batch (PXB-3671 commit 2). */
+  OPT_XTRA_CLOUD_VERBOSE,
+  OPT_XTRA_CLOUD_S3_API_VERSION,
+  OPT_XTRA_CLOUD_AZURE_DEVELOPMENT_STORAGE,
+  OPT_XTRA_CLOUD_CURL_RETRIABLE_ERRORS,
+  OPT_XTRA_CLOUD_HTTP_RETRIABLE_ERRORS,
+  OPT_XTRA_CLOUD_HEADER,
 };
 
 struct my_option xb_client_options[] = {
@@ -1691,6 +1716,37 @@ struct my_option xb_client_options[] = {
      &opt_cloud_http_timing, &opt_cloud_http_timing, 0, GET_BOOL, NO_ARG, 0,
      0, 0, 0, 0, 0},
 
+    /* xbcloud option-parity batch (PXB-3671 commit 2). */
+    {"cloud-verbose", OPT_XTRA_CLOUD_VERBOSE,
+     "Turn on cURL tracing (CURLOPT_VERBOSE).",
+     &opt_cloud_verbose, &opt_cloud_verbose, 0, GET_BOOL, NO_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-s3-api-version", OPT_XTRA_CLOUD_S3_API_VERSION,
+     "S3 signing API version: AUTO|2|4.",
+     &opt_cloud_s3_api_version, &opt_cloud_s3_api_version,
+     &cloud_s3_api_version_typelib, GET_ENUM, REQUIRED_ARG, 0, 0, 0, 0, 0,
+     0},
+    {"cloud-azure-development-storage",
+     OPT_XTRA_CLOUD_AZURE_DEVELOPMENT_STORAGE,
+     "Run against the Azurite emulator with default credentials. Implies "
+     "endpoint http://127.0.0.1:10000 unless overridden by "
+     "--cloud-azure-endpoint.",
+     &opt_cloud_azure_development_storage,
+     &opt_cloud_azure_development_storage, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0,
+     0, 0},
+    {"cloud-curl-retriable-errors", OPT_XTRA_CLOUD_CURL_RETRIABLE_ERRORS,
+     "Comma-separated list of curl error codes to treat as retriable.",
+     &opt_cloud_curl_retriable_errors, &opt_cloud_curl_retriable_errors, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-http-retriable-errors", OPT_XTRA_CLOUD_HTTP_RETRIABLE_ERRORS,
+     "Comma-separated list of HTTP status codes to treat as retriable.",
+     &opt_cloud_http_retriable_errors, &opt_cloud_http_retriable_errors, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-header", OPT_XTRA_CLOUD_HEADER,
+     "Extra HTTP header to send with every cloud request, in 'Name: Value' "
+     "form. May be repeated.",
+     0, 0, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
     {"download", OPT_XTRA_CLOUD_DOWNLOAD,
      "Cloud lifecycle: fetch a previously uploaded backup from the cloud "
      "and reconstruct it under --target-dir locally. Requires --cloud-* "
@@ -2368,6 +2424,15 @@ bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
       break;
     case OPT_XTRA_USE_MEMORY:
       xtrabackup_use_memory_set = true;
+      break;
+
+    case OPT_XTRA_CLOUD_HEADER:
+      /* --cloud-header is repeatable; accumulate each occurrence into
+         opt_cloud_headers.  Validation (parse into Name/Value, reject
+         malformed) happens in apply_cloud_options(). */
+      if (argument != nullptr) {
+        opt_cloud_headers.emplace_back(argument);
+      }
       break;
 
 #include "client/include/sslopt-case.h"
@@ -3878,6 +3943,38 @@ static void apply_cloud_options() {
       opt_cloud_multipart_rollover_threshold;
   g_ds_cloud_config.rate_log_interval = opt_cloud_rate_log_interval;
   g_ds_cloud_config.http_timing = opt_cloud_http_timing;
+
+  /* xbcloud parity batch. */
+  g_ds_cloud_config.verbose = opt_cloud_verbose;
+  g_ds_cloud_config.s3_api_version = opt_cloud_s3_api_version;
+  g_ds_cloud_config.azure_development_storage =
+      opt_cloud_azure_development_storage;
+
+  /* Parse comma-separated --cloud-{curl,http}-retriable-errors. */
+  auto parse_csv_codes = [](const char *csv, std::vector<long> &out) {
+    if (csv == nullptr) return;
+    std::istringstream iss(csv);
+    for (std::string val; std::getline(iss, val, ',');) {
+      char *endp = nullptr;
+      long code = std::strtol(val.c_str(), &endp, 10);
+      if (endp != val.c_str() && *endp == '\0') out.push_back(code);
+    }
+  };
+  parse_csv_codes(opt_cloud_curl_retriable_errors,
+                  g_ds_cloud_config.curl_retriable_errors);
+  parse_csv_codes(opt_cloud_http_retriable_errors,
+                  g_ds_cloud_config.http_retriable_errors);
+
+  /* Parse --cloud-header into Name -> Value pairs (uses xbcloud's
+     existing parse_http_header helper from util.h). */
+  for (const std::string &h : opt_cloud_headers) {
+    auto kv = xbcloud::parse_http_header(h);
+    if (!kv.first.empty()) {
+      g_ds_cloud_config.extra_http_headers.insert(kv);
+    } else {
+      xb::warn() << "ignoring malformed --cloud-header '" << h << "'";
+    }
+  }
 }
 
 static void xtrabackup_init_datasinks(void) {

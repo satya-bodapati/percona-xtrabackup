@@ -15,7 +15,9 @@ the Free Software Foundation; version 2 of the License.
 #ifndef XB_DS_CLOUD_H
 #define XB_DS_CLOUD_H
 
+#include <map>
 #include <string>
+#include <vector>
 
 #include "datasink.h"
 #include "my_inttypes.h"
@@ -93,6 +95,27 @@ struct ds_cloud_config_t {
   /* Observability. */
   ulong rate_log_interval{10};
   bool http_timing{false};
+
+  /* xbcloud parity (PXB-3671 commit 2):
+       - verbose: CURLOPT_VERBOSE; libcurl prints request/response to
+         stderr.  Useful for debugging signing or TLS issues.
+       - s3_api_version: 0=AUTO, 1=v2, 2=v4.  Mirrors xbcloud's
+         --s3-api-version typelib position-for-position (kept in sync
+         via cloud_s3_api_version_names[] in xtrabackup.cc).
+       - azure_development_storage: shortcut for Azurite emulator
+         credentials; equivalent to passing the well-known dev account
+         / key triple.  Endpoint defaults to http://127.0.0.1:10000.
+       - extra_http_headers: extra Name->Value pairs added to every
+         cloud HTTP request.
+       - curl_retriable_errors / http_retriable_errors: extra error
+         codes that the retry/backoff loop should treat as transient
+         (in ADDITION to the built-in defaults). */
+  bool verbose{false};
+  ulong s3_api_version{0};
+  bool azure_development_storage{false};
+  std::map<std::string, std::string> extra_http_headers;
+  std::vector<long> curl_retriable_errors;
+  std::vector<long> http_retriable_errors;
 };
 
 extern ds_cloud_config_t g_ds_cloud_config;

@@ -110,6 +110,14 @@ std::unique_ptr<Http_client> make_cloud_http_client() {
   if (!g_ds_cloud_config.cacert.empty()) {
     hc->set_cacaert(g_ds_cloud_config.cacert);
   }
+  /* xbcloud parity wiring (PXB-3671 commit 2). */
+  if (g_ds_cloud_config.verbose) hc->set_verbose(true);
+  for (long code : g_ds_cloud_config.curl_retriable_errors) {
+    hc->set_curl_retriable_errors(static_cast<CURLcode>(code));
+  }
+  for (long code : g_ds_cloud_config.http_retriable_errors) {
+    hc->set_http_retriable_errors(code);
+  }
   return hc;
 }
 
@@ -123,18 +131,33 @@ std::unique_ptr<Object_store> build_object_store(Http_client *http_client) {
     if (c.bucket_lookup == "path") lookup = LOOKUP_PATH;
     else if (c.bucket_lookup == "dns") lookup = LOOKUP_DNS;
 
+    /* --cloud-s3-api-version: 0=AUTO 1=v2 2=v4 (matches the typelib
+       order in cloud_s3_api_version_names[] / xbcloud's identical
+       option). */
+    s3_api_version_t api_v = S3_V_AUTO;
+    if (c.s3_api_version == 1) api_v = S3_V2;
+    else if (c.s3_api_version == 2) api_v = S3_V4;
+
     std::string region_copy = c.region;
     auto store = std::make_unique<S3_object_store>(
         http_client, region_copy, c.access_key, c.secret_key,
         c.session_token, c.storage_class, c.max_retries, c.max_backoff,
-        c.endpoint, lookup, S3_V_AUTO);
+        c.endpoint, lookup, api_v);
+    if (!c.extra_http_headers.empty()) {
+      store->set_extra_http_headers(c.extra_http_headers);
+    }
     /* probe will set version + lookup on success */
     return store;
   }
   if (c.storage == "azure") {
-    return std::make_unique<Azure_object_store>(
-        http_client, c.azure_account, c.azure_access_key, false /* dev */,
-        c.storage_class, c.max_retries, c.max_backoff, c.azure_endpoint);
+    auto store = std::make_unique<Azure_object_store>(
+        http_client, c.azure_account, c.azure_access_key,
+        c.azure_development_storage, c.storage_class, c.max_retries,
+        c.max_backoff, c.azure_endpoint);
+    if (!c.extra_http_headers.empty()) {
+      store->set_extra_http_headers(c.extra_http_headers);
+    }
+    return store;
   }
   if (c.storage == "swift") {
     /* Swift requires Keystone auth first; not exercised on the Phase 2
