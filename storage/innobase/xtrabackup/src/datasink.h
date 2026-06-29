@@ -98,6 +98,14 @@ typedef struct {
   ds_open_track_manifest(); nullptr is the zero-overhead path used
   by every existing call site that just opens through ds_open(). */
   void *file_ctx = nullptr;
+  /* Running logical-file offset for sparse-aware writes.  ds_write
+  advances this by `len`; ds_write_sparse advances by
+  sum(sparse_map[i].skip + sparse_map[i].len).  Used as the base for
+  xb_files_jsonl::record_sparse_chunks so the per-file sparse_map array
+  has absolute offsets in the unpacked-file space.  Top-level
+  ds_file_t only; pipeline-internal files (wrappers) don't see the
+  sparse hooks and stay at zero. */
+  uint64_t logical_offset = 0;
 } ds_file_t;
 
 typedef struct {

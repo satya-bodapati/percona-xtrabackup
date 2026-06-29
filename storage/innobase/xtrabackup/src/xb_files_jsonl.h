@@ -89,6 +89,24 @@ alive until append_and_release is invoked on the parent
 file_ctx.  No-op (returns nullptr) when file_ctx is null. */
 void *open_section(void *file_ctx, const char *name);
 
+/* Record the holes carried by one ds_write_sparse() call as
+absolute-offset/length entries on the per-file sparse_map array.
+@p file_logical_offset is the byte position in the logical (pre-pack)
+file space where the current packed buffer would have started; each
+ds_sparse_chunk_t {skip, len} translates into a hole of length @c skip
+at the running offset (logical_offset += skip; then advance by len for
+the data run).  Aggregated across every ds_write_sparse call for the
+file, this rebuilds the full hole table that backup_files.jsonl will
+emit as the per-file sparse_map field, e.g.:
+
+  "sparse_map": [{"offset": 16384, "length": 1024}, ...]
+
+No-op when file_ctx is null.  Caller advances its own logical offset
+by sum(skip+len) for the next call. */
+void record_sparse_chunks(void *file_ctx, uint64_t file_logical_offset,
+                          size_t sparse_map_size,
+                          const ds_sparse_chunk_t *sparse_map);
+
 /* Serialise file_ctx to one JSONL line and append it via atomic
 O_APPEND.  Frees the document afterwards.  Called once per file
 by the top-level ds_close hook, after the close chain has fully

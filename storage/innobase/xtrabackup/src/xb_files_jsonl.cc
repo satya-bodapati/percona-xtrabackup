@@ -185,6 +185,44 @@ void set_uint32(void *file_ctx, const char *key, uint32_t value) {
   h->doc.AddMember(k, rapidjson::Value(value), alloc);
 }
 
+void record_sparse_chunks(void *file_ctx, uint64_t file_logical_offset,
+                          size_t sparse_map_size,
+                          const ds_sparse_chunk_t *sparse_map) {
+  if (file_ctx == nullptr || sparse_map_size == 0 || sparse_map == nullptr) {
+    return;
+  }
+  auto *h = as_holder(file_ctx);
+  auto &alloc = h->doc.GetAllocator();
+
+  /* Find-or-create the "sparse_map" array on the document. */
+  rapidjson::Value *arr = nullptr;
+  if (h->doc.HasMember("sparse_map")) {
+    arr = &h->doc["sparse_map"];
+  } else {
+    rapidjson::Value key("sparse_map", alloc);
+    rapidjson::Value v(rapidjson::kArrayType);
+    h->doc.AddMember(key, v, alloc);
+    arr = &h->doc["sparse_map"];
+  }
+
+  /* Walk the per-call sparse_map: each entry is {skip bytes of hole,
+  len bytes of data}.  We record holes only (non-zero skip).  The
+  caller-supplied file_logical_offset is where the buffer would start
+  in the unpacked file; we add skip+len as we move along. */
+  uint64_t off = file_logical_offset;
+  for (size_t i = 0; i < sparse_map_size; ++i) {
+    const size_t skip = sparse_map[i].skip;
+    const size_t len = sparse_map[i].len;
+    if (skip > 0) {
+      rapidjson::Value entry(rapidjson::kObjectType);
+      entry.AddMember("offset", rapidjson::Value(off), alloc);
+      entry.AddMember("length", rapidjson::Value(uint64_t{skip}), alloc);
+      arr->PushBack(entry, alloc);
+    }
+    off += skip + len;
+  }
+}
+
 void *open_section(void *file_ctx, const char *name) {
   if (file_ctx == nullptr) return nullptr;
   auto *h = as_holder(file_ctx);

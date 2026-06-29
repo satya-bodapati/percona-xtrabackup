@@ -217,6 +217,9 @@ int ds_write(ds_file_t *file, const void *buf, size_t len) {
   if (rc == 0 && file->uncomp_bytes != nullptr) {
     file->uncomp_bytes->add_uncompressed(len);
   }
+  if (rc == 0) {
+    file->logical_offset += len;
+  }
   return rc;
 }
 
@@ -239,13 +242,31 @@ int ds_write_sparse(ds_file_t *file, const void *buf, size_t len,
   if (file->datasink->write_sparse == nullptr) {
     return 1;
   }
+  /* Capture the logical offset before issuing the write; the
+  xb_files_jsonl annotator must record holes relative to where this
+  call's data would land in the unpacked-file space (i.e. the running
+  offset before this call). */
+  const uint64_t logical_start = file->logical_offset;
   const int rc = file->datasink->write_sparse(file, buf, len, sparse_map_size,
                                               sparse_map, punch_hole_supported);
-  if (rc == 0 && file->uncomp_bytes != nullptr) {
-    /* `len` is the packed (hole-excluded) payload size: callers pre-pack
-    the buffer and pass its length here, and local_write_sparse writes
-    exactly that many bytes across the sparse_map chunks. */
-    file->uncomp_bytes->add_uncompressed(len);
+  if (rc == 0) {
+    if (file->uncomp_bytes != nullptr) {
+      /* `len` is the packed (hole-excluded) payload size: callers
+      pre-pack the buffer and pass its length here. */
+      file->uncomp_bytes->add_uncompressed(len);
+    }
+    /* Record the holes into the per-file backup_files.jsonl Document.
+    The annotator is a no-op when file_ctx is null (zero-overhead for
+    untracked datasinks). */
+    xb_files_jsonl::record_sparse_chunks(file->file_ctx, logical_start,
+                                         sparse_map_size, sparse_map);
+    /* Advance the running offset by skip+len across all entries.
+    sparse_map covers the entire buffer for this call. */
+    uint64_t advance = 0;
+    for (size_t i = 0; i < sparse_map_size; ++i) {
+      advance += sparse_map[i].skip + sparse_map[i].len;
+    }
+    file->logical_offset += advance;
   }
   return rc;
 }
