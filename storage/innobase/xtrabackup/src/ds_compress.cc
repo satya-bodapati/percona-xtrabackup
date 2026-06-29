@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "datasink.h"
 #include "msg.h"
 #include "thread_pool.h"
+#include "xb_files_jsonl.h"
 
 #define COMPRESS_CHUNK_SIZE ((size_t)(xtrabackup_compress_chunk_size))
 #define MY_QLZ_COMPRESS_OVERHEAD 400
@@ -238,6 +239,11 @@ err:
 static int compress_close(ds_file_t *file) {
   qpress_compress_file_t *comp_file = (qpress_compress_file_t *)file->ptr;
   ds_file_t *dest_file = comp_file->dest_file;
+
+  /* Annotate the per-file backup_files.jsonl entry with the compress
+  algorithm.  file->file_ctx is the caller's outermost Document --
+  only the outermost ds_file_t in the open chain carries it. */
+  xb_files_jsonl::set_string(file->file_ctx, "compress", "quicklz");
 
   /* Write the qpress file trailer */
   ds_write(dest_file, "ENDSENDS", 8);

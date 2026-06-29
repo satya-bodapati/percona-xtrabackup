@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "datasink.h"
 #include "msg.h"
+#include "xb_files_jsonl.h"
 
 typedef struct {
   ZSTD_threadPool *thread_pool;
@@ -181,6 +182,8 @@ static int compress_close(ds_file_t *file) {
   ds_file_t *dest_file = comp_file->dest_file;
 
   ZSTD_freeCCtx(comp_file->cctx);
+
+  xb_files_jsonl::set_string(file->file_ctx, "compress", "zstd");
 
   int rc = ds_close(dest_file);
 

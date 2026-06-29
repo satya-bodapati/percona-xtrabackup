@@ -25,8 +25,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "datasink.h"
 #include "msg.h"
 #include "thread_pool.h"
+#include "xb_files_jsonl.h"
 #include "xbcrypt.h"
 #include "xbcrypt_common.h"
+
+extern const char *xtrabackup_encrypt_algo_names[];
 
 #define XB_CRYPT_CHUNK_SIZE ((size_t)(ds_encrypt_encrypt_chunk_size))
 
@@ -292,6 +295,12 @@ static int encrypt_close(ds_file_t *file) {
 
   crypt_file = (ds_encrypt_file_t *)file->ptr;
   dest_file = crypt_file->dest_file;
+
+  /* Record the encrypt algorithm in the per-file backup_files.jsonl
+  entry.  ds_encrypt_algo is the index into xtrabackup_encrypt_algo_names
+  (NONE / AES128 / AES192 / AES256). */
+  xb_files_jsonl::set_string(file->file_ctx, "encrypt",
+                             xtrabackup_encrypt_algo_names[ds_encrypt_algo]);
 
   rc = xb_crypt_write_close(crypt_file->xbcrypt_file);
 

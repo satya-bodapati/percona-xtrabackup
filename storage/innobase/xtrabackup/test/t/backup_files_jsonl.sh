@@ -70,18 +70,34 @@ validate_jsonl $topdir/backup3/backup_files.jsonl "case3"
 # No .xbcrypt suffix on the manifest file itself.
 [ ! -f "$topdir/backup3/backup_files.jsonl.xbcrypt" ] || \
   die "case3: backup_files.jsonl should not have .xbcrypt suffix"
+# Per-file encrypt annotation must be recorded.
+python3 - <<PY || die "case3: encrypt annotation missing"
+import json
+lines = [l for l in open("$topdir/backup3/backup_files.jsonl") if l.strip()]
+ok = any(json.loads(l).get("encrypt") == "AES256" for l in lines[1:])
+assert ok, "case3: no line records encrypt=AES256"
+print("case3: encrypt annotation ok")
+PY
 
 rm -rf $topdir/backup3 $topdir/lsn3
 
-vlog "=== Case 4: compressed target -- backup_files.jsonl stays plain ==="
+vlog "=== Case 4: compressed target (zstd) -- backup_files.jsonl stays plain ==="
 mkdir -p $topdir/lsn4
-xtrabackup --backup --compress --target-dir=$topdir/backup4 \
+xtrabackup --backup --compress=zstd --target-dir=$topdir/backup4 \
     --extra-lsndir=$topdir/lsn4
 validate_jsonl $topdir/backup4/backup_files.jsonl "case4"
 for ext in .qp .lz4 .zst .xbcrypt ; do
   [ ! -f "$topdir/backup4/backup_files.jsonl$ext" ] || \
     die "case4: backup_files.jsonl should not have $ext suffix"
 done
+# Per-file compress annotation must be recorded.
+python3 - <<PY || die "case4: compress annotation missing"
+import json
+lines = [l for l in open("$topdir/backup4/backup_files.jsonl") if l.strip()]
+ok = any(json.loads(l).get("compress") == "zstd" for l in lines[1:])
+assert ok, "case4: no line records compress=zstd"
+print("case4: compress annotation ok")
+PY
 
 rm -rf $topdir/backup4 $topdir/lsn4
 

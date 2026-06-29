@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "extra/xxhash/my_xxhash.h"
 #include "msg.h"
 #include "thread_pool.h"
+#include "xb_files_jsonl.h"
 
 #define COMPRESS_CHUNK_SIZE ((size_t)(xtrabackup_compress_chunk_size))
 
@@ -280,6 +281,8 @@ err:
 static int compress_close(ds_file_t *file) {
   lz4_compress_file_t *comp_file = (lz4_compress_file_t *)file->ptr;
   ds_file_t *dest_file = comp_file->dest_file;
+
+  xb_files_jsonl::set_string(file->file_ctx, "compress", "lz4");
 
   int rc = ds_close(dest_file);
 
