@@ -89,21 +89,35 @@ forward-compatible by construction.
 ## Offset is authoritative
 
 Every `PAYLOAD` and `SPARSE` chunk carries an `offset` field. As of
-the 9.7.1-rc1 spec change, this offset is **authoritative**:
+the 9.7.1-rc1 spec change, the offset is **authoritative for write
+placement**:
 
-> Chunks belonging to one path may arrive in any order, and a
-> reader must `pwrite()` the payload at the chunk's offset rather
-> than assume sequential delivery.
+> Producers emit `PAYLOAD` / `SPARSE` chunks for a given path in
+> offset-ascending order, with `EOF` last. Receivers may use the
+> offset field to `pwrite()` chunks to the destination file in any
+> order convenient to them — for example, a parallel worker pool
+> can dispatch chunks across threads as they're read, each calling
+> `pwrite()` at the chunk's offset.
 
-The wire format did not change — every writer in tree has always
-populated the field correctly. The spec note unlocks future
-out-of-order readers (e.g. xbstream extract using parallel pwrite,
-xbcloud get emitting chunks as parallel range-GETs complete)
-without a further format bump.
+What changes with this spec note: receivers no longer have to
+`write()` chunks sequentially. They can buffer, batch, and
+parallelize the file-reconstruction step.
 
-For now, every writer in tree emits chunks in increasing offset
-order per path. Implementations that wish to reorder may do so
-freely.
+What does **not** change:
+
+* Producers still write in order. The current senders all do,
+  and the receiver still relies on EOF being the last chunk for
+  a path to know the file is complete.
+* Multi-producer parallel writes into one path are not legalised
+  by this note — that would require a separate
+  `PARTIAL_EOF` marker so each producer can signal "I'm done with
+  my share" without claiming the whole file is closed. PARTIAL_EOF
+  is out of scope for this release; the design is sketched in
+  PXB-3754's design doc.
+
+The wire format does not change — every writer in tree has always
+populated the offset field correctly. The spec note simply documents
+that readers may now use it for parallel `pwrite()` placement.
 
 ## Self-describing across formats
 
