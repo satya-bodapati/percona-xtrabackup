@@ -100,6 +100,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "common.h"
 #include "datasink.h"
+#include "xb_files_jsonl.h"
 #include "xb_manifest.h"
 #include "xtrabackup_version.h"
 
@@ -3291,17 +3292,23 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
   }
 
   /* do not compress encrypted tablespaces */
-  if (cursor.is_encrypted) {
-    dstfile =
-        ds_open_track_uncomp(ds_uncompressed_data, dst_name, &cursor.statinfo,
-                             xb_global_track_uncomp_bytes());
-  } else {
-    dstfile = ds_open_track_uncomp(ds_data, dst_name, &cursor.statinfo,
-                                   xb_global_track_uncomp_bytes());
-  }
-  if (dstfile == NULL) {
-    xb::error() << "cannot open the destination stream for " << dst_name;
-    goto error;
+  {
+    void *fc = xb_files_jsonl::new_file_ctx(dst_name);
+    if (cursor.is_encrypted) {
+      dstfile = ds_open_with_ctx(ds_uncompressed_data, dst_name,
+                                  &cursor.statinfo, fc);
+    } else {
+      dstfile = ds_open_with_ctx(ds_data, dst_name, &cursor.statinfo, fc);
+    }
+    if (dstfile == NULL) {
+      xb::error() << "cannot open the destination stream for " << dst_name;
+      goto error;
+    }
+    ds_track_uncomp(dstfile, xb_global_track_uncomp_bytes());
+    /* Annotate the per-file context with InnoDB-specific fields the
+    consumer (backup_files.jsonl) will use to identify this file. */
+    ds_file_set_space(dstfile, (uint64_t)node->space->id,
+                      (uint32_t)cursor.page_size);
   }
 
   action = xb_get_copy_action();
@@ -4457,6 +4464,16 @@ void xtrabackup_backup_func(void) {
 
   xtrabackup_init_datasinks();
 
+  /* Stream the per-file manifest (backup_files.jsonl) into a staging
+  file under target_dir as each ds_close fires.  target_dir is always
+  created above (mkdir at line ~4458) even in --stream mode where it
+  is just scratch.  The staging file is consumed by finalize/publish
+  below before xtrabackup_destroy_datasinks. */
+  if (!xb_files_jsonl::begin(xtrabackup_target_dir)) {
+    xb::error() << "failed to start backup_files.jsonl writer";
+    exit(EXIT_FAILURE);
+  }
+
   if (!select_history()) {
     exit(EXIT_FAILURE);
   }
@@ -4705,6 +4722,22 @@ void xtrabackup_backup_func(void) {
                   << " under --extra-lsndir";
       exit(EXIT_FAILURE);
     }
+  }
+
+  /* backup_files.jsonl: close the staging file (every per-file line
+  was appended through ds_close as files were finished), then publish
+  through ds_meta via ds_open_single_object so it lands plain in any
+  output mode, and mirror under --extra-lsndir if set. */
+  xb_files_jsonl::finalize();
+  if (!xb_files_jsonl::publish(ds_meta)) {
+    xb::error() << "failed to publish " << XB_BACKUP_FILES_JSONL;
+    exit(EXIT_FAILURE);
+  }
+  if (xtrabackup_extra_lsndir &&
+      !xb_files_jsonl::write_to_dir(xtrabackup_extra_lsndir)) {
+    xb::error() << "failed to mirror " << XB_BACKUP_FILES_JSONL
+                << " under --extra-lsndir";
+    exit(EXIT_FAILURE);
   }
 
   xtrabackup_destroy_datasinks();
