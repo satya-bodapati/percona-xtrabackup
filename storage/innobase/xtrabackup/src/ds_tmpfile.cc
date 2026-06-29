@@ -47,7 +47,7 @@ typedef struct {
 
 static ds_ctxt_t *tmpfile_init(const char *root);
 static ds_file_t *tmpfile_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat);
+                               MY_STAT *mystat, void *file_ctx);
 static int tmpfile_write(ds_file_t *file, const void *buf, size_t len);
 static int tmpfile_close(ds_file_t *file);
 static void tmpfile_deinit(ds_ctxt_t *ctxt);
@@ -74,7 +74,8 @@ static ds_ctxt_t *tmpfile_init(const char *root) {
 }
 
 static ds_file_t *tmpfile_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat) {
+                               MY_STAT *mystat,
+                               void *file_ctx __attribute__((unused))) {
   ds_tmpfile_ctxt_t *tmpfile_ctxt;
   char tmp_path[FN_REFLEN];
   ds_tmp_file_t *tmp_file;

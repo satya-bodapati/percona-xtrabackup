@@ -285,7 +285,7 @@ uint ds_decompress_lz4_threads;
 
 static ds_ctxt_t *decompress_init(const char *root);
 static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
-                                  MY_STAT *mystat);
+                                  MY_STAT *mystat, void *file_ctx);
 static int decompress_write(ds_file_t *file, const void *buf, size_t len);
 static int decompress_close(ds_file_t *file);
 static void decompress_deinit(ds_ctxt_t *ctxt);
@@ -307,7 +307,7 @@ static ds_ctxt_t *decompress_init(const char *root) {
 }
 
 static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
-                                  MY_STAT *mystat) {
+                                  MY_STAT *mystat, void *file_ctx) {
   char new_name[FN_REFLEN];
   const char *lz4_ext_pos;
 
@@ -329,7 +329,7 @@ static ds_file_t *decompress_open(ds_ctxt_t *ctxt, const char *path,
     return NULL;
   }
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat);
+  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, new_name, mystat, file_ctx);
   if (dest_file == NULL) {
     return NULL;
   }

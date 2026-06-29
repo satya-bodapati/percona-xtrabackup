@@ -116,7 +116,7 @@ bool ds_decrypt_modify_file_extension = true;
 
 static ds_ctxt_t *decrypt_init(const char *root);
 static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat);
+                               MY_STAT *mystat, void *file_ctx);
 static int decrypt_write(ds_file_t *file, const void *buf, size_t len);
 static int decrypt_close(ds_file_t *file);
 static void decrypt_deinit(ds_ctxt_t *ctxt);
@@ -141,7 +141,7 @@ static ds_ctxt_t *decrypt_init(const char *root) {
 }
 
 static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat) {
+                               MY_STAT *mystat, void *file_ctx) {
   char new_name[FN_REFLEN];
   const char *used_name = path;
   const char *xbcrypt_ext_pos;
@@ -169,7 +169,7 @@ static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
     }
   }
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, used_name, mystat);
+  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, used_name, mystat, file_ctx);
   if (dest_file == NULL) {
     msg("decrypt: ds_open(\"%s\") failed.\n", used_name);
     return nullptr;

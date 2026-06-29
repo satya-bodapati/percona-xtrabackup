@@ -47,7 +47,7 @@ extern uint xtrabackup_compress_zstd_level;
 
 static ds_ctxt_t *compress_init(const char *root);
 static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat);
+                                MY_STAT *mystat, void *file_ctx);
 static int compress_write(ds_file_t *file, const void *buf, size_t len);
 static int compress_close(ds_file_t *file);
 static void compress_deinit(ds_ctxt_t *ctxt);
@@ -69,7 +69,7 @@ static ds_ctxt_t *compress_init(const char *root) {
 }
 
 static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat) {
+                                MY_STAT *mystat, void *file_ctx) {
   char new_name[FN_REFLEN];
 
   xb_ad(ctxt->pipe_ctxt != nullptr);
@@ -80,7 +80,7 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   /* Append the .zst extension to the filename */
   fn_format(new_name, path, "", ".zst", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open(dest_ctxt, new_name, mystat);
+  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, new_name, mystat, file_ctx);
   if (dest_file == nullptr) {
     return nullptr;
   }

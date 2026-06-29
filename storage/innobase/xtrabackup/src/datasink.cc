@@ -106,9 +106,14 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
 /************************************************************************
 Open a datasink file */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
+  return ds_open_with_ctx(ctxt, path, stat, nullptr);
+}
+
+ds_file_t *ds_open_with_ctx(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                            void *file_ctx) {
   ds_file_t *file;
 
-  file = ctxt->datasink->open(ctxt, path, stat);
+  file = ctxt->datasink->open(ctxt, path, stat, file_ctx);
   if (file != NULL) {
     file->datasink = ctxt->datasink;
     /* Save the ctxt this file is attached to so per-datasink state
@@ -118,6 +123,7 @@ ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat) {
     the ds_open_track_uncomp() convenience. */
     file->ctxt = ctxt;
     file->uncomp_bytes = nullptr;
+    file->file_ctx = file_ctx;
   }
 
   return file;

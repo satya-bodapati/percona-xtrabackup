@@ -89,7 +89,7 @@ bool ds_encrypt_modify_file_extension = true;
 
 static ds_ctxt_t *encrypt_init(const char *root);
 static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat);
+                               MY_STAT *mystat, void *file_ctx);
 static int encrypt_write(ds_file_t *file, const void *buf, size_t len);
 static int encrypt_close(ds_file_t *file);
 static void encrypt_deinit(ds_ctxt_t *ctxt);
@@ -132,7 +132,7 @@ static ds_ctxt_t *encrypt_init(const char *root) {
 }
 
 static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
-                               MY_STAT *mystat) {
+                               MY_STAT *mystat, void *file_ctx) {
   char new_name[FN_REFLEN];
   const char *used_name;
 
@@ -161,7 +161,7 @@ static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
     used_name = path;
   }
 
-  crypt_file->dest_file = ds_open(dest_ctxt, used_name, mystat);
+  crypt_file->dest_file = ds_open_with_ctx(dest_ctxt, used_name, mystat, file_ctx);
   if (crypt_file->dest_file == NULL) {
     msg("encrypt: ds_open(\"%s\") failed.\n", used_name);
     goto err;

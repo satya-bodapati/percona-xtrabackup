@@ -89,6 +89,15 @@ typedef struct {
   on this file.  NULL disables tracking.  Set by ds_track_uncomp() or
   by the ds_open_track_uncomp() convenience. */
   xb_uncomp_bytes *uncomp_bytes = nullptr;
+  /* Optional per-file context document threaded through every
+  datasink in the open chain.  When non-null, each datasink's close
+  may annotate the document with a section keyed by the datasink's
+  name (compress_zstd, encrypt_aes256_cbc, etc.); the top-level
+  ds_close serializes the document as one JSONL line into
+  backup_files.jsonl.  Owned by xb_manifest_writer when set via
+  ds_open_track_manifest(); nullptr is the zero-overhead path used
+  by every existing call site that just opens through ds_open(). */
+  void *file_ctx = nullptr;
 } ds_file_t;
 
 typedef struct {
@@ -120,7 +129,14 @@ struct ds_metric {
 
 struct datasink_struct {
   ds_ctxt_t *(*init)(const char *root);
-  ds_file_t *(*open)(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
+  /* Open a file through this datasink.  @p file_ctx is the optional
+  per-file context document (see ds_file_t::file_ctx); it must be
+  propagated unchanged to the wrapped datasink's open call so every
+  ds_file_t in the chain points at the same document.  Callers that
+  do not care about file-context tracking pass nullptr (and use the
+  ds_open() shim). */
+  ds_file_t *(*open)(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                     void *file_ctx);
   int (*write)(ds_file_t *file, const void *buf, size_t len);
   int (*write_sparse)(ds_file_t *file, const void *buf, size_t len,
                       size_t sparse_map_size,
@@ -174,8 +190,19 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type);
 Open a datasink file.  The returned file has uncompressed-byte tracking
 disabled (file->uncomp_bytes == NULL); callers that want per-byte
 accounting into a backup-run counter use ds_open_track_uncomp() or
-ds_track_uncomp(). */
+ds_track_uncomp().  Also: file->file_ctx is nullptr (no per-file
+context document attached) -- see ds_open_with_ctx() and
+ds_open_track_manifest() for the path that binds one. */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
+
+/** Open a datasink file with @p file_ctx threaded through every
+layer of the open chain so each datasink's ds_file_t in the
+constructed pipeline points at the same context document.  Use
+when a caller wants per-datasink annotators (in their close ops)
+to enrich one shared per-file Document that will be serialized
+to backup_files.jsonl at the top-level ds_close. */
+ds_file_t *ds_open_with_ctx(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
+                            void *file_ctx);
 
 /** Open a datasink file in "plain" mode -- bypass any configured
 ds_compress / ds_encrypt wrappers and write the bytes directly through

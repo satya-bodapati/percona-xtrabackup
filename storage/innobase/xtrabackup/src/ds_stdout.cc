@@ -38,7 +38,7 @@ struct ds_stdout_ctxt_t {
 
 static ds_ctxt_t *stdout_init(const char *root);
 static ds_file_t *stdout_open(ds_ctxt_t *ctxt, const char *path,
-                              MY_STAT *mystat);
+                              MY_STAT *mystat, void *file_ctx);
 static int stdout_write(ds_file_t *file, const void *buf, size_t len);
 static int stdout_close(ds_file_t *file);
 static void stdout_deinit(ds_ctxt_t *ctxt);
@@ -63,7 +63,8 @@ static ds_ctxt_t *stdout_init(const char *root) {
 
 static ds_file_t *stdout_open(ds_ctxt_t *ctxt [[maybe_unused]],
                               const char *path __attribute__((unused)),
-                              MY_STAT *mystat __attribute__((unused))) {
+                              MY_STAT *mystat __attribute__((unused)),
+                              void *file_ctx __attribute__((unused))) {
   ds_stdout_file_t *stdout_file;
   ds_file_t *file;
   size_t pathlen;

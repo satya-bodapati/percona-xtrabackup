@@ -51,7 +51,7 @@ General streaming interface */
 
 static ds_ctxt_t *xbstream_init(const char *root);
 static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat);
+                                MY_STAT *mystat, void *file_ctx);
 static ds_file_t *xbstream_open_single_object(ds_ctxt_t *ctxt, const char *path,
                                       MY_STAT *mystat);
 static int xbstream_write(ds_file_t *file, const void *buf, size_t len);
@@ -68,7 +68,8 @@ datasink_t datasink_xbstream = {
     &xbstream_open_single_object};
 
 static ds_file_t *xbstream_open_impl(ds_ctxt_t *ctxt, const char *path,
-                                     MY_STAT *mystat, uchar flags);
+                                     MY_STAT *mystat, uchar flags,
+                                     void *file_ctx);
 
 static ssize_t my_xbstream_write_callback(xb_wstream_file_t *f
                                           __attribute__((unused)),
@@ -124,8 +125,8 @@ err:
 }
 
 static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
-                                MY_STAT *mystat) {
-  return xbstream_open_impl(ctxt, path, mystat, 0);
+                                MY_STAT *mystat, void *file_ctx) {
+  return xbstream_open_impl(ctxt, path, mystat, 0, file_ctx);
 }
 
 static ds_file_t *xbstream_open_single_object(ds_ctxt_t *ctxt, const char *path,
@@ -133,11 +134,13 @@ static ds_file_t *xbstream_open_single_object(ds_ctxt_t *ctxt, const char *path,
   /* All chunks this writer emits (PAYLOAD, SPARSE, EOF) carry the
   SINGLE_OBJECT flag so xbcloud put accumulates them into one cloud
   object per path. */
-  return xbstream_open_impl(ctxt, path, mystat, XB_STREAM_FLAG_SINGLE_OBJECT);
+  return xbstream_open_impl(ctxt, path, mystat, XB_STREAM_FLAG_SINGLE_OBJECT,
+                            nullptr);
 }
 
 static ds_file_t *xbstream_open_impl(ds_ctxt_t *ctxt, const char *path,
-                                     MY_STAT *mystat, uchar flags) {
+                                     MY_STAT *mystat, uchar flags,
+                                     void *file_ctx) {
   ds_file_t *file;
   ds_parallel_stream_ctxt_t *parallel_stream_ctxt;
   ds_stream_file_t *stream_file;
@@ -158,7 +161,7 @@ static ds_file_t *xbstream_open_impl(ds_ctxt_t *ctxt, const char *path,
 
   stream_ctxt->mutex.lock();
   if (stream_ctxt->dest_file == NULL) {
-    stream_ctxt->dest_file = ds_open(dest_ctxt, path, mystat);
+    stream_ctxt->dest_file = ds_open_with_ctx(dest_ctxt, path, mystat, file_ctx);
     if (stream_ctxt->dest_file == NULL) {
       return NULL;
     }

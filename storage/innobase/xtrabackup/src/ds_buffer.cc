@@ -46,7 +46,7 @@ typedef struct {
 
 static ds_ctxt_t *buffer_init(const char *root);
 static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
-                              MY_STAT *mystat);
+                              MY_STAT *mystat, void *file_ctx);
 static int buffer_write(ds_file_t *file, const void *buf, size_t len);
 static int buffer_close(ds_file_t *file);
 static void buffer_deinit(ds_ctxt_t *ctxt);
@@ -79,7 +79,7 @@ static ds_ctxt_t *buffer_init(const char *root) {
 }
 
 static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
-                              MY_STAT *mystat) {
+                              MY_STAT *mystat, void *file_ctx) {
   ds_buffer_ctxt_t *buffer_ctxt;
   ds_ctxt_t *pipe_ctxt;
   ds_file_t *dst_file;
@@ -89,7 +89,7 @@ static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
   pipe_ctxt = ctxt->pipe_ctxt;
   xb_a(pipe_ctxt != NULL);
 
-  dst_file = ds_open(pipe_ctxt, path, mystat);
+  dst_file = ds_open_with_ctx(pipe_ctxt, path, mystat, file_ctx);
   if (dst_file == NULL) {
     exit(EXIT_FAILURE);
   }

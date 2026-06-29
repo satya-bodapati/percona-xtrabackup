@@ -50,7 +50,9 @@ struct ds_local_ctxt_t {
 
 static ds_ctxt_t *local_init(const char *root);
 static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
-                             MY_STAT *mystat);
+                             MY_STAT *mystat, void *file_ctx);
+static ds_file_t *local_open_single_object(ds_ctxt_t *ctxt, const char *path,
+                                           MY_STAT *mystat);
 static int local_write(ds_file_t *file, const void *buf, size_t len);
 static int local_write_sparse(ds_file_t *file, const void *buf, size_t len,
                               size_t sparse_map_size,
@@ -62,11 +64,13 @@ static void local_report_metrics(const ds_ctxt_t *ctxt,
                                  std::vector<ds_metric> &out);
 
 /* ds_local does not chunk: a single regular file on disk already is
-the "single object" representation.  open_single_object is therefore the same
-function as open. */
-datasink_t datasink_local = {&local_init,          &local_open,  &local_write,
-                             &local_write_sparse,  &local_close, &local_deinit,
-                             &local_report_metrics, &local_open};
+the "single object" representation.  open_single_object is therefore a thin
+3-arg wrapper around the 4-arg local_open (it passes nullptr for the
+per-file context). */
+datasink_t datasink_local = {&local_init,           &local_open,
+                             &local_write,          &local_write_sparse,
+                             &local_close,          &local_deinit,
+                             &local_report_metrics, &local_open_single_object};
 
 /**
   Checks if punch hole via fallocate is supported
@@ -120,7 +124,8 @@ static ds_ctxt_t *local_init(const char *root) {
 }
 
 static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
-                             MY_STAT *mystat __attribute__((unused))) {
+                             MY_STAT *mystat __attribute__((unused)),
+                             void *file_ctx __attribute__((unused))) {
   char fullpath[FN_REFLEN];
   char dirpath[FN_REFLEN];
   size_t dirpath_len;
@@ -161,6 +166,14 @@ static ds_file_t *local_open(ds_ctxt_t *ctxt, const char *path,
   file->ptr = local_file;
 
   return file;
+}
+
+/* 3-arg wrapper for the open_single_object vtable slot; ds_local does
+not chunk, so the implementation is identical to local_open with no
+per-file context. */
+static ds_file_t *local_open_single_object(ds_ctxt_t *ctxt, const char *path,
+                                           MY_STAT *mystat) {
+  return local_open(ctxt, path, mystat, nullptr);
 }
 
 static int local_write(ds_file_t *file, const void *buf, size_t len) {

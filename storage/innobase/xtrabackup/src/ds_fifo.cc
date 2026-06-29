@@ -83,7 +83,8 @@ typedef struct {
 extern uint xtrabackup_fifo_streams;
 extern uint xtrabackup_fifo_timeout;
 static ds_ctxt_t *fifo_init(const char *root);
-static ds_file_t *fifo_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat);
+static ds_file_t *fifo_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat,
+                            void *file_ctx);
 static int fifo_write(ds_file_t *file, const void *buf, size_t len);
 static int fifo_close(ds_file_t *file);
 static void fifo_deinit(ds_ctxt_t *ctxt);
@@ -163,7 +164,8 @@ static ds_ctxt_t *fifo_init(const char *root) {
 
 static ds_file_t *fifo_open(ds_ctxt_t *ctxt,
                             const char *path __attribute__((unused)),
-                            MY_STAT *mystat __attribute__((unused))) {
+                            MY_STAT *mystat __attribute__((unused)),
+                            void *file_ctx __attribute__((unused))) {
   ds_fifo_ctxt_t *fifo_context = (ds_fifo_ctxt_t *)ctxt->ptr;
   std::string fifo_path;
   File fd;
