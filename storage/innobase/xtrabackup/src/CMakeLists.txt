@@ -108,6 +108,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   space_map.cc
   dynamic_metadata_json.cc
   xb_manifest.cc
+  xb_files_jsonl.cc
   redo_log_consumer.cc
   redo_log.cc
   ${CMAKE_SOURCE_DIR}/sql-common/client_authentication.cc
