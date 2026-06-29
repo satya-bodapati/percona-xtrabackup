@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <curl/curl.h>
 #include <ev.h>
 #include <algorithm>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -269,15 +270,56 @@ class Http_connection {
   Http_response &response() const { return response_; }
 };
 
+/* PXB-3671: per-call timing aggregation for sync make_request.
+   Catalogs total wall time and curl phase breakdowns by HTTP method so
+   we can tell whether the multipart slowness vs legacy is per-call
+   handshake (CONNECT + APPCONNECT > 0 on every call -> no connection
+   reuse), DNS, signing, or the upstream itself. Dumped at xbcloud
+   shutdown via dump_summary(). */
+namespace http_timing {
+struct Bucket {
+  std::atomic<uint64_t> calls{0};
+  std::atomic<uint64_t> total_us{0};
+  std::atomic<uint64_t> namelookup_us{0};
+  std::atomic<uint64_t> connect_us{0};
+  std::atomic<uint64_t> appconnect_us{0};
+  std::atomic<uint64_t> pretransfer_us{0};
+  std::atomic<uint64_t> starttransfer_us{0};
+  std::atomic<uint64_t> calls_with_fresh_connect{0};
+};
+extern Bucket sync_get;
+extern Bucket sync_post;
+extern Bucket sync_put;
+extern Bucket sync_delete;
+extern Bucket sync_head;
+extern std::atomic<bool> enabled;
+
+void enable();
+void dump_summary();
+}  // namespace http_timing
+
 class Event_handler {
  private:
   struct ev_loop *loop{nullptr};
   struct ev_timer timer_event;
   struct ev_async queue_event;
   struct ev_timer kickoff_event;
+  /* Optional periodic rate-logger timer. Re-uses the existing libev
+     loop -- no new thread. Fires every rate_log_interval seconds, reads
+     the process-wide stats:: atomic counters, and logs throughput. */
+  struct ev_timer rate_log_event;
+  bool rate_log_enabled{false};
+  double rate_log_interval{0.0};
+  double rate_log_last_time{0.0};
+  uint64_t rate_log_last_uploaded{0};
+  uint64_t rate_log_last_appended{0};
   CURLM *curl_multi{nullptr};
   int running_handles{0};
   std::mutex queue_mutex;
+  /* PXB-3748: producer blocks on this cv when the queue is full; the cv is
+     notified by process_queue() whenever it pops items from the queue,
+     replacing the previous 50 ms sleep_for spin-wait. */
+  std::condition_variable queue_cv;
   size_t n_queued{0};
   size_t max_requests;
   bool final{false};
@@ -318,6 +360,8 @@ class Event_handler {
 
   static void ev_queue_callback(EV_P_ ev_async *ev, int revents);
 
+  static void ev_rate_log_callback(EV_P_ struct ev_timer *timer, int events);
+
   void main_loop();
 
   void process_queue();
@@ -330,6 +374,12 @@ class Event_handler {
   bool init();
 
   std::thread run();
+
+  /* Install a periodic rate-logger on the libev loop. Call after init()
+     and before run(). interval_secs == 0 disables. Logs one line every
+     interval_secs with bytes/s upload throughput and current in-flight
+     counts. Runs on the libev thread (no new thread spawned). */
+  void install_rate_logger(double interval_secs);
 
   void add_connection(Http_connection *conn, bool nowait = false);
 
@@ -354,7 +404,24 @@ class Http_client {
       CURLcode::CURLE_SSL_CONNECT_ERROR, CURLcode::CURLE_OBSOLETE16};
   std::vector<long> http_retriable_errors{503, 500, 504, 408};
   ulong timeout = 0;
+  ulong max_retries = 10;
+  ulong max_backoff = 300000;
   mutable curl_easy_unique_ptr curl{nullptr, curl_easy_cleanup};
+
+  /* PXB-3671: shared connection pool across per-call easy handles.
+     Without this, the thread-safety-driven per-call curl_easy pattern
+     issues a fresh DNS lookup + TCP + TLS handshake on every sync
+     request -- dominant cost over WAN.  CURLSH with CURL_LOCK_DATA_*
+     pools DNS / SSL_SESSION / CONNECT entries across handles. Locking
+     is provided by curl_share_mutex below.
+     Initialized lazily in init_share(); destroyed in destructor. */
+  mutable CURLSH *curl_share{nullptr};
+  /* libcurl invokes our lock/unlock for each shared resource. We use a
+     single mutex per resource type; the small array is indexed by the
+     libcurl CURL_LOCK_DATA_* enum value. */
+  mutable std::mutex curl_share_mutex[8];
+
+  void init_share() const;
 
   static void async_result_callback(async_callback_t user_callback,
                                     Event_handler *h, CURLcode rc,
@@ -364,15 +431,67 @@ class Http_client {
                      Http_response &response, curl_slist *&headers,
                      Http_connection::upload_state_t *upload_state) const;
 
+  /* CURLOPT_DEBUGFUNCTION callback. Replaces libcurl's default verbose
+     dump so we can redact credential-bearing headers (Authorization
+     embedding the AWS access key, X-Amz-Security-Token carrying STS
+     tokens) before they reach stderr. Verbose mode is a debugging
+     feature; redaction is non-negotiable for logs that customers /
+     support paste into tickets. */
+  static int redacting_debug_callback(CURL *handle, curl_infotype type,
+                                       char *data, size_t size,
+                                       void *userptr);
+
   static int upload_callback(char *ptr, size_t size, size_t nmemb, void *data);
 
  public:
-  Http_client() {}
-  virtual ~Http_client() {}
+  Http_client() { init_share(); }
+  virtual ~Http_client() {
+    if (curl_share != nullptr) curl_share_cleanup(curl_share);
+  }
   Http_client(const Http_client &) = delete;
 
   virtual bool make_request(const Http_request &request,
                             Http_response &response) const;
+
+  /* Overload that captures the curl rc so callers (notably
+     make_request_with_retry) can distinguish transient curl errors
+     (CURLE_OPERATION_TIMEDOUT, CURLE_RECV_ERROR, ...) from permanent
+     ones (CURLE_COULDNT_RESOLVE_HOST). */
+  virtual bool make_request(const Http_request &request,
+                            Http_response &response, CURLcode &out_rc) const;
+
+  /**
+   * Sync request with the same retriable-error + exponential-backoff
+   * loop that make_async_request runs around the part-upload path.
+   * Re-signs the request before each attempt so signature timestamps
+   * stay fresh across the backoff window (SigV4 has a 15-minute
+   * tolerance; long backoffs would otherwise exceed it).
+   *
+   * CLIENT must expose:
+   *   - get_max_retries() / get_max_backoff()
+   *   - hostname(container)
+   *   - signer->sign_request(host, container, req, time_t)
+   *   - retry_error(&resp, &flag) for body-level retry decisions
+   *
+   * This is the sync counterpart of Http_client::callback<>().
+   * Covers init / complete / abort / list / delete / container ops
+   * across S3, Azure, and Swift.
+   */
+  template <typename CLIENT>
+  bool make_request_with_retry(CLIENT *client, const std::string &container,
+                               const std::string &name,
+                               Http_request &request,
+                               Http_response &response) const;
+
+  /**
+   * Non-signing sync retry. For auth bootstrap calls where the request
+   * carries credentials directly (Keystone auth headers, EC2 IMDS
+   * tokens) rather than being signed via a signer. Useful when a token
+   * refresh hits a transient 5xx mid-backup -- without retry the whole
+   * backup aborts. Uses Http_client's own max_retries / max_backoff.
+   */
+  bool make_request_with_retry(Http_request &request, Http_response &response,
+                               const std::string &name) const;
 
   virtual bool make_async_request(const Http_request &request,
                                   Http_response &response, Event_handler *h,
@@ -388,6 +507,10 @@ class Http_client {
   void set_insecure(bool val) { insecure = val; }
   void set_timeout(ulong val) { timeout = val; }
   void set_cacaert(const std::string &val) { cacert = val; }
+  void set_max_retries(ulong val) { max_retries = val; }
+  void set_max_backoff(ulong val) { max_backoff = val; }
+  ulong get_max_retries() const { return max_retries; }
+  ulong get_max_backoff() const { return max_backoff; }
   void set_curl_retriable_errors(CURLcode code) {
     if (code < CURLcode::CURL_LAST) {
       if (std::find(curl_retriable_errors.begin(), curl_retriable_errors.end(),

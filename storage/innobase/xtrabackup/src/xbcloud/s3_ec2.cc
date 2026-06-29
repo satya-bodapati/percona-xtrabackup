@@ -106,7 +106,7 @@ bool S3_ec2_instance::fetch_metadata() {
   token_req.add_header("X-aws-ec2-metadata-token-ttl-seconds",
                        std::to_string(token_ttl));
   Http_response token_resp;
-  if (!http_client->make_request(token_req, token_resp)) {
+  if (!http_client->make_request_with_retry(token_req, token_resp, "imds-token")) {
     return false;
   }
 
@@ -119,7 +119,7 @@ bool S3_ec2_instance::fetch_metadata() {
                            metadata_url);
   profile_req.add_header("X-aws-ec2-metadata-token", token);
   Http_response profile_resp;
-  if (!http_client->make_request(profile_req, profile_resp)) {
+  if (!http_client->make_request_with_retry(profile_req, profile_resp, "imds-profile")) {
     return false;
   }
 
@@ -132,7 +132,7 @@ bool S3_ec2_instance::fetch_metadata() {
                             metadata_url + profile);
   metadata_req.add_header("X-aws-ec2-metadata-token", token);
   Http_response metadata_resp;
-  if (!http_client->make_request(metadata_req, metadata_resp)) {
+  if (!http_client->make_request_with_retry(metadata_req, metadata_resp, "imds-metadata")) {
     msg_ts("%s: Failed to fetch instance metadata\n", my_progname);
     return false;
   }
