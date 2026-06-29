@@ -653,6 +653,7 @@ enum options_xtrabackup {
   OPT_XTRA_PREPARE,
   OPT_XTRA_EXPORT,
   OPT_XTRA_APPLY_LOG_ONLY,
+  OPT_XTRA_APPLY_REDO_ONLY,
   OPT_XTRA_PRINT_PARAM,
   OPT_XTRA_USE_MEMORY,
   OPT_XTRA_USE_FREE_MEMORY_PCT,
@@ -851,8 +852,15 @@ struct my_option xb_client_options[] = {
      (G_PTR *)&xtrabackup_check_tables, (G_PTR *)&xtrabackup_check_tables, 0,
      GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"apply-log-only", OPT_XTRA_APPLY_LOG_ONLY,
-     "stop recovery process not to progress LSN after applying log when "
-     "prepare.",
+     "Stop recovery from advancing the LSN after applying redo during "
+     "--prepare. Used between incrementals in a chain. Synonym: "
+     "--apply-redo-only (preferred).",
+     (G_PTR *)&xtrabackup_apply_log_only, (G_PTR *)&xtrabackup_apply_log_only,
+     0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"apply-redo-only", OPT_XTRA_APPLY_REDO_ONLY,
+     "Stop recovery from advancing the LSN after applying redo during "
+     "--prepare. Used between incrementals in a chain. Synonym for the "
+     "legacy --apply-log-only.",
      (G_PTR *)&xtrabackup_apply_log_only, (G_PTR *)&xtrabackup_apply_log_only,
      0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"print-param", OPT_XTRA_PRINT_PARAM,
@@ -8084,6 +8092,12 @@ static void handle_options(int argc, char **argv, int *argc_client,
 
   if (tty_transition_key) {
     opt_transition_key = get_tty_password("Enter transition key: ");
+  }
+
+  if (check_if_param_set("apply-log-only")) {
+    xb::warn() << "--apply-log-only is the legacy name. Prefer "
+                  "--apply-redo-only going forward. Both options work and "
+                  "behave identically; --apply-log-only is not being removed.";
   }
 }
 
