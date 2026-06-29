@@ -23,6 +23,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "xb_files_jsonl.h"
 #include "ds_buffer.h"
+#ifndef XB_NO_CLOUD
+#include "ds_cloud.h"
+#endif
 #include "ds_compress.h"
 #include "ds_compress_lz4.h"
 #include "ds_compress_zstd.h"
@@ -87,6 +90,11 @@ ds_ctxt_t *ds_create(const char *root, ds_type_t type) {
     case DS_TYPE_BUFFER:
       ds = &datasink_buffer;
       break;
+#ifndef XB_NO_CLOUD
+    case DS_TYPE_CLOUD:
+      ds = &datasink_cloud;
+      break;
+#endif
     default:
       msg("Unknown datasink type: %d\n", type);
       xb_ad(0);

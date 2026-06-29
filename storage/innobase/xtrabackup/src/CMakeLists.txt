@@ -14,6 +14,8 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 INCLUDE(gcrypt)
+INCLUDE(curl)
+INCLUDE(libev)
 INCLUDE(procps)
 
 IF(DEFINED CACHE{WITH_VERSION_CHECK})
@@ -29,6 +31,7 @@ ENDIF()
 INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
 
 FIND_GCRYPT()
+FIND_EV()
 
 IF(NOT APPLE)
   FIND_PROCPS()
@@ -40,10 +43,12 @@ INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/storage/innobase/include
   ${CMAKE_SOURCE_DIR}/sql
+  ${CMAKE_SOURCE_DIR}/storage/innobase/xtrabackup/src
   ${CMAKE_SOURCE_DIR}/storage/innobase/xtrabackup/src/quicklz
   ${CMAKE_SOURCE_DIR}/storage/innobase/xtrabackup/src/crc
   ${GCRYPT_INCLUDE_DIR}
   ${CURL_INCLUDE_DIRS}
+  ${LIBEV_INCLUDE_DIRS}
   ${CMAKE_CURRENT_BINARY_DIR}
   )
 
@@ -80,6 +85,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   datasink.cc
   ddl_tracker.cc
   ds_buffer.cc
+  ds_cloud.cc
   ds_compress.cc
   ds_compress_lz4.cc
   ds_compress_zstd.cc
@@ -111,6 +117,8 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   xb_files_jsonl.cc
   redo_log_consumer.cc
   redo_log.cc
+  xbcloud/log_xbinfo.cc
+  $<TARGET_OBJECTS:xbcloud_internal>
   ${CMAKE_SOURCE_DIR}/sql-common/client_authentication.cc
   )
 
@@ -130,7 +138,10 @@ TARGET_LINK_LIBRARIES(xtrabackup
   minchassis
   keyring_common
   ${GCRYPT_LIBS}
+  ${LIBEV_LIBRARIES}
+  ext::curl
   ext::icu
+  extra::rapidjson
   crc
   )
 
@@ -191,6 +202,12 @@ SET_TARGET_PROPERTIES(xbstream
         PROPERTIES LINKER_LANGUAGE CXX
         )
 
+# xbstream does not need ds_cloud; gate it out so we don't drag libev
+# and the xbcloud OBJECT library into a tool that doesn't use them.
+# Must be TARGET-scoped: a per-source-file definition would leak into
+# xtrabackup's datasink.cc and break DS_TYPE_CLOUD wiring there.
+TARGET_COMPILE_DEFINITIONS(xbstream PRIVATE XB_NO_CLOUD)
+
 TARGET_LINK_LIBRARIES(xbstream
   ext::zstd
   ${GCRYPT_LIBS}
@@ -220,6 +237,9 @@ MYSQL_ADD_EXECUTABLE(xbcrypt
 SET_TARGET_PROPERTIES(xbcrypt
         PROPERTIES LINKER_LANGUAGE CXX
         )
+
+# xbcrypt does not need ds_cloud either.
+TARGET_COMPILE_DEFINITIONS(xbcrypt PRIVATE XB_NO_CLOUD)
 
 TARGET_LINK_LIBRARIES(xbcrypt
   ${GCRYPT_LIBS}

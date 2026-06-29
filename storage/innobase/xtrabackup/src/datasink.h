@@ -179,7 +179,12 @@ typedef enum {
   DS_TYPE_ENCRYPT,
   DS_TYPE_DECRYPT,
   DS_TYPE_TMPFILE,
-  DS_TYPE_BUFFER
+  DS_TYPE_BUFFER,
+  /* Direct cloud streaming -- ds_cloud uploads each file via the
+  xbcloud_internal multipart machinery to S3 / Azure / Swift / GCS.
+  Selected when xtrabackup --backup --cloud-storage=... is passed; see
+  ds_cloud.h for the configuration surface. */
+  DS_TYPE_CLOUD
 } ds_type_t;
 
 /************************************************************************
