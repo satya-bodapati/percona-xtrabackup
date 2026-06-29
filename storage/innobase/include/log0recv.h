@@ -50,6 +50,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <list>
 #include <unordered_map>
 #include <unordered_set>
+#ifdef XTRABACKUP
+#include <functional>
+#endif
 
 class MetadataRecover;
 class PersistentTableMetadata;
@@ -416,6 +419,31 @@ class MetadataRecover {
   /** If there is any metadata to be applied
   @return       true if any metadata to be applied, otherwise false */
   bool empty() const { return m_tables.empty(); }
+
+#ifdef XTRABACKUP
+  /** Iterate over collected metadata. Read-only access for PXB's
+  JSON sidecar serializer (PXB-2865). Server code does not use this.
+  @param[in] cb  callback invoked once per (table_id, metadata) pair */
+  void for_each_metadata(
+      const std::function<void(table_id_t,
+                               const PersistentTableMetadata &)> &cb) const;
+
+  /** Inject a metadata record from a non-redo source (PXB's JSON
+  sidecar loader, PXB-2865). Aggregation policy matches
+  AutoIncPersister::aggregate (dict0dict.cc): if the new entry's
+  version is strictly higher, it replaces autoinc + corrupt-index
+  list; if equal, we keep the larger autoinc and merge the
+  corrupt-index list; if lower, the new entry is ignored. Server
+  code does not use this.
+  @param[in] id            table id
+  @param[in] version       metadata version from the source
+  @param[in] autoinc       persistent AUTO_INC counter
+  @param[in] corrupt_ids   pointer to corrupt index identifiers (may be
+                           nullptr if n_corrupt == 0)
+  @param[in] n_corrupt     number of corrupt index identifiers */
+  void inject_metadata(table_id_t id, uint64_t version, uint64_t autoinc,
+                       const index_id_t *corrupt_ids, size_t n_corrupt);
+#endif /* XTRABACKUP */
 
  private:
   /** Get the dynamic metadata of a specified table,

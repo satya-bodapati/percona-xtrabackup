@@ -260,6 +260,39 @@ MetadataRecover::~MetadataRecover() {
   }
 }
 
+#ifdef XTRABACKUP
+void MetadataRecover::for_each_metadata(
+    const std::function<void(table_id_t,
+                             const PersistentTableMetadata &)> &cb) const {
+  for (const auto &kv : m_tables) {
+    cb(kv.first, *kv.second);
+  }
+}
+
+void MetadataRecover::inject_metadata(table_id_t id, uint64_t version,
+                                      uint64_t autoinc,
+                                      const index_id_t *corrupt_ids,
+                                      size_t n_corrupt) {
+  PersistentTableMetadata *m = getMetadata(id);
+  if (version > m->get_version()) {
+    /* Strictly newer: replace autoinc + version; append corrupt ids. */
+    m->set_version(version);
+    m->set_autoinc(autoinc);
+    for (size_t i = 0; i < n_corrupt; ++i) {
+      m->add_corrupted_index(corrupt_ids[i]);
+    }
+  } else if (version == m->get_version()) {
+    /* Tie: keep larger autoinc; merge corrupt ids. Matches
+    AutoIncPersister::aggregate behavior. */
+    m->set_autoinc_if_bigger(autoinc);
+    for (size_t i = 0; i < n_corrupt; ++i) {
+      m->add_corrupted_index(corrupt_ids[i]);
+    }
+  }
+  /* Older version: ignore. */
+}
+#endif /* XTRABACKUP */
+
 /** Get the dynamic metadata of a specified table, create a new one
 if not exist
 @param[in]      id      table id
