@@ -140,13 +140,18 @@ typedef struct {
   size_t length;
   size_t raw_length;
   /* Authoritative write position for this chunk's payload within the
-  logical file identified by path.  Readers must use pwrite() (or
-  equivalent) at this offset, not assume sequential delivery: future
-  producers (xbcloud get doing parallel ranged GETs, or any source
-  feeding multiple xbstream chunks in flight) may emit chunks for the
-  same path out of order.  Current senders still emit in order; this
-  spec note enables out-of-order readers without a further format
-  bump. */
+  logical file identified by path.  Producers emit PAYLOAD/SPARSE
+  chunks in offset-ascending order, with EOF as the last chunk for
+  the path.  Readers therefore see in-order arrival on the wire and
+  EOF still signals "no more chunks for this path".  What changes
+  with this spec note is that readers MAY pwrite() received chunks
+  to the destination file in any order convenient to them
+  (e.g. xbstream -x can dispatch chunks to a worker pool that
+  pwrites concurrently at the chunk-carried offset), instead of
+  assuming each chunk lands sequentially in the order it was read.
+  No format bytes change.  Multi-producer parallel writes into one
+  path would require a PARTIAL_EOF marker, which is out of scope
+  for this release. */
   my_off_t offset;
   my_off_t checksum_offset;
   void *data;
