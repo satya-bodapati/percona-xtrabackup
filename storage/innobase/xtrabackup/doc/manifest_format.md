@@ -197,18 +197,16 @@ itself is forward-additive.
 
 ## Future direction
 
-This file is the entry point of a larger manifest framework planned
-for the next release alongside ds_cloud direct streaming:
+This file is the entry point of a larger manifest framework:
 
-* **`backup_files.jsonl`**: a streaming NDJSON file with one entry
-  per backup file. Lines carry path, space_id+page_size (InnoDB
-  data files), per-datasink section (transform stats), sparse
-  regions, segments for ds_cloud rollover, and optional sha256.
-* **FileContext on `ds_file_t`**: a per-file rapidjson document
-  travels with the file through the datasink pipeline. Each
-  transformer enriches it with its own section on close
-  (compress_zstd, encrypt_aes256_cbc, ds_cloud, ...) and the
-  top-level ds_close serializes it into `backup_files.jsonl`.
+* **`backup_files.jsonl`** *(landed)*: a streaming NDJSON file with
+  one entry per backup file. Lines carry path, space_id+page_size
+  (InnoDB data files), and per-datasink annotations (compress=,
+  encrypt=). See [backup_files_jsonl_format.md](backup_files_jsonl_format.md).
+* **FileContext on `ds_file_t`** *(landed)*: a per-file rapidjson
+  Document travels with the file through the datasink pipeline.
+  Each wrapper enriches it on close (`compress`, `encrypt`) and the
+  top-level `ds_close` serialises it into `backup_files.jsonl`.
 * **`--sha256`**: opt-in per-file checksums computed by a
   stats_tail datasink stage on the final transformed bytes.
 * **`--verify`**: parses the manifest pair and validates per-file

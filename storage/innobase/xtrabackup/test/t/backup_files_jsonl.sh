@@ -41,6 +41,15 @@ mkdir -p $topdir/lsn1
 xtrabackup --backup --target-dir=$topdir/backup1 --extra-lsndir=$topdir/lsn1
 validate_jsonl $topdir/backup1/backup_files.jsonl "case1-target"
 validate_jsonl $topdir/lsn1/backup_files.jsonl "case1-lsn"
+# At least one InnoDB tablespace entry must carry space_id + page_size.
+python3 - <<PY || die "case1: no entry has space_id + page_size"
+import json
+lines = [l for l in open("$topdir/backup1/backup_files.jsonl") if l.strip()]
+ok = any("space_id" in json.loads(l) and "page_size" in json.loads(l)
+         for l in lines[1:])
+assert ok, "case1: no InnoDB entry has space_id + page_size"
+print("case1: space_id / page_size annotation ok")
+PY
 diff -q $topdir/backup1/backup_files.jsonl $topdir/lsn1/backup_files.jsonl \
   || die "case1: target-dir and extra-lsndir backup_files.jsonl differ"
 # Hidden staging file must be cleaned up.
