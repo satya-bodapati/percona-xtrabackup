@@ -100,8 +100,10 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "common.h"
 #include "datasink.h"
+#include "ds_cloud.h"
 #include "xb_files_jsonl.h"
 #include "xb_manifest.h"
+#include "xbcloud/util.h" /* xbcloud::parse_http_header */
 #include "xtrabackup_version.h"
 
 #include "backup_copy.h"
@@ -163,6 +165,14 @@ bool xtrabackup_copy_back = false;
 bool xtrabackup_move_back = false;
 bool xtrabackup_decrypt_decompress = false;
 bool xtrabackup_print_param = false;
+
+/* PXB-3671: cloud lifecycle modes. --download fetches a previously
+   uploaded backup from the cloud back to --target-dir. --delete removes
+   a backup's objects from the cloud. Both are top-level modes; the
+   --backup mode itself remains the way to PUSH a backup to the cloud
+   (via --cloud-storage). */
+bool xtrabackup_cloud_download = false;
+bool xtrabackup_cloud_delete = false;
 
 bool xtrabackup_export = false;
 bool xtrabackup_apply_log_only = false;
@@ -269,6 +279,85 @@ char *xtrabackup_encrypt_key = NULL;
 char *xtrabackup_encrypt_key_file = NULL;
 uint xtrabackup_encrypt_threads;
 ulonglong xtrabackup_encrypt_chunk_size = 0;
+
+/* PXB-3671 ds_cloud raw option storage. After option parsing the values
+   are folded into the global ds_cloud_config_t (g_ds_cloud_config) which
+   ds_cloud.cc reads at init/probe time. */
+static char *opt_cloud_storage = nullptr;
+static char *opt_cloud_url = nullptr;
+/* Provider-explicit bucket/container options.  Each accepts BUCKET or
+   BUCKET/PREFIX form; the prefix part is stripped and stored separately
+   in g_ds_cloud_config.prefix after option parsing.  Only the option
+   matching --cloud-storage is consulted -- e.g. --cloud-s3-bucket is
+   ignored when --cloud-storage=azure. */
+static char *opt_cloud_s3_bucket = nullptr;
+static char *opt_cloud_google_bucket = nullptr;
+static char *opt_cloud_azure_container_name = nullptr;
+static char *opt_cloud_region = nullptr;
+static char *opt_cloud_endpoint = nullptr;
+static char *opt_cloud_access_key = nullptr;
+static char *opt_cloud_secret_key = nullptr;
+static char *opt_cloud_session_token = nullptr;
+static char *opt_cloud_bucket_lookup = nullptr;
+static char *opt_cloud_storage_class = nullptr;
+static char *opt_cloud_azure_account = nullptr;
+static char *opt_cloud_azure_access_key = nullptr;
+static char *opt_cloud_azure_endpoint = nullptr;
+static bool opt_cloud_insecure = false;
+static char *opt_cloud_cacert = nullptr;
+static ulong opt_cloud_timeout = 120;
+static ulong opt_cloud_max_retries = 10;
+static ulong opt_cloud_max_backoff = 300000;
+/* Default 16 -- matches aws-cli's max_concurrent_requests philosophy.
+   Decoupled from --parallel: data-copy threads (--parallel) and HTTP
+   request concurrency are different resources. */
+static ulong opt_cloud_max_concurrent_requests = 16;
+static ulonglong opt_cloud_multipart_part_size = 0;
+static ulonglong opt_cloud_multipart_threshold = 16ULL * 1024 * 1024;
+static ulonglong opt_cloud_multipart_rollover_threshold =
+    5ULL * 1024 * 1024 * 1024 * 1024;
+/* 0 = unlimited (memory grows with concurrent * part_size, like
+   aws-cli).  Non-zero: total in-flight bytes cap across all writers;
+   system auto-shrinks part_size and concurrency to fit. */
+static ulonglong opt_cloud_upload_buffer_size = 0;
+static ulong opt_cloud_rate_log_interval = 10;
+static bool opt_cloud_http_timing = false;
+
+/* xbcloud-parity knobs: verbose curl tracing, S3 API version override,
+   Azure dev-storage (Azurite) shortcut, comma-separated lists of curl
+   /HTTP error codes to retry, multi-value --cloud-header. */
+static bool opt_cloud_verbose = false;
+static ulong opt_cloud_s3_api_version = 0;  /* AUTO=0 v2=1 v4=2 */
+static bool opt_cloud_azure_development_storage = false;
+static char *opt_cloud_curl_retriable_errors = nullptr;
+static char *opt_cloud_http_retriable_errors = nullptr;
+static std::vector<std::string> opt_cloud_headers;
+
+/* Swift (OpenStack object store) options -- Keystone v3 auth chain
+   ported 1:1 from xbcloud.  Each variable is the same name as its
+   xbcloud counterpart with the --cloud- prefix on the option side. */
+static char *opt_cloud_swift_user = nullptr;
+static char *opt_cloud_swift_user_id = nullptr;
+static char *opt_cloud_swift_password = nullptr;
+static char *opt_cloud_swift_tenant = nullptr;
+static char *opt_cloud_swift_tenant_id = nullptr;
+static char *opt_cloud_swift_project = nullptr;
+static char *opt_cloud_swift_project_id = nullptr;
+static char *opt_cloud_swift_domain = nullptr;
+static char *opt_cloud_swift_domain_id = nullptr;
+static char *opt_cloud_swift_project_domain = nullptr;
+static char *opt_cloud_swift_project_domain_id = nullptr;
+static char *opt_cloud_swift_region = nullptr;
+static char *opt_cloud_swift_container = nullptr;
+static char *opt_cloud_swift_storage_url = nullptr;
+static char *opt_cloud_swift_auth_url = nullptr;
+static char *opt_cloud_swift_key = nullptr;
+static char *opt_cloud_swift_auth_version = nullptr;
+
+const char *cloud_s3_api_version_names[] = {"AUTO", "2", "4", NullS};
+TYPELIB cloud_s3_api_version_typelib = {
+    array_elements(cloud_s3_api_version_names) - 1, "",
+    cloud_s3_api_version_names, nullptr};
 
 size_t redo_memory = 0;
 ulint redo_frames = 0;
@@ -827,6 +916,63 @@ enum options_xtrabackup {
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_CHECK_TABLES,
+  /* PXB-3671 / PXB-3787 ds_cloud direct-upload knobs. Storage type +
+     URL/bucket/credentials, plus the multipart tuning parameters
+     mirrored from xbcloud. */
+  OPT_XTRA_CLOUD_STORAGE,
+  OPT_XTRA_CLOUD_URL,
+  OPT_XTRA_CLOUD_S3_BUCKET,
+  OPT_XTRA_CLOUD_GOOGLE_BUCKET,
+  OPT_XTRA_CLOUD_AZURE_CONTAINER_NAME,
+  OPT_XTRA_CLOUD_REGION,
+  OPT_XTRA_CLOUD_ENDPOINT,
+  OPT_XTRA_CLOUD_ACCESS_KEY,
+  OPT_XTRA_CLOUD_SECRET_KEY,
+  OPT_XTRA_CLOUD_SESSION_TOKEN,
+  OPT_XTRA_CLOUD_BUCKET_LOOKUP,
+  OPT_XTRA_CLOUD_STORAGE_CLASS,
+  OPT_XTRA_CLOUD_AZURE_ACCOUNT,
+  OPT_XTRA_CLOUD_AZURE_ACCESS_KEY,
+  OPT_XTRA_CLOUD_AZURE_ENDPOINT,
+  OPT_XTRA_CLOUD_INSECURE,
+  OPT_XTRA_CLOUD_CACERT,
+  OPT_XTRA_CLOUD_TIMEOUT,
+  OPT_XTRA_CLOUD_MAX_RETRIES,
+  OPT_XTRA_CLOUD_MAX_BACKOFF,
+  OPT_XTRA_CLOUD_MAX_CONCURRENT_REQUESTS,
+  OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
+  OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
+  OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
+  OPT_XTRA_CLOUD_UPLOAD_BUFFER_SIZE,
+  OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
+  OPT_XTRA_CLOUD_HTTP_TIMING,
+  OPT_XTRA_CLOUD_DOWNLOAD,
+  OPT_XTRA_CLOUD_DELETE,
+  /* xbcloud option-parity batch. */
+  OPT_XTRA_CLOUD_VERBOSE,
+  OPT_XTRA_CLOUD_S3_API_VERSION,
+  OPT_XTRA_CLOUD_AZURE_DEVELOPMENT_STORAGE,
+  OPT_XTRA_CLOUD_CURL_RETRIABLE_ERRORS,
+  OPT_XTRA_CLOUD_HTTP_RETRIABLE_ERRORS,
+  OPT_XTRA_CLOUD_HEADER,
+  /* Swift / OpenStack Keystone v3 auth chain. */
+  OPT_XTRA_CLOUD_SWIFT_CONTAINER,
+  OPT_XTRA_CLOUD_SWIFT_AUTH_URL,
+  OPT_XTRA_CLOUD_SWIFT_KEY,
+  OPT_XTRA_CLOUD_SWIFT_USER,
+  OPT_XTRA_CLOUD_SWIFT_USER_ID,
+  OPT_XTRA_CLOUD_SWIFT_PASSWORD,
+  OPT_XTRA_CLOUD_SWIFT_TENANT,
+  OPT_XTRA_CLOUD_SWIFT_TENANT_ID,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT_ID,
+  OPT_XTRA_CLOUD_SWIFT_DOMAIN,
+  OPT_XTRA_CLOUD_SWIFT_DOMAIN_ID,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN,
+  OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN_ID,
+  OPT_XTRA_CLOUD_SWIFT_REGION,
+  OPT_XTRA_CLOUD_SWIFT_STORAGE_URL,
+  OPT_XTRA_CLOUD_SWIFT_AUTH_VERSION,
 };
 
 struct my_option xb_client_options[] = {
@@ -1483,6 +1629,247 @@ struct my_option xb_client_options[] = {
      &opt_rocksdb_checkpoint_max_count, 0, GET_INT, REQUIRED_ARG, 0, 0, INT_MAX,
      0, 0, 0},
 
+    /* PXB-3671 / PXB-3787 -- direct cloud upload via ds_cloud. */
+    {"cloud-storage", OPT_XTRA_CLOUD_STORAGE,
+     "Direct cloud upload backend: s3 | gcs | azure | swift. When set, "
+     "xtrabackup --backup streams each file directly to the bucket via "
+     "ds_cloud and the multipart upload machinery (no xbcloud needed). "
+     "Mutually exclusive with --stream.",
+     &opt_cloud_storage, &opt_cloud_storage, 0, GET_STR, REQUIRED_ARG, 0, 0,
+     0, 0, 0, 0},
+    {"cloud-url", OPT_XTRA_CLOUD_URL,
+     "Cloud target URL (endpoint + optional path). Combined with "
+     "the provider's bucket option and --cloud-region to form per-object "
+     "keys.",
+     &opt_cloud_url, &opt_cloud_url, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0,
+     0},
+    {"cloud-s3-bucket", OPT_XTRA_CLOUD_S3_BUCKET,
+     "S3 bucket name. May be BUCKET or BUCKET/PREFIX -- the prefix becomes "
+     "the subdirectory for this backup inside the bucket "
+     "(e.g. my-bucket/2026-06-23-full).",
+     &opt_cloud_s3_bucket, &opt_cloud_s3_bucket, 0, GET_STR, REQUIRED_ARG, 0,
+     0, 0, 0, 0, 0},
+    {"cloud-google-bucket", OPT_XTRA_CLOUD_GOOGLE_BUCKET,
+     "Google Cloud Storage bucket name. May be BUCKET or BUCKET/PREFIX "
+     "(same semantics as --cloud-s3-bucket).",
+     &opt_cloud_google_bucket, &opt_cloud_google_bucket, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-container-name", OPT_XTRA_CLOUD_AZURE_CONTAINER_NAME,
+     "Azure Blob Storage container name. May be CONTAINER or "
+     "CONTAINER/PREFIX (same semantics as --cloud-s3-bucket).",
+     &opt_cloud_azure_container_name, &opt_cloud_azure_container_name, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-region", OPT_XTRA_CLOUD_REGION, "Region (S3-style).",
+     &opt_cloud_region, &opt_cloud_region, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-endpoint", OPT_XTRA_CLOUD_ENDPOINT,
+     "Endpoint host (overrides default for the storage backend).",
+     &opt_cloud_endpoint, &opt_cloud_endpoint, 0, GET_STR, REQUIRED_ARG, 0, 0,
+     0, 0, 0, 0},
+    {"cloud-access-key", OPT_XTRA_CLOUD_ACCESS_KEY, "Access key.",
+     &opt_cloud_access_key, &opt_cloud_access_key, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-secret-key", OPT_XTRA_CLOUD_SECRET_KEY, "Secret key.",
+     &opt_cloud_secret_key, &opt_cloud_secret_key, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-session-token", OPT_XTRA_CLOUD_SESSION_TOKEN,
+     "AWS STS session token.",
+     &opt_cloud_session_token, &opt_cloud_session_token, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-bucket-lookup", OPT_XTRA_CLOUD_BUCKET_LOOKUP,
+     "Bucket-name addressing style: auto | path | dns. Dotted bucket names "
+     "force path-style on HTTPS regardless.",
+     &opt_cloud_bucket_lookup, &opt_cloud_bucket_lookup, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-storage-class", OPT_XTRA_CLOUD_STORAGE_CLASS,
+     "Storage class (S3 STANDARD/STANDARD_IA/etc., Azure equivalent).",
+     &opt_cloud_storage_class, &opt_cloud_storage_class, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-account", OPT_XTRA_CLOUD_AZURE_ACCOUNT,
+     "Azure storage account.",
+     &opt_cloud_azure_account, &opt_cloud_azure_account, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-access-key", OPT_XTRA_CLOUD_AZURE_ACCESS_KEY,
+     "Azure account key.",
+     &opt_cloud_azure_access_key, &opt_cloud_azure_access_key, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-azure-endpoint", OPT_XTRA_CLOUD_AZURE_ENDPOINT,
+     "Azure endpoint host override.",
+     &opt_cloud_azure_endpoint, &opt_cloud_azure_endpoint, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-insecure", OPT_XTRA_CLOUD_INSECURE,
+     "Skip TLS certificate verification.",
+     &opt_cloud_insecure, &opt_cloud_insecure, 0, GET_BOOL, NO_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-cacert", OPT_XTRA_CLOUD_CACERT, "Path to CA bundle PEM.",
+     &opt_cloud_cacert, &opt_cloud_cacert, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-timeout", OPT_XTRA_CLOUD_TIMEOUT,
+     "Per-request curl timeout (seconds). 0 to disable.",
+     &opt_cloud_timeout, &opt_cloud_timeout, 0, GET_ULONG, REQUIRED_ARG, 120,
+     0, 86400, 0, 0, 0},
+    {"cloud-max-retries", OPT_XTRA_CLOUD_MAX_RETRIES,
+     "Max retries on transient HTTP/curl errors.",
+     &opt_cloud_max_retries, &opt_cloud_max_retries, 0, GET_ULONG,
+     REQUIRED_ARG, 10, 0, 1000, 0, 0, 0},
+    {"cloud-max-backoff", OPT_XTRA_CLOUD_MAX_BACKOFF,
+     "Max retry backoff in ms.",
+     &opt_cloud_max_backoff, &opt_cloud_max_backoff, 0, GET_ULONG,
+     REQUIRED_ARG, 300000, 0, 3600000, 0, 0, 0},
+    {"cloud-max-concurrent-requests", OPT_XTRA_CLOUD_MAX_CONCURRENT_REQUESTS,
+     "Max concurrent cloud HTTP requests. Default 16. Higher = more "
+     "throughput but more memory (memory ~= this * part-size).",
+     &opt_cloud_max_concurrent_requests, &opt_cloud_max_concurrent_requests, 0,
+     GET_ULONG, REQUIRED_ARG, 16, 1, 1024, 0, 0, 0},
+    {"cloud-multipart-part-size", OPT_XTRA_CLOUD_MULTIPART_PART_SIZE,
+     "Multipart part size in bytes. 0 = auto: max(16MiB, ceil(filesize/10K)).",
+     &opt_cloud_multipart_part_size, &opt_cloud_multipart_part_size, 0,
+     GET_ULL, REQUIRED_ARG, 0, 0,
+     5ULL * 1024 * 1024 * 1024, 0, 0, 0},
+    {"cloud-multipart-threshold", OPT_XTRA_CLOUD_MULTIPART_THRESHOLD,
+     "Files smaller than this go as a single PUT (skip multipart).",
+     &opt_cloud_multipart_threshold, &opt_cloud_multipart_threshold, 0,
+     GET_ULL, REQUIRED_ARG, 16ULL * 1024 * 1024, 0,
+     5ULL * 1024 * 1024 * 1024, 0, 0, 0},
+    {"cloud-multipart-rollover-threshold",
+     OPT_XTRA_CLOUD_MULTIPART_ROLLOVER_THRESHOLD,
+     "Advanced. Per-object size cap; files larger split into .part-NNN. "
+     "Default is the S3 5 TiB hard limit.",
+     &opt_cloud_multipart_rollover_threshold,
+     &opt_cloud_multipart_rollover_threshold, 0, GET_ULL, REQUIRED_ARG,
+     5ULL * 1024 * 1024 * 1024 * 1024, 16ULL * 1024 * 1024, ULLONG_MAX, 0, 0,
+     0},
+    {"cloud-upload-buffer-size", OPT_XTRA_CLOUD_UPLOAD_BUFFER_SIZE,
+     "Total cloud-upload memory cap across all writers in bytes. "
+     "0 = unlimited (memory grows with file size and concurrency, "
+     "like aws-cli). When set, system shrinks part-size and/or "
+     "concurrency to fit; very large files may roll into multiple objects.",
+     &opt_cloud_upload_buffer_size, &opt_cloud_upload_buffer_size, 0,
+     GET_ULL, REQUIRED_ARG, 0, 0, ULLONG_MAX, 0, 0, 0},
+    {"cloud-rate-log-interval", OPT_XTRA_CLOUD_RATE_LOG_INTERVAL,
+     "Log upload throughput every N seconds on the libev thread. 0 to "
+     "disable.",
+     &opt_cloud_rate_log_interval, &opt_cloud_rate_log_interval, 0,
+     GET_ULONG, REQUIRED_ARG, 10, 0, 86400, 0, 0, 0},
+    {"cloud-http-timing", OPT_XTRA_CLOUD_HTTP_TIMING,
+     "Record per-call curl phase timings; dump on exit.",
+     &opt_cloud_http_timing, &opt_cloud_http_timing, 0, GET_BOOL, NO_ARG, 0,
+     0, 0, 0, 0, 0},
+
+    /* xbcloud option-parity batch. */
+    {"cloud-verbose", OPT_XTRA_CLOUD_VERBOSE,
+     "Turn on cURL tracing (CURLOPT_VERBOSE).",
+     &opt_cloud_verbose, &opt_cloud_verbose, 0, GET_BOOL, NO_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"cloud-s3-api-version", OPT_XTRA_CLOUD_S3_API_VERSION,
+     "S3 signing API version: AUTO|2|4.",
+     &opt_cloud_s3_api_version, &opt_cloud_s3_api_version,
+     &cloud_s3_api_version_typelib, GET_ENUM, REQUIRED_ARG, 0, 0, 0, 0, 0,
+     0},
+    {"cloud-azure-development-storage",
+     OPT_XTRA_CLOUD_AZURE_DEVELOPMENT_STORAGE,
+     "Run against the Azurite emulator with default credentials. Implies "
+     "endpoint http://127.0.0.1:10000 unless overridden by "
+     "--cloud-azure-endpoint.",
+     &opt_cloud_azure_development_storage,
+     &opt_cloud_azure_development_storage, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0,
+     0, 0},
+    {"cloud-curl-retriable-errors", OPT_XTRA_CLOUD_CURL_RETRIABLE_ERRORS,
+     "Comma-separated list of curl error codes to treat as retriable.",
+     &opt_cloud_curl_retriable_errors, &opt_cloud_curl_retriable_errors, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-http-retriable-errors", OPT_XTRA_CLOUD_HTTP_RETRIABLE_ERRORS,
+     "Comma-separated list of HTTP status codes to treat as retriable.",
+     &opt_cloud_http_retriable_errors, &opt_cloud_http_retriable_errors, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-header", OPT_XTRA_CLOUD_HEADER,
+     "Extra HTTP header to send with every cloud request, in 'Name: Value' "
+     "form. May be repeated.",
+     0, 0, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    /* Swift / OpenStack Keystone v3 auth chain.
+       1:1 with xbcloud's --swift-* options, just with --cloud- prefix.
+       --cloud-swift-container accepts BUCKET or BUCKET/PREFIX form via
+       the same parser as the other backends. */
+    {"cloud-swift-container", OPT_XTRA_CLOUD_SWIFT_CONTAINER,
+     "Swift container to store backups into. May be CONTAINER or "
+     "CONTAINER/PREFIX (same semantics as --cloud-s3-bucket).",
+     &opt_cloud_swift_container, &opt_cloud_swift_container, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-auth-url", OPT_XTRA_CLOUD_SWIFT_AUTH_URL,
+     "Base URL of the Swift / Keystone authentication service.",
+     &opt_cloud_swift_auth_url, &opt_cloud_swift_auth_url, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-key", OPT_XTRA_CLOUD_SWIFT_KEY, "Swift key (TempAuth).",
+     &opt_cloud_swift_key, &opt_cloud_swift_key, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-swift-user", OPT_XTRA_CLOUD_SWIFT_USER, "Swift user name.",
+     &opt_cloud_swift_user, &opt_cloud_swift_user, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+    {"cloud-swift-user-id", OPT_XTRA_CLOUD_SWIFT_USER_ID, "Swift user ID.",
+     &opt_cloud_swift_user_id, &opt_cloud_swift_user_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-password", OPT_XTRA_CLOUD_SWIFT_PASSWORD,
+     "Password of the Keystone user.",
+     &opt_cloud_swift_password, &opt_cloud_swift_password, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-tenant", OPT_XTRA_CLOUD_SWIFT_TENANT,
+     "Tenant name (use --cloud-swift-tenant OR --cloud-swift-tenant-id, "
+     "not both).",
+     &opt_cloud_swift_tenant, &opt_cloud_swift_tenant, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-tenant-id", OPT_XTRA_CLOUD_SWIFT_TENANT_ID, "Tenant ID.",
+     &opt_cloud_swift_tenant_id, &opt_cloud_swift_tenant_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project", OPT_XTRA_CLOUD_SWIFT_PROJECT, "Project name.",
+     &opt_cloud_swift_project, &opt_cloud_swift_project, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project-id", OPT_XTRA_CLOUD_SWIFT_PROJECT_ID, "Project ID.",
+     &opt_cloud_swift_project_id, &opt_cloud_swift_project_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-domain", OPT_XTRA_CLOUD_SWIFT_DOMAIN, "User domain name.",
+     &opt_cloud_swift_domain, &opt_cloud_swift_domain, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-domain-id", OPT_XTRA_CLOUD_SWIFT_DOMAIN_ID,
+     "User domain ID.",
+     &opt_cloud_swift_domain_id, &opt_cloud_swift_domain_id, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project-domain", OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN,
+     "Project domain name.",
+     &opt_cloud_swift_project_domain, &opt_cloud_swift_project_domain, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-project-domain-id", OPT_XTRA_CLOUD_SWIFT_PROJECT_DOMAIN_ID,
+     "Project domain ID.",
+     &opt_cloud_swift_project_domain_id, &opt_cloud_swift_project_domain_id,
+     0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-region", OPT_XTRA_CLOUD_SWIFT_REGION,
+     "Region for the Swift object-store endpoint.",
+     &opt_cloud_swift_region, &opt_cloud_swift_region, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-storage-url", OPT_XTRA_CLOUD_SWIFT_STORAGE_URL,
+     "Override the object-store URL returned by Keystone authentication.",
+     &opt_cloud_swift_storage_url, &opt_cloud_swift_storage_url, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"cloud-swift-auth-version", OPT_XTRA_CLOUD_SWIFT_AUTH_VERSION,
+     "Swift authentication version (1, 2, or 3).  Default 1 (TempAuth).",
+     &opt_cloud_swift_auth_version, &opt_cloud_swift_auth_version, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"download", OPT_XTRA_CLOUD_DOWNLOAD,
+     "Cloud lifecycle: fetch a previously uploaded backup from the cloud "
+     "and reconstruct it under --target-dir locally. Requires --cloud-* "
+     "options to identify the source bucket / prefix. Resulting tree is "
+     "identical to a local backup so --prepare / --copy-back work "
+     "unchanged.",
+     &xtrabackup_cloud_download, &xtrabackup_cloud_download, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"delete", OPT_XTRA_CLOUD_DELETE,
+     "Cloud lifecycle: delete a backup from the cloud. Lists objects "
+     "under the prefix and removes each one. --force skips the "
+     "confirmation prompt.",
+     &xtrabackup_cloud_delete, &xtrabackup_cloud_delete, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
 uint xb_client_options_count = array_elements(xb_client_options);
@@ -1920,8 +2307,20 @@ bool check_if_param_set(const char *param) {
 }
 
 bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
+  /* Option names whose values must NOT land in the "recognized client
+     arguments" log line that xtrabackup prints at startup.  That log
+     goes to stdout / xtrabackup.log / support tickets -- secrets in it
+     leak everywhere.  Cloud creds (access key, secret key, session
+     token, Azure account key) join the password / encryption-key family
+     for the same reason. */
   static const char *hide_value[] = {"password", "encrypt-key",
-                                     "transition-key"};
+                                     "transition-key",
+                                     "cloud-access-key",
+                                     "cloud-secret-key",
+                                     "cloud-session-token",
+                                     "cloud-azure-access-key",
+                                     "cloud-swift-password",
+                                     "cloud-swift-key"};
 
   param_str << "--" << opt->name;
   if (argument) {
@@ -2132,6 +2531,15 @@ bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
       break;
     case OPT_XTRA_USE_MEMORY:
       xtrabackup_use_memory_set = true;
+      break;
+
+    case OPT_XTRA_CLOUD_HEADER:
+      /* --cloud-header is repeatable; accumulate each occurrence into
+         opt_cloud_headers.  Validation (parse into Name/Value, reject
+         malformed) happens in apply_cloud_options(). */
+      if (argument != nullptr) {
+        opt_cloud_headers.emplace_back(argument);
+      }
       break;
 
 #include "client/include/sslopt-case.h"
@@ -3521,6 +3929,202 @@ bool validate_missing_encryption_tablespaces() {
   return ret;
 }
 
+/* Pick up cloud credentials and endpoints from environment variables
+   when the CLI flags weren't explicitly set. Same precedence model as
+   xbcloud's get_env_args(): S3_* first, then AWS_*, then bare
+   ACCESS_KEY_ID. STS callers must have AWS_SESSION_TOKEN set or pass
+   --cloud-session-token; without it the access key is rejected by AWS
+   with InvalidAccessKeyId. */
+static void pick_cloud_env_vars() {
+  /* S3_* takes precedence (lets the user override AWS_* env vars just
+     for backup purposes without disturbing the AWS CLI). */
+  get_env_value(opt_cloud_access_key, "S3_ACCESS_KEY_ID");
+  get_env_value(opt_cloud_secret_key, "S3_SECRET_ACCESS_KEY");
+  get_env_value(opt_cloud_session_token, "S3_SESSION_TOKEN");
+  get_env_value(opt_cloud_storage_class, "S3_STORAGE_CLASS");
+  get_env_value(opt_cloud_region, "S3_DEFAULT_REGION");
+  get_env_value(opt_cloud_cacert, "S3_CA_BUNDLE");
+  get_env_value(opt_cloud_endpoint, "S3_ENDPOINT");
+
+  /* Standard AWS_* env vars. */
+  get_env_value(opt_cloud_access_key, "AWS_ACCESS_KEY_ID");
+  get_env_value(opt_cloud_secret_key, "AWS_SECRET_ACCESS_KEY");
+  get_env_value(opt_cloud_session_token, "AWS_SESSION_TOKEN");
+  get_env_value(opt_cloud_storage_class, "AWS_STORAGE_CLASS");
+  get_env_value(opt_cloud_region, "AWS_DEFAULT_REGION");
+  get_env_value(opt_cloud_cacert, "AWS_CA_BUNDLE");
+  get_env_value(opt_cloud_endpoint, "AWS_ENDPOINT");
+
+  /* Generic naming for non-AWS S3-compatible endpoints. */
+  get_env_value(opt_cloud_access_key, "ACCESS_KEY_ID");
+  get_env_value(opt_cloud_secret_key, "SECRET_ACCESS_KEY");
+  get_env_value(opt_cloud_session_token, "SESSION_TOKEN");
+  get_env_value(opt_cloud_region, "DEFAULT_REGION");
+  get_env_value(opt_cloud_endpoint, "ENDPOINT");
+
+  /* S3 bucket env var (consistent with the per-provider option). */
+  get_env_value(opt_cloud_s3_bucket, "S3_BUCKET");
+  get_env_value(opt_cloud_google_bucket, "GOOGLE_BUCKET");
+
+  /* Azure. */
+  get_env_value(opt_cloud_azure_account, "AZURE_STORAGE_ACCOUNT");
+  get_env_value(opt_cloud_azure_container_name, "AZURE_CONTAINER_NAME");
+  get_env_value(opt_cloud_azure_access_key, "AZURE_ACCESS_KEY");
+  get_env_value(opt_cloud_storage_class, "AZURE_STORAGE_CLASS");
+  get_env_value(opt_cloud_azure_endpoint, "AZURE_ENDPOINT");
+
+  /* Swift / Keystone (OS_* env vars; xbcloud's get_env_args() uses
+     these too). */
+  get_env_value(opt_cloud_swift_auth_url, "OS_AUTH_URL");
+  get_env_value(opt_cloud_swift_tenant, "OS_TENANT_NAME");
+  get_env_value(opt_cloud_swift_tenant_id, "OS_TENANT_ID");
+  get_env_value(opt_cloud_swift_user, "OS_USERNAME");
+  get_env_value(opt_cloud_swift_password, "OS_PASSWORD");
+  get_env_value(opt_cloud_swift_project, "OS_PROJECT_NAME");
+  get_env_value(opt_cloud_swift_project_id, "OS_PROJECT_ID");
+  get_env_value(opt_cloud_swift_domain, "OS_USER_DOMAIN_NAME");
+  get_env_value(opt_cloud_swift_domain_id, "OS_USER_DOMAIN_ID");
+  get_env_value(opt_cloud_swift_project_domain, "OS_PROJECT_DOMAIN_NAME");
+  get_env_value(opt_cloud_swift_project_domain_id, "OS_PROJECT_DOMAIN_ID");
+  get_env_value(opt_cloud_swift_region, "OS_REGION_NAME");
+  get_env_value(opt_cloud_swift_storage_url, "OS_STORAGE_URL");
+  get_env_value(opt_cloud_swift_auth_version, "OS_AUTH_VERSION");
+}
+
+/* Bucket / prefix parser is in cloud_bucket_prefix.h so it can be
+   unit-tested independently of xtrabackup.cc. */
+#include "cloud_bucket_prefix.h"
+
+/* Fold the raw --cloud-* option storage into g_ds_cloud_config that
+   ds_cloud reads. Called from main() after the option parser runs. */
+static void apply_cloud_options() {
+  pick_cloud_env_vars();
+  if (opt_cloud_storage) g_ds_cloud_config.storage = opt_cloud_storage;
+  if (opt_cloud_url) g_ds_cloud_config.url = opt_cloud_url;
+
+  /* Route the provider-explicit bucket option matching --cloud-storage
+     into the shared g_ds_cloud_config.container slot, splitting off any
+     BUCKET/PREFIX form.  Only one of the three options is consulted --
+     mixing them is silently fine (the others are ignored).  Swift uses
+     --cloud-swift-container, handled in its own batch. */
+  {
+    const char *raw = nullptr;
+    if (g_ds_cloud_config.storage == "s3") {
+      raw = opt_cloud_s3_bucket;
+    } else if (g_ds_cloud_config.storage == "gcs" ||
+               g_ds_cloud_config.storage == "google") {
+      raw = opt_cloud_google_bucket;
+    } else if (g_ds_cloud_config.storage == "azure") {
+      raw = opt_cloud_azure_container_name;
+    } else if (g_ds_cloud_config.storage == "swift") {
+      raw = opt_cloud_swift_container;
+    }
+    if (raw != nullptr) {
+      std::string bucket;
+      std::string prefix;
+      xtrabackup::parse_cloud_bucket_with_prefix(raw, bucket, prefix);
+      g_ds_cloud_config.container = bucket;
+      g_ds_cloud_config.prefix = prefix;
+    }
+  }
+
+  if (opt_cloud_region) g_ds_cloud_config.region = opt_cloud_region;
+  if (opt_cloud_endpoint) g_ds_cloud_config.endpoint = opt_cloud_endpoint;
+  if (opt_cloud_access_key)
+    g_ds_cloud_config.access_key = opt_cloud_access_key;
+  if (opt_cloud_secret_key)
+    g_ds_cloud_config.secret_key = opt_cloud_secret_key;
+  if (opt_cloud_session_token)
+    g_ds_cloud_config.session_token = opt_cloud_session_token;
+  if (opt_cloud_bucket_lookup)
+    g_ds_cloud_config.bucket_lookup = opt_cloud_bucket_lookup;
+  if (opt_cloud_storage_class)
+    g_ds_cloud_config.storage_class = opt_cloud_storage_class;
+  if (opt_cloud_azure_account)
+    g_ds_cloud_config.azure_account = opt_cloud_azure_account;
+  if (opt_cloud_azure_access_key)
+    g_ds_cloud_config.azure_access_key = opt_cloud_azure_access_key;
+  if (opt_cloud_azure_endpoint)
+    g_ds_cloud_config.azure_endpoint = opt_cloud_azure_endpoint;
+  g_ds_cloud_config.insecure = opt_cloud_insecure;
+  if (opt_cloud_cacert) g_ds_cloud_config.cacert = opt_cloud_cacert;
+  g_ds_cloud_config.timeout = opt_cloud_timeout;
+  g_ds_cloud_config.max_retries = opt_cloud_max_retries;
+  g_ds_cloud_config.max_backoff = opt_cloud_max_backoff;
+  /* --cloud-max-concurrent-requests has a fixed default (16),
+     decoupled from --parallel.  Data-copy threads and HTTP concurrency
+     are different resources; conflating them led to unpredictable
+     memory peaks when users bumped --parallel high. */
+  g_ds_cloud_config.max_concurrent_requests = opt_cloud_max_concurrent_requests;
+  g_ds_cloud_config.upload_buffer_size = opt_cloud_upload_buffer_size;
+  g_ds_cloud_config.multipart_part_size = opt_cloud_multipart_part_size;
+  g_ds_cloud_config.multipart_threshold = opt_cloud_multipart_threshold;
+  g_ds_cloud_config.multipart_rollover_threshold =
+      opt_cloud_multipart_rollover_threshold;
+  g_ds_cloud_config.rate_log_interval = opt_cloud_rate_log_interval;
+  g_ds_cloud_config.http_timing = opt_cloud_http_timing;
+
+  /* xbcloud parity batch. */
+  g_ds_cloud_config.verbose = opt_cloud_verbose;
+  g_ds_cloud_config.s3_api_version = opt_cloud_s3_api_version;
+  g_ds_cloud_config.azure_development_storage =
+      opt_cloud_azure_development_storage;
+
+  /* Parse comma-separated --cloud-{curl,http}-retriable-errors. */
+  auto parse_csv_codes = [](const char *csv, std::vector<long> &out) {
+    if (csv == nullptr) return;
+    std::istringstream iss(csv);
+    for (std::string val; std::getline(iss, val, ',');) {
+      char *endp = nullptr;
+      long code = std::strtol(val.c_str(), &endp, 10);
+      if (endp != val.c_str() && *endp == '\0') out.push_back(code);
+    }
+  };
+  parse_csv_codes(opt_cloud_curl_retriable_errors,
+                  g_ds_cloud_config.curl_retriable_errors);
+  parse_csv_codes(opt_cloud_http_retriable_errors,
+                  g_ds_cloud_config.http_retriable_errors);
+
+  /* Parse --cloud-header into Name -> Value pairs (uses xbcloud's
+     existing parse_http_header helper from util.h). */
+  for (const std::string &h : opt_cloud_headers) {
+    auto kv = xbcloud::parse_http_header(h);
+    if (!kv.first.empty()) {
+      g_ds_cloud_config.extra_http_headers.insert(kv);
+    } else {
+      xb::warn() << "ignoring malformed --cloud-header '" << h << "'";
+    }
+  }
+
+  /* Swift / Keystone v3. */
+  auto copy_swift_opt = [](const char *src, std::string &dst) {
+    if (src != nullptr) dst = src;
+  };
+  copy_swift_opt(opt_cloud_swift_user, g_ds_cloud_config.swift_user);
+  copy_swift_opt(opt_cloud_swift_user_id, g_ds_cloud_config.swift_user_id);
+  copy_swift_opt(opt_cloud_swift_password, g_ds_cloud_config.swift_password);
+  copy_swift_opt(opt_cloud_swift_tenant, g_ds_cloud_config.swift_tenant);
+  copy_swift_opt(opt_cloud_swift_tenant_id,
+                 g_ds_cloud_config.swift_tenant_id);
+  copy_swift_opt(opt_cloud_swift_project, g_ds_cloud_config.swift_project);
+  copy_swift_opt(opt_cloud_swift_project_id,
+                 g_ds_cloud_config.swift_project_id);
+  copy_swift_opt(opt_cloud_swift_domain, g_ds_cloud_config.swift_domain);
+  copy_swift_opt(opt_cloud_swift_domain_id,
+                 g_ds_cloud_config.swift_domain_id);
+  copy_swift_opt(opt_cloud_swift_project_domain,
+                 g_ds_cloud_config.swift_project_domain);
+  copy_swift_opt(opt_cloud_swift_project_domain_id,
+                 g_ds_cloud_config.swift_project_domain_id);
+  copy_swift_opt(opt_cloud_swift_region, g_ds_cloud_config.swift_region);
+  copy_swift_opt(opt_cloud_swift_storage_url,
+                 g_ds_cloud_config.swift_storage_url);
+  copy_swift_opt(opt_cloud_swift_auth_url, g_ds_cloud_config.swift_auth_url);
+  copy_swift_opt(opt_cloud_swift_key, g_ds_cloud_config.swift_key);
+  copy_swift_opt(opt_cloud_swift_auth_version,
+                 g_ds_cloud_config.swift_auth_version);
+}
+
 /************************************************************************
 Initialize the appropriate datasink(s). Both local backups and streaming in the
 'xbstream' format allow parallel writes so we can write directly.
@@ -3530,6 +4134,37 @@ for the data stream (and don't allow parallel data copying) and for metainfo
 files (including xtrabackup_logfile). The second datasink writes to temporary
 files first, and then streams them in a serialized way when closed. */
 static void xtrabackup_init_datasinks(void) {
+  apply_cloud_options();
+
+  /* PXB-3671: when --cloud-storage is set, every backup datasink target
+     becomes the cloud bucket via ds_cloud.  Mutually exclusive with
+     --stream / --fifo-streams. */
+  if (!g_ds_cloud_config.storage.empty()) {
+    if (xtrabackup_stream) {
+      xb::error() << "--cloud-storage is incompatible with --stream. "
+                     "ds_cloud already provides direct parallel uploads to "
+                     "the bucket; the xbstream pipe is not used.";
+      exit(EXIT_FAILURE);
+    }
+    if (!ds_cloud_probe()) {
+      xb::error() << "ds_cloud probe failed; refusing to start the backup";
+      exit(EXIT_FAILURE);
+    }
+    /* Bucket prefix is taken from the provider-explicit bucket option
+       (the PREFIX part of BUCKET/PREFIX, parsed in apply_cloud_options).
+       --target-dir is purely a local-filesystem concept here and does
+       not influence cloud object keys.  Pass the prefix down via the
+       ds_create root arg so cloud_init sees it as backup_prefix. */
+    const char *prefix = g_ds_cloud_config.prefix.c_str();
+    ds_data = ds_meta = ds_redo = ds_create(prefix, DS_TYPE_CLOUD);
+    if (ds_data == nullptr) {
+      xb::error() << "ds_cloud init failed";
+      exit(EXIT_FAILURE);
+    }
+    xtrabackup_add_datasink(ds_data);
+    return;
+  }
+
   /* Start building out the pipelines from the terminus back */
   if (xtrabackup_stream) {
     if (xtrabackup_fifo_streams > 1) {
@@ -8439,6 +9074,8 @@ int main(int argc, char **argv) {
     if (xtrabackup_copy_back) num++;
     if (xtrabackup_move_back) num++;
     if (xtrabackup_decrypt_decompress) num++;
+    if (xtrabackup_cloud_download) num++;
+    if (xtrabackup_cloud_delete) num++;
     if (num != 1) { /* !XOR (for now) */
       usage();
       exit(EXIT_FAILURE);
@@ -8463,6 +9100,22 @@ int main(int argc, char **argv) {
   signal(SIGUSR1, sigusr1_handler);
 #endif /* UNIV_DEBUG */
 #endif
+
+  /* --download / --delete: cloud lifecycle modes (no mysqld interaction). */
+  if (xtrabackup_cloud_download || xtrabackup_cloud_delete) {
+    apply_cloud_options();
+    if (xtrabackup_cloud_download) {
+      if (!xb_cloud_download(xtrabackup_target_dir)) {
+        exit(EXIT_FAILURE);
+      }
+    } else {
+      if (!xb_cloud_delete(/*force=*/false)) {
+        exit(EXIT_FAILURE);
+      }
+    }
+    xb::info() << "completed OK!";
+    exit(EXIT_SUCCESS);
+  }
 
   /* --backup */
   if (xtrabackup_backup) {
