@@ -100,6 +100,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "common.h"
 #include "datasink.h"
+#include "xb_manifest.h"
 #include "xtrabackup_version.h"
 
 #include "backup_copy.h"
@@ -2784,6 +2785,9 @@ static bool xtrabackup_stream_metadata(ds_ctxt_t *ds_ctxt) {
 
   len = strlen(buf);
 
+  /* Cache for backup_metadata.json (built later at backup_finish). */
+  xb_manifest::set_legacy_text("xtrabackup_checkpoints", buf);
+
   mystat.st_size = len;
   mystat.st_mtime = time(nullptr);
 
@@ -2922,6 +2926,18 @@ bool xb_write_delta_metadata(const char *filename,
 }
 
 static bool xtrabackup_write_info(const char *filepath) {
+  /* Use the text cached by write_xtrabackup_info so the
+  --extra-lsndir copy is byte-identical to the target-dir copy.  In
+  particular this means backup_size is the SAME in both copies --
+  see commit message. */
+  const std::string &cached = xb_manifest::get_legacy_text("xtrabackup_info");
+  if (!cached.empty()) {
+    return write_to_file(filepath, cached.c_str());
+  }
+
+  /* Fallback path -- shouldn't happen in the normal backup flow,
+  since write_xtrabackup_info has run by now and populated the
+  cache.  Kept as a safety net. */
   char *xtrabackup_info_data = get_xtrabackup_info(mysql_connection);
   if (!xtrabackup_info_data) {
     return false;
@@ -4665,6 +4681,28 @@ void xtrabackup_backup_func(void) {
     sprintf(filename, "%s/%s", xtrabackup_extra_lsndir, XTRABACKUP_INFO);
     if (!xtrabackup_write_info(filename)) {
       xb::error() << "failed to write info to " << filename;
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  /* backup_metadata.json: build the JSON document from the cached
+  legacy-info texts and publish it through ds_meta via
+  ds_open_single_object so it lands plain regardless of the configured
+  compress/encrypt stages and as a single bare-named cloud object
+  when piped to xbcloud.  Then mirror a byte-identical copy under
+  --extra-lsndir if set.  This file is generated AFTER backup_finish
+  so every legacy info file has already been written through ds_meta
+  and its text is in the cache. */
+  {
+    const std::string manifest_json = xb_manifest::build_json();
+    if (!xb_manifest::publish(ds_meta, manifest_json)) {
+      xb::error() << "failed to publish " << XB_BACKUP_METADATA_JSON;
+      exit(EXIT_FAILURE);
+    }
+    if (xtrabackup_extra_lsndir &&
+        !xb_manifest::write_to_dir(xtrabackup_extra_lsndir, manifest_json)) {
+      xb::error() << "failed to mirror " << XB_BACKUP_METADATA_JSON
+                  << " under --extra-lsndir";
       exit(EXIT_FAILURE);
     }
   }
