@@ -98,7 +98,10 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   /* Append the .lz4 extension to the filename */
   fn_format(new_name, path, "", ".lz4", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, new_name, mystat, file_ctx);
+  /* See ds_compress.cc for why we pass nullptr (avoids double-release
+  of the per-file context). */
+  (void)file_ctx;
+  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, new_name, mystat, nullptr);
   if (dest_file == nullptr) {
     return nullptr;
   }

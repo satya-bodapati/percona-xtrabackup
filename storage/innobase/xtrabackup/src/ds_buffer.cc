@@ -89,7 +89,10 @@ static ds_file_t *buffer_open(ds_ctxt_t *ctxt, const char *path,
   pipe_ctxt = ctxt->pipe_ctxt;
   xb_a(pipe_ctxt != NULL);
 
-  dst_file = ds_open_with_ctx(pipe_ctxt, path, mystat, file_ctx);
+  /* See ds_compress.cc for why we pass nullptr (avoids double-release
+  of the per-file context). */
+  (void)file_ctx;
+  dst_file = ds_open_with_ctx(pipe_ctxt, path, mystat, nullptr);
   if (dst_file == NULL) {
     exit(EXIT_FAILURE);
   }

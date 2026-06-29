@@ -98,7 +98,14 @@ static ds_file_t *compress_open(ds_ctxt_t *ctxt, const char *path,
   char new_name[FN_REFLEN];
   fn_format(new_name, path, "", ".qp", MYF(MY_APPEND_EXT));
 
-  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, new_name, mystat, file_ctx);
+  /* Do NOT propagate file_ctx to the inner pipe: only the outermost
+  ds_file_t (the one the caller passes to ds_close) owns the per-file
+  context.  If the inner also carried it, the recursive ds_close()
+  inside compress_close would fire xb_files_jsonl::append_and_release
+  once for the inner and again at the caller, double-releasing the
+  Document. */
+  (void)file_ctx;
+  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, new_name, mystat, nullptr);
   if (dest_file == nullptr) {
     return nullptr;
   }

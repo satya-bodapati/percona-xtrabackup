@@ -171,6 +171,7 @@ MYSQL_ADD_EXECUTABLE(xbstream
   xbstream_write.cc
   xbcrypt_common.cc
   xbcrypt_write.cc
+  xb_files_jsonl.cc
   ${BUNDLED_LZ4_PATH}/xxhash.c
   )
 
@@ -196,6 +197,7 @@ TARGET_LINK_LIBRARIES(xbstream
   mysys
   crc
   ext::lz4
+  extra::rapidjson
   )
 
 ########################################################################
@@ -212,6 +214,7 @@ MYSQL_ADD_EXECUTABLE(xbcrypt
   ds_decrypt.cc
   ds_local.cc
   ds_stdout.cc
+  xb_files_jsonl.cc
   )
 
 SET_TARGET_PROPERTIES(xbcrypt
@@ -222,4 +225,5 @@ TARGET_LINK_LIBRARIES(xbcrypt
   ${GCRYPT_LIBS}
   mysys
   crc
+  extra::rapidjson
   )

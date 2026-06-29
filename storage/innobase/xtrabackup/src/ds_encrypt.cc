@@ -161,7 +161,11 @@ static ds_file_t *encrypt_open(ds_ctxt_t *ctxt, const char *path,
     used_name = path;
   }
 
-  crypt_file->dest_file = ds_open_with_ctx(dest_ctxt, used_name, mystat, file_ctx);
+  /* See ds_compress.cc for why we pass nullptr (avoids double-release
+  of the per-file context). */
+  (void)file_ctx;
+  crypt_file->dest_file =
+      ds_open_with_ctx(dest_ctxt, used_name, mystat, nullptr);
   if (crypt_file->dest_file == NULL) {
     msg("encrypt: ds_open(\"%s\") failed.\n", used_name);
     goto err;

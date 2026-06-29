@@ -169,7 +169,11 @@ static ds_file_t *decrypt_open(ds_ctxt_t *ctxt, const char *path,
     }
   }
 
-  ds_file_t *dest_file = ds_open_with_ctx(dest_ctxt, used_name, mystat, file_ctx);
+  /* See ds_compress.cc for why we pass nullptr (avoids double-release
+  of the per-file context). */
+  (void)file_ctx;
+  ds_file_t *dest_file =
+      ds_open_with_ctx(dest_ctxt, used_name, mystat, nullptr);
   if (dest_file == NULL) {
     msg("decrypt: ds_open(\"%s\") failed.\n", used_name);
     return nullptr;
