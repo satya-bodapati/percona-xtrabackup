@@ -92,9 +92,17 @@ typedef ssize_t xb_stream_write_callback(xb_wstream_file_t *file,
 
 xb_wstream_t *xb_stream_write_new(void);
 
+/* Open a writer file inside the given xbstream.
+@param[in] flags Persistent flag byte applied to every chunk this
+                 writer emits (PAYLOAD or SPARSE; EOF carries its own
+                 flag byte set to 0).  Pass 0 for the default
+                 behavior; pass XB_STREAM_FLAG_SINGLE_OBJECT for files
+                 that should be assembled as one complete object by
+                 downstream consumers (xbcloud put). */
 xb_wstream_file_t *xb_stream_write_open(xb_wstream_t *stream, const char *path,
                                         MY_STAT *mystat, void *userdata,
-                                        xb_stream_write_callback *onwrite);
+                                        xb_stream_write_callback *onwrite,
+                                        uchar flags);
 
 int xb_stream_write_data(xb_wstream_file_t *file, const void *buf, size_t len);
 

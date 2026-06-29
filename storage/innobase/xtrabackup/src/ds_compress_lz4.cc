@@ -71,7 +71,7 @@ static void compress_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_compress_lz4 = {
     &compress_init,  &compress_open,   &compress_write, nullptr,
-    &compress_close, &compress_deinit, nullptr /* report_metrics */};
+    &compress_close, &compress_deinit, nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 static inline int write_uint32_le(ds_file_t *file, uint32_t n);
 

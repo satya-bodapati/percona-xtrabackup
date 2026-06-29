@@ -134,6 +134,18 @@ struct datasink_struct {
   "bytes_written"); wrappers leave it null and future wrappers can
   opt in by implementing it without any framework change. */
   void (*report_metrics)(const ds_ctxt_t *ctxt, std::vector<ds_metric> &out);
+  /* Optional: open a file in "single-object" mode.  Caller is
+  ds_open_single_object(), which has already walked past any ds_compress /
+  ds_encrypt wrappers and is invoking this on a terminal datasink.
+  The bytes that will be written to the returned file are plain --
+  the caller deliberately bypassed transforms.  Terminal sinks that
+  chunk their output (xbstream, fifo, cloud) use this hook to tag
+  the chunks they emit with XB_STREAM_FLAG_SINGLE_OBJECT so
+  downstream consumers know to assemble one complete object per
+  path.  ds_local does not chunk, so its open_single_object is just a thin
+  alias of its open.  NULL on wrappers (compress, encrypt) -- they
+  are not terminals. */
+  ds_file_t *(*open_single_object)(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
 };
 
 /* Supported datasink types */
@@ -164,6 +176,24 @@ disabled (file->uncomp_bytes == NULL); callers that want per-byte
 accounting into a backup-run counter use ds_open_track_uncomp() or
 ds_track_uncomp(). */
 ds_file_t *ds_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
+
+/** Open a datasink file in "plain" mode -- bypass any configured
+ds_compress / ds_encrypt wrappers and write the bytes directly through
+the terminal datasink (ds_local / ds_xbstream / ds_fifo).  Used for a
+small set of operator-facing files (currently backup_metadata.json)
+that should land plain and readable without xbstream/xbcloud-side
+decryption.
+
+Walks @p ctxt's pipe_ctxt chain to the leaf and invokes the leaf's
+optional open_single_object op.  For chunking terminals (xbstream, fifo, cloud)
+the leaf tags its emitted chunks with XB_STREAM_FLAG_SINGLE_OBJECT so
+downstream consumers (xbcloud put, xbcloud get) know to assemble one
+complete object per path rather than one per chunk.  For non-chunking
+terminals (local) it is a thin alias of the regular open.
+
+Returns nullptr if the resolved terminal does not implement open_single_object
+or if the underlying open fails. */
+ds_file_t *ds_open_single_object(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat);
 
 /** Enable uncompressed-byte tracking on an already-opened ds_file_t.
 After this call, every ds_write / ds_write_sparse on @p file adds its

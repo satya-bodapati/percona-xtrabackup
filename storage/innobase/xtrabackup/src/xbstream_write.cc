@@ -50,6 +50,10 @@ struct xb_wstream_file_struct {
   my_off_t offset;
   void *userdata;
   xb_stream_write_callback *write;
+  /* Persistent flag byte applied to every PAYLOAD / SPARSE chunk this
+  writer emits.  Today only XB_STREAM_FLAG_SINGLE_OBJECT is set here,
+  by ds_open_plain via xbstream_open_plain. */
+  uchar flags;
 };
 
 static int xb_stream_flush(xb_wstream_file_t *file);
@@ -82,7 +86,8 @@ xb_wstream_t *xb_stream_write_new(void) {
 xb_wstream_file_t *xb_stream_write_open(xb_wstream_t *stream, const char *path,
                                         MY_STAT *mystat __attribute__((unused)),
                                         void *userdata,
-                                        xb_stream_write_callback *onwrite) {
+                                        xb_stream_write_callback *onwrite,
+                                        uchar flags) {
   xb_wstream_file_t *file;
   ulong path_len;
 
@@ -105,6 +110,7 @@ xb_wstream_file_t *xb_stream_write_open(xb_wstream_t *stream, const char *path,
   file->offset = 0;
   file->chunk_ptr = file->chunk;
   file->chunk_free = XB_STREAM_MIN_CHUNK_SIZE;
+  file->flags = flags;
   if (onwrite) {
 #ifdef __WIN__
     setmode(fileno(stdout), _O_BINARY);
@@ -194,7 +200,7 @@ static int xb_stream_write_chunk(xb_wstream_file_t *file, const void *buf,
   memcpy(ptr, XB_STREAM_CHUNK_MAGIC, sizeof(XB_STREAM_CHUNK_MAGIC) - 1);
   ptr += sizeof(XB_STREAM_CHUNK_MAGIC) - 1;
 
-  *ptr++ = 0; /* Chunk flags */
+  *ptr++ = file->flags; /* Chunk flags */
 
   /* Chunk type */
   *ptr++ = (uchar)(sparse_map_size > 0 ? XB_CHUNK_TYPE_SPARSE
@@ -285,7 +291,7 @@ static int xb_stream_write_eof(xb_wstream_file_t *file) {
   memcpy(ptr, XB_STREAM_CHUNK_MAGIC, sizeof(XB_STREAM_CHUNK_MAGIC) - 1);
   ptr += sizeof(XB_STREAM_CHUNK_MAGIC) - 1;
 
-  *ptr++ = 0; /* Chunk flags */
+  *ptr++ = file->flags; /* Chunk flags */
 
   *ptr++ = (uchar)XB_CHUNK_TYPE_EOF; /* Chunk type */
 

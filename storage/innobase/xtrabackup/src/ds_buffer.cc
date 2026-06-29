@@ -53,7 +53,7 @@ static void buffer_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_buffer = {&buffer_init, &buffer_open,  &buffer_write,
                               nullptr,      &buffer_close, &buffer_deinit,
-                              nullptr /* report_metrics */};
+                              nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 /* Change the default buffer size */
 void ds_buffer_set_size(ds_ctxt_t *ctxt, size_t size) {

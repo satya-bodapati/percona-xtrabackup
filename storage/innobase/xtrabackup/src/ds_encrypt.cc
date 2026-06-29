@@ -96,7 +96,7 @@ static void encrypt_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_encrypt = {&encrypt_init, &encrypt_open,  &encrypt_write,
                                nullptr,       &encrypt_close, &encrypt_deinit,
-                               nullptr /* report_metrics */};
+                               nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 static uint encrypt_iv_len = 0;
 

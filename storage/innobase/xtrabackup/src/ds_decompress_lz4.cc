@@ -293,7 +293,7 @@ static void decompress_deinit(ds_ctxt_t *ctxt);
 datasink_t datasink_decompress_lz4 = {
     &decompress_init, &decompress_open,  &decompress_write,
     nullptr,          &decompress_close, &decompress_deinit,
-    nullptr /* report_metrics */};
+    nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 static ds_ctxt_t *decompress_init(const char *root) {
   ds_decompress_lz4_ctxt_t *decompress_ctxt = new ds_decompress_lz4_ctxt_t;

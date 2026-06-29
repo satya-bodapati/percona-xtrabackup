@@ -136,6 +136,40 @@ ds_file_t *ds_open_track_uncomp(ds_ctxt_t *ctxt, const char *path,
   return file;
 }
 
+ds_file_t *ds_open_single_object(ds_ctxt_t *ctxt, const char *path,
+                                 MY_STAT *stat) {
+  /* Walk the chain looking for the first datasink that knows how to
+  handle single-object output.  Wrappers (compress, encrypt, buffer,
+  tmpfile) leave their open_single_object slot null and we skip past
+  them -- the caller wants the bytes to land without those transforms.
+  We stop at the first datasink that does implement the slot:
+    - ds_xbstream tags every chunk it emits with
+      XB_STREAM_FLAG_SINGLE_OBJECT so xbcloud put accumulates them
+      into one cloud object.
+    - ds_local writes the file straight to disk (no chunking, so a
+      regular file already is the single-object representation).
+  We do not walk PAST a chunking layer like ds_xbstream into its own
+  underlying byte sink (ds_stdout / ds_fifo) -- the framing layer is
+  where the SINGLE_OBJECT signal originates. */
+  ds_ctxt_t *cur = ctxt;
+  while (cur != nullptr) {
+    if (cur->datasink->open_single_object != nullptr) {
+      ds_file_t *file = cur->datasink->open_single_object(cur, path, stat);
+      if (file != nullptr) {
+        file->datasink = cur->datasink;
+        file->ctxt = cur;
+        file->uncomp_bytes = nullptr;
+      }
+      return file;
+    }
+    cur = cur->pipe_ctxt;
+  }
+  msg("ds_open_single_object(): no datasink in chain implements "
+      "open_single_object for path %s.\n",
+      path);
+  return nullptr;
+}
+
 /************************************************************************
 Write to a datasink file.
 @return 0 on success, 1 on error. */

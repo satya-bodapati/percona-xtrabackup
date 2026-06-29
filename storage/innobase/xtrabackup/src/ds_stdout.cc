@@ -47,7 +47,7 @@ static void stdout_report_metrics(const ds_ctxt_t *ctxt,
 
 datasink_t datasink_stdout = {
     &stdout_init,  &stdout_open,   &stdout_write,         nullptr,
-    &stdout_close, &stdout_deinit, &stdout_report_metrics};
+    &stdout_close, &stdout_deinit, &stdout_report_metrics, nullptr /* open_single_object */};
 
 static ds_ctxt_t *stdout_init(const char *root) {
   ds_ctxt_t *ctxt;
