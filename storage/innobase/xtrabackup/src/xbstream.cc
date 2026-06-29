@@ -393,7 +393,7 @@ static int mode_create(int argc, char **argv) {
     filepath_dst = opt_absolute_names
                        ? filepath
                        : safer_name_suffix(filepath, &filepath_prefix_len);
-    file = xb_stream_write_open(stream, filepath_dst, &mystat, NULL, NULL);
+    file = xb_stream_write_open(stream, filepath_dst, &mystat, NULL, NULL, 0);
     if (file == NULL) {
       goto err;
     }

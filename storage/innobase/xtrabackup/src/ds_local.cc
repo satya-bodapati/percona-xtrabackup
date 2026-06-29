@@ -61,9 +61,12 @@ static void local_deinit(ds_ctxt_t *ctxt);
 static void local_report_metrics(const ds_ctxt_t *ctxt,
                                  std::vector<ds_metric> &out);
 
+/* ds_local does not chunk: a single regular file on disk already is
+the "single object" representation.  open_single_object is therefore the same
+function as open. */
 datasink_t datasink_local = {&local_init,          &local_open,  &local_write,
                              &local_write_sparse,  &local_close, &local_deinit,
-                             &local_report_metrics};
+                             &local_report_metrics, &local_open};
 
 /**
   Checks if punch hole via fallocate is supported

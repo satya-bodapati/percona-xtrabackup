@@ -54,7 +54,7 @@ static void tmpfile_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_tmpfile = {&tmpfile_init, &tmpfile_open,  &tmpfile_write,
                                nullptr,       &tmpfile_close, &tmpfile_deinit,
-                               nullptr /* report_metrics */};
+                               nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 extern MY_TMPDIR mysql_tmpdir_list;
 

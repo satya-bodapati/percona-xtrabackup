@@ -123,7 +123,7 @@ static void decrypt_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_decrypt = {&decrypt_init, &decrypt_open,  &decrypt_write,
                                nullptr,       &decrypt_close, &decrypt_deinit,
-                               nullptr /* report_metrics */};
+                               nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 static ds_ctxt_t *decrypt_init(const char *root) {
   if (xb_crypt_init(NULL)) {

@@ -54,7 +54,7 @@ static void compress_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_compress_zstd = {
     &compress_init,  &compress_open,   &compress_write, nullptr,
-    &compress_close, &compress_deinit, nullptr /* report_metrics */};
+    &compress_close, &compress_deinit, nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 static ds_ctxt_t *compress_init(const char *root) {
   zstd_compress_ctxt_t *compress_ctxt = new zstd_compress_ctxt_t;

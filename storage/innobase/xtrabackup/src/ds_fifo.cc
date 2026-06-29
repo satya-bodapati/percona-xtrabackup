@@ -92,7 +92,7 @@ static void fifo_report_metrics(const ds_ctxt_t *ctxt,
 
 datasink_t datasink_fifo = {
     &fifo_init,  &fifo_open,   &fifo_write,         nullptr,
-    &fifo_close, &fifo_deinit, &fifo_report_metrics};
+    &fifo_close, &fifo_deinit, &fifo_report_metrics, nullptr /* open_single_object */};
 
 static void cleanup_on_error(const char *root, ds_fifo_ctxt_t *ctxt) {
   std::string path;

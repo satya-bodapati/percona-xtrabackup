@@ -52,6 +52,8 @@ General streaming interface */
 static ds_ctxt_t *xbstream_init(const char *root);
 static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
                                 MY_STAT *mystat);
+static ds_file_t *xbstream_open_single_object(ds_ctxt_t *ctxt, const char *path,
+                                      MY_STAT *mystat);
 static int xbstream_write(ds_file_t *file, const void *buf, size_t len);
 static int xbstream_write_sparse(ds_file_t *file, const void *buf, size_t len,
                                  size_t sparse_map_size,
@@ -62,7 +64,11 @@ static void xbstream_deinit(ds_ctxt_t *ctxt);
 
 datasink_t datasink_xbstream = {
     &xbstream_init,  &xbstream_open,   &xbstream_write, &xbstream_write_sparse,
-    &xbstream_close, &xbstream_deinit, nullptr /* report_metrics */};
+    &xbstream_close, &xbstream_deinit, nullptr /* report_metrics */,
+    &xbstream_open_single_object};
+
+static ds_file_t *xbstream_open_impl(ds_ctxt_t *ctxt, const char *path,
+                                     MY_STAT *mystat, uchar flags);
 
 static ssize_t my_xbstream_write_callback(xb_wstream_file_t *f
                                           __attribute__((unused)),
@@ -119,6 +125,19 @@ err:
 
 static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
                                 MY_STAT *mystat) {
+  return xbstream_open_impl(ctxt, path, mystat, 0);
+}
+
+static ds_file_t *xbstream_open_single_object(ds_ctxt_t *ctxt, const char *path,
+                                      MY_STAT *mystat) {
+  /* All chunks this writer emits (PAYLOAD, SPARSE, EOF) carry the
+  SINGLE_OBJECT flag so xbcloud put accumulates them into one cloud
+  object per path. */
+  return xbstream_open_impl(ctxt, path, mystat, XB_STREAM_FLAG_SINGLE_OBJECT);
+}
+
+static ds_file_t *xbstream_open_impl(ds_ctxt_t *ctxt, const char *path,
+                                     MY_STAT *mystat, uchar flags) {
   ds_file_t *file;
   ds_parallel_stream_ctxt_t *parallel_stream_ctxt;
   ds_stream_file_t *stream_file;
@@ -154,7 +173,7 @@ static ds_file_t *xbstream_open(ds_ctxt_t *ctxt, const char *path,
   xbstream = stream_ctxt->xbstream;
 
   xbstream_file = xb_stream_write_open(xbstream, path, mystat, stream_ctxt,
-                                       my_xbstream_write_callback);
+                                       my_xbstream_write_callback, flags);
 
   if (xbstream_file == NULL) {
     msg("xb_stream_write_open() failed.\n");

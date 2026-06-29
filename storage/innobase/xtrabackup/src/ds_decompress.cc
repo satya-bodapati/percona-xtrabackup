@@ -87,7 +87,7 @@ static void decompress_deinit(ds_ctxt_t *ctxt);
 datasink_t datasink_decompress = {
     &decompress_init, &decompress_open,  &decompress_write,
     nullptr,          &decompress_close, &decompress_deinit,
-    nullptr /* report_metrics */};
+    nullptr /* report_metrics */, nullptr /* open_single_object */};
 
 static int decompress_process_metadata(ds_decompress_file_t *file,
                                        const char **ptr, size_t *len);
