@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "datasink.h"
 #include <my_base.h>
 #include "common.h"
+#include "xb_files_jsonl.h"
 #include "ds_buffer.h"
 #include "ds_compress.h"
 #include "ds_compress_lz4.h"
@@ -129,6 +130,21 @@ ds_file_t *ds_open_with_ctx(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
   return file;
 }
 
+ds_file_t *ds_open_track_manifest(ds_ctxt_t *ctxt, const char *path,
+                                   MY_STAT *stat) {
+  void *file_ctx = xb_files_jsonl::new_file_ctx(path);
+  /* file_ctx is nullptr when xb_files_jsonl is not active; that
+  collapses to a plain ds_open() with zero overhead. */
+  return ds_open_with_ctx(ctxt, path, stat, file_ctx);
+}
+
+void ds_file_set_space(ds_file_t *file, uint64_t space_id,
+                       uint32_t page_size) {
+  if (file == nullptr) return;
+  xb_files_jsonl::set_uint64(file->file_ctx, "space_id", space_id);
+  xb_files_jsonl::set_uint32(file->file_ctx, "page_size", page_size);
+}
+
 void ds_track_uncomp(ds_file_t *file, xb_uncomp_bytes *uncomp_bytes) {
   if (file != nullptr) {
     file->uncomp_bytes = uncomp_bytes;
@@ -224,7 +240,18 @@ int ds_write_sparse(ds_file_t *file, const void *buf, size_t len,
 /************************************************************************
 Close a datasink file.
 @return 0 on success, 1, on error. */
-int ds_close(ds_file_t *file) { return file->datasink->close(file); }
+int ds_close(ds_file_t *file) {
+  /* Capture file_ctx before close: the close chain may free the
+  ds_file_t we hold here.  The Document pointed at by file_ctx is
+  owned by xb_files_jsonl, not by file, so it survives the close
+  -- we serialize and release it after the close chain unwinds. */
+  void *ctx = file->file_ctx;
+  const int rc = file->datasink->close(file);
+  if (rc == 0 && ctx != nullptr) {
+    xb_files_jsonl::append_and_release(ctx);
+  }
+  return rc;
+}
 
 /************************************************************************
 Destroy a datasink handle */

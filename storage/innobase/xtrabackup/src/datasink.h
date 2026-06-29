@@ -204,6 +204,21 @@ to backup_files.jsonl at the top-level ds_close. */
 ds_file_t *ds_open_with_ctx(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat,
                             void *file_ctx);
 
+/** Convenience that allocates a fresh per-file context document via
+xb_files_jsonl::new_file_ctx (with @p path pre-populated) and binds
+it to the open call.  When xb_files_jsonl is not active, returns a
+file with file_ctx == nullptr -- identical to plain ds_open from
+the caller's point of view, no overhead. */
+ds_file_t *ds_open_track_manifest(ds_ctxt_t *ctxt, const char *path,
+                                  MY_STAT *stat);
+
+/** Annotate the per-file context document with the InnoDB space_id
+and page_size of the file being opened.  Called by
+xtrabackup_copy_datafile_func once the InnoDB metadata is known.
+No-op when file or file->file_ctx is null. */
+void ds_file_set_space(ds_file_t *file, uint64_t space_id,
+                       uint32_t page_size);
+
 /** Open a datasink file in "plain" mode -- bypass any configured
 ds_compress / ds_encrypt wrappers and write the bytes directly through
 the terminal datasink (ds_local / ds_xbstream / ds_fifo).  Used for a
