@@ -109,12 +109,19 @@ bool begin(const char *staging_dir) {
     msg("xb_files_jsonl::begin: already active\n");
     return false;
   }
-  /* Use a hidden staging filename so it doesn't collide with the
-  final XB_BACKUP_FILES_JSONL that publish() writes through
-  ds_open_single_object into the same directory in local mode. */
+  /* Use a hidden, pid-suffixed staging filename so it does not
+  collide with the final XB_BACKUP_FILES_JSONL that publish() writes
+  through ds_open_single_object into the same directory in local
+  mode, and does not collide with a sibling xtrabackup process that
+  happens to default to the same target_dir
+  (./xtrabackup_backupfiles/) when --stream is used without
+  --target-dir -- e.g. the parallel PXB test harness. */
+  char pid_buf[32];
+  snprintf(pid_buf, sizeof(pid_buf), ".%ld", (long)getpid());
   g_state.staging_path = staging_dir;
   g_state.staging_path += "/.";
   g_state.staging_path += XB_BACKUP_FILES_JSONL;
+  g_state.staging_path += pid_buf;
   g_state.staging_path += ".staging";
 
   g_state.fd = ::open(g_state.staging_path.c_str(),

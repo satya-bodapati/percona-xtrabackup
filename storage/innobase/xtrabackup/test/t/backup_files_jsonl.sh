@@ -52,9 +52,11 @@ print("case1: space_id / page_size annotation ok")
 PY
 diff -q $topdir/backup1/backup_files.jsonl $topdir/lsn1/backup_files.jsonl \
   || die "case1: target-dir and extra-lsndir backup_files.jsonl differ"
-# Hidden staging file must be cleaned up.
-[ ! -f "$topdir/backup1/.backup_files.jsonl.staging" ] || \
+# Hidden staging file (.backup_files.jsonl.<pid>.staging) must be
+# cleaned up.
+if ls "$topdir/backup1"/.backup_files.jsonl.*.staging 2>/dev/null | grep -q .; then
   die "case1: staging file leaked into target-dir"
+fi
 
 rm -rf $topdir/backup1 $topdir/lsn1
 
