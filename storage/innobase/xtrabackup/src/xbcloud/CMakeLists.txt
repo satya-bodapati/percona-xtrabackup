@@ -44,6 +44,7 @@ INCLUDE_DIRECTORIES(
 MYSQL_ADD_EXECUTABLE(xbcloud
   xbcloud.cc
   ../xbstream_read.cc
+  ../xbstream_write.cc
   http.cc
   object_store.cc
   azure.cc

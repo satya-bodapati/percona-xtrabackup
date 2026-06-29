@@ -768,6 +768,17 @@ struct file_entry_t {
   my_off_t chunk_idx;
   my_off_t offset;
   std::string path;
+  /* True when the producer flagged this file with
+  XB_STREAM_FLAG_SINGLE_OBJECT (e.g. backup_metadata.json from
+  ds_open_single_object).  Such files are accumulated locally and
+  uploaded as ONE cloud object with the bare path name (no
+  ".NNNN" chunk-index suffix) so operators can `aws s3 cp` them
+  directly. */
+  bool single_object = false;
+  /* Payload buffer used only when single_object is true.  PAYLOAD
+  chunk payloads are appended here in arrival order; at EOF the
+  accumulated bytes are uploaded in one PUT. */
+  std::vector<char> accumulated;
 };
 
 /**
@@ -874,6 +885,60 @@ void put_func(put_thread_ctxt_t &cntx) {
         res = XB_STREAM_READ_ERROR;
         break;
       }
+    }
+
+    /* If any chunk for this file carries XB_STREAM_FLAG_SINGLE_OBJECT,
+    remember it on the entry.  All chunks for a single-object file
+    should carry the flag, but track from the first one we see in
+    case of partial flag drop. */
+    if (chunk.flags & XB_STREAM_FLAG_SINGLE_OBJECT) {
+      entry->single_object = true;
+    }
+
+    if (entry->single_object) {
+      /* Accumulate payload bytes locally.  We strip xbstream framing
+      so the resulting cloud object is the plain backup file (e.g.
+      backup_metadata.json) that operators can read directly. */
+      if (chunk.type == XB_CHUNK_TYPE_PAYLOAD && chunk.length > 0) {
+        const char *p = static_cast<const char *>(chunk.data);
+        entry->accumulated.insert(entry->accumulated.end(), p,
+                                   p + chunk.length);
+        entry->offset += chunk.length;
+        entry->chunk_idx++;
+      }
+      if (chunk.type == XB_CHUNK_TYPE_EOF) {
+        /* Single PUT with the bare path name (no chunk-index
+        suffix).  Object metadata could carry single-object=1 in a
+        follow-up commit; for now the bare-name convention is the
+        signal xbcloud get reads (any object whose name lacks the
+        chunk-index ".NNNN" suffix is treated as single-object). */
+        const std::string object_name = backup_name + "/" + chunk.path;
+        Http_buffer buf;
+        buf.append(entry->accumulated);
+        const size_t total = entry->accumulated.size();
+        cntx.store->async_upload_object(
+            *cntx.container, object_name, buf, &h,
+            std::bind(
+                [&](bool ok, std::string path, size_t length,
+                    std::atomic<bool> *err) {
+                  if (ok) {
+                    msg_ts(
+                        "%s: [%d] successfully uploaded single-object: %s, "
+                        "size: %zu\n",
+                        my_progname, cntx.thread_id, path.c_str(), length);
+                  } else {
+                    msg_ts(
+                        "%s: [%d] error: failed to upload single-object: %s, "
+                        "size: %zu\n",
+                        my_progname, cntx.thread_id, path.c_str(), length);
+                    err->store(true);
+                  }
+                },
+                std::placeholders::_1, object_name, total, cntx.has_errors));
+        filehash.erase(entry->path);
+      }
+      memset(&chunk, 0, sizeof(chunk));
+      continue;
     }
 
     std::string file_name = build_file_name(chunk.path, entry->chunk_idx);
@@ -1084,11 +1149,23 @@ bool xbcloud_delete(Object_store *store, const std::string &container,
     std::string file_name;
     my_off_t idx;
     if (error) break;
-    if (!chunk_name_to_file_name(obj, file_name, idx)) {
-      continue;
-    }
-    if (skip_file(file_name, backup_name)) {
-      continue;
+    /* Recognise chunked objects ("<path>.NNNNNNNNNNNNNNNNNNNN") and
+    single-object files (bare names with no chunk-index suffix --
+    produced by xbcloud put when the source xbstream chunks carry
+    XB_STREAM_FLAG_SINGLE_OBJECT).  Both kinds get deleted; only
+    chunked names are subject to skip_file's partial-list filter
+    because partial_file_list is keyed on the unsuffixed name and a
+    single-object's object key already IS the unsuffixed name. */
+    if (chunk_name_to_file_name(obj, file_name, idx)) {
+      if (skip_file(file_name, backup_name)) {
+        continue;
+      }
+    } else {
+      /* Single-object: object name is the path itself. */
+      file_name = obj;
+      if (skip_file(file_name, backup_name)) {
+        continue;
+      }
     }
     msg_ts("%s: Deleting %s.\n", my_progname, obj.c_str());
     if (!store->async_delete_object(
@@ -1244,6 +1321,73 @@ end:
   }
 }
 
+/* Write callback used by xb_stream_write_open below.  Invoked by the
+xbstream writer for each block of framing+payload bytes.  We forward
+the bytes to the same FD the chunked-download path uses. */
+static ssize_t single_object_write_callback(
+    xb_wstream_file_t *f __attribute__((unused)), void *userdata,
+    const void *buf, size_t len) {
+  File fd = *static_cast<File *>(userdata);
+  if (my_write(fd, static_cast<const uchar *>(buf), len,
+               MYF(MY_WME | MY_NABP))) {
+    return -1;
+  }
+  return len;
+}
+
+/* Download a single-object file (one whose cloud-object name has no
+".NNNN" suffix because xbcloud put accumulated all its
+XB_STREAM_FLAG_SINGLE_OBJECT chunks into one PUT) and emit it as a
+PAYLOAD_PLAIN + EOF xbstream pair to @p fd.  The relative-to-
+@p backup_name path becomes the chunk's path. */
+static bool download_single_object(Object_store *store,
+                                   const std::string &container,
+                                   const std::string &backup_name,
+                                   const std::string &object,
+                                   File fd) {
+  bool ok = false;
+  Http_buffer body = store->download_object(container, object, ok);
+  if (!ok) {
+    msg_ts("%s: failed to download single-object %s\n", my_progname,
+           object.c_str());
+    return false;
+  }
+
+  /* Strip the "<backup_name>/" prefix to recover the file's
+  relative path. */
+  std::string rel = object;
+  const std::string prefix = backup_name + "/";
+  if (rel.compare(0, prefix.size(), prefix) == 0) {
+    rel = rel.substr(prefix.size());
+  }
+
+  xb_wstream_t *stream = xb_stream_write_new();
+  if (stream == nullptr) {
+    return false;
+  }
+  xb_wstream_file_t *wfile =
+      xb_stream_write_open(stream, rel.c_str(), nullptr, &fd,
+                           single_object_write_callback,
+                           XB_STREAM_FLAG_SINGLE_OBJECT);
+  if (wfile == nullptr) {
+    xb_stream_write_done(stream);
+    return false;
+  }
+
+  bool rc = true;
+  if (body.size() > 0 && xb_stream_write_data(wfile, body.begin(), body.size())) {
+    rc = false;
+  }
+  if (xb_stream_write_close(wfile)) rc = false;
+  xb_stream_write_done(stream);
+
+  if (rc) {
+    msg_ts("%s: Downloaded single-object %s, size %zu\n", my_progname,
+           object.c_str(), body.size());
+  }
+  return rc;
+}
+
 bool xbcloud_download(Object_store *store, const std::string &container,
                       const std::string &backup_name) {
   std::vector<std::string> object_list;
@@ -1255,17 +1399,45 @@ bool xbcloud_download(Object_store *store, const std::string &container,
            backup_name.c_str());
     return false;
   }
+  /* Separate single-object files (bare-named) from chunked ones.
+  Single-objects are downloaded synchronously up front because they
+  are small (manifest files) and need to be emitted into the output
+  FD as PAYLOAD_PLAIN xbstream frames -- which the parallel chunked
+  pipeline below does not produce. */
+  std::vector<std::string> single_objects;
   struct global_list_t *global_list = new struct global_list_t;
   for (const auto &obj : object_list) {
     my_off_t idx;
     std::string file_name;
     if (!chunk_name_to_file_name(obj, file_name, idx)) {
+      /* Bare name -- a single-object file. */
+      if (skip_file(obj, backup_name)) continue;
+      single_objects.push_back(obj);
       continue;
     }
     if (skip_file(file_name, backup_name)) {
       continue;
     }
     global_list->add(file_name, idx);
+  }
+
+  /* Emit single-object files first so they appear at the top of the
+  output stream.  When opt_threads > 1 the chunked path uses FIFOs
+  and parallel writers; single-object files go straight to stdout
+  here. */
+  if (!single_objects.empty()) {
+    File out_fd = fileno(stdout);
+    for (const auto &obj : single_objects) {
+      if (!download_single_object(store, container, backup_name, obj,
+                                  out_fd)) {
+        has_errors.store(true);
+        break;
+      }
+    }
+    if (has_errors.load()) {
+      delete global_list;
+      return false;
+    }
   }
 
   /* Create FIFO files if necessary */
