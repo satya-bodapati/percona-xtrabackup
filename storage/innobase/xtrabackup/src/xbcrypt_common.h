@@ -35,6 +35,12 @@ extern char *ds_encrypt_key;
 extern char *ds_encrypt_key_file;
 extern ulong ds_encrypt_algo;
 
+/* Human-readable name of the currently configured cipher: returns one
+of "NONE", "AES128", "AES192", "AES256".  Defined here so xbcrypt and
+xbstream (which both build ds_encrypt.cc but not xtrabackup.cc) can
+link.  ds_encrypt.cc uses it to annotate backup_files.jsonl. */
+const char *xb_crypt_algo_name();
+
 /******************************************************************************
 Utility interface */
 bool xb_crypt_read_key_file(const char *filename, void **key, uint *keylength);

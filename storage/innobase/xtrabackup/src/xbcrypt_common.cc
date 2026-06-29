@@ -40,6 +40,16 @@ static uint encrypt_algos[] = {GCRY_CIPHER_NONE, GCRY_CIPHER_AES128,
                                GCRY_CIPHER_AES192, GCRY_CIPHER_AES256};
 static uint encrypt_algo;
 
+static const char *encrypt_algo_names_arr[] = {"NONE", "AES128", "AES192",
+                                                "AES256"};
+
+const char *xb_crypt_algo_name() {
+  if (ds_encrypt_algo >= array_elements(encrypt_algo_names_arr)) {
+    return "UNKNOWN";
+  }
+  return encrypt_algo_names_arr[ds_encrypt_algo];
+}
+
 #if !defined(GCRYPT_VERSION_NUMBER) || (GCRYPT_VERSION_NUMBER < 0x010600)
 GCRY_THREAD_OPTION_PTHREAD_IMPL;
 #endif

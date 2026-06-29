@@ -29,8 +29,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcrypt.h"
 #include "xbcrypt_common.h"
 
-extern const char *xtrabackup_encrypt_algo_names[];
-
 #define XB_CRYPT_CHUNK_SIZE ((size_t)(ds_encrypt_encrypt_chunk_size))
 
 struct encrypt_thread_ctxt_t {
@@ -297,10 +295,9 @@ static int encrypt_close(ds_file_t *file) {
   dest_file = crypt_file->dest_file;
 
   /* Record the encrypt algorithm in the per-file backup_files.jsonl
-  entry.  ds_encrypt_algo is the index into xtrabackup_encrypt_algo_names
-  (NONE / AES128 / AES192 / AES256). */
-  xb_files_jsonl::set_string(file->file_ctx, "encrypt",
-                             xtrabackup_encrypt_algo_names[ds_encrypt_algo]);
+  entry.  xb_crypt_algo_name() is defined in xbcrypt_common.cc so the
+  symbol exists for xtrabackup, xbcrypt and xbstream alike. */
+  xb_files_jsonl::set_string(file->file_ctx, "encrypt", xb_crypt_algo_name());
 
   rc = xb_crypt_write_close(crypt_file->xbcrypt_file);
 
