@@ -124,6 +124,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 #include "xb0xb.h"
 
+#ifdef XTRABACKUP
+#include "dynamic_metadata_json.h"
+#endif
+
 /** fil_space_t::flags for hard-coded tablespaces */
 extern uint32_t predefined_flags;
 
@@ -1982,6 +1986,19 @@ dberr_t srv_start(bool create_new_db IF_XB(, lsn_t to_lsn)) {
       DBUG_SUICIDE();
     });
 
+#ifdef XTRABACKUP
+    /* PXB-2865: before the conditional dict_metadata->store() block, fold
+    any records preserved from an earlier --apply-log-only prepare in this
+    backup's JSON sidecar back into dict_metadata. If this is the final
+    prepare (!srv_apply_log_only), the store below will apply them along
+    with anything collected from this prepare's own redo scan. If this is
+    yet another --apply-log-only step, the save below will re-emit them to
+    the sidecar so they keep accumulating. */
+    if (!recv_sys->is_cloned_db) {
+      xb::dyn_meta::load_into(dict_metadata);
+    }
+#endif
+
     if (!recv_sys->is_cloned_db && !dict_metadata->empty()
                                         IF_XB(&&!srv_apply_log_only)) {
       ut_a(!srv_read_only_mode);
@@ -2014,6 +2031,22 @@ dberr_t srv_start(bool create_new_db IF_XB(, lsn_t to_lsn)) {
       /* Flush logs to persist the changes. */
       log_buffer_flush_to_disk(*log_sys);
     }
+#ifdef XTRABACKUP
+    /* PXB-2865: after the conditional store(), decide what to do with the
+    sidecar:
+      * --apply-log-only: persist whatever is in dict_metadata (including
+        what we loaded from the sidecar above) so the next prepare can
+        pick it up.
+      * Final prepare: dict_metadata->store() above has already written
+        everything to mysql.innodb_dynamic_metadata, so drop the sidecar. */
+    if (!recv_sys->is_cloned_db) {
+      if (srv_apply_log_only) {
+        xb::dyn_meta::save_from(dict_metadata);
+      } else {
+        xb::dyn_meta::remove();
+      }
+    }
+#endif
     ut::delete_(dict_metadata);
     ut_a(checkpoint_lsn_after_recovery == log_sys->last_checkpoint_lsn.load());
 
