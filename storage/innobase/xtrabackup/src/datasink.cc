@@ -181,6 +181,11 @@ ds_file_t *ds_open_single_object(ds_ctxt_t *ctxt, const char *path,
         file->datasink = cur->datasink;
         file->ctxt = cur;
         file->uncomp_bytes = nullptr;
+        /* leaf datasinks like ds_local allocate ds_file_t via
+        my_malloc, which leaves bytes uninitialized; zero file_ctx
+        explicitly so ds_close does not fire append_and_release on a
+        garbage pointer. */
+        file->file_ctx = nullptr;
       }
       return file;
     }

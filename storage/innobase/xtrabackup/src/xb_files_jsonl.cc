@@ -109,9 +109,13 @@ bool begin(const char *staging_dir) {
     msg("xb_files_jsonl::begin: already active\n");
     return false;
   }
+  /* Use a hidden staging filename so it doesn't collide with the
+  final XB_BACKUP_FILES_JSONL that publish() writes through
+  ds_open_single_object into the same directory in local mode. */
   g_state.staging_path = staging_dir;
-  g_state.staging_path += "/";
+  g_state.staging_path += "/.";
   g_state.staging_path += XB_BACKUP_FILES_JSONL;
+  g_state.staging_path += ".staging";
 
   g_state.fd = ::open(g_state.staging_path.c_str(),
                        O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
@@ -281,6 +285,12 @@ bool publish(ds_ctxt_t *ds_root) {
     return false;
   }
   return true;
+}
+
+void cleanup_staging() {
+  if (g_state.staging_path.empty()) return;
+  ::unlink(g_state.staging_path.c_str());
+  g_state.staging_path.clear();
 }
 
 bool write_to_dir(const char *dir) {

@@ -4739,6 +4739,7 @@ void xtrabackup_backup_func(void) {
                 << " under --extra-lsndir";
     exit(EXIT_FAILURE);
   }
+  xb_files_jsonl::cleanup_staging();
 
   xtrabackup_destroy_datasinks();
 

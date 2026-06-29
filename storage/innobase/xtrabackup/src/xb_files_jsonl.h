@@ -109,6 +109,10 @@ plain bytes (direct filesystem write, no datasinks).  Used to
 mirror under --extra-lsndir.  Returns true on success. */
 bool write_to_dir(const char *dir);
 
+/* Unlink the staging file and forget its path.  Call once at the
+very end (after publish + write_to_dir).  Idempotent. */
+void cleanup_staging();
+
 }  // namespace xb_files_jsonl
 
 #endif
