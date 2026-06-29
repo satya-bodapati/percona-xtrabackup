@@ -134,3 +134,46 @@ outputs:
 
 A backup can be round-tripped through any of these without the
 manifest content changing.
+
+## Future: segments-as-files for files larger than the per-object cap
+
+The xbstream protocol has no per-file size limit, but the cloud
+backends it pipes into do (S3's 5 TiB per object, for example).
+Today this is not handled in tree -- writing a 6 TiB file through
+`--stream=xbstream | xbcloud put` would fail when xbcloud's last
+chunk pushes the cumulative size past the cap. In the next release,
+together with ds_cloud direct streaming, the producer will split
+oversized files at write time into N segments named
+`<path>.r1`, `<path>.r2`, ... and emit each segment as an
+**independent xbstream file**:
+
+```
+producer:
+  ds_xbstream open("test/big.ibd.r1")   ... PAYLOAD chunks ... EOF
+  ds_xbstream open("test/big.ibd.r2")   ... PAYLOAD chunks ... EOF
+```
+
+No wire-format change is needed for this. Each `.rN` is a
+complete xbstream file with its own PAYLOAD chunks (in offset
+order within the segment) and its own EOF chunk. The xbstream
+protocol sees N files, not one parallelised file.
+
+The "these N segments compose one logical file" knowledge lives
+above the protocol layer, in `backup_files.jsonl`'s per-file
+`segments` block. See `manifest_format.md` for the schema and the
+restore-time reassembly logic.
+
+Why not PARTIAL_EOF? An earlier design conversation considered
+introducing a `PARTIAL_EOF` chunk type plus a `part_id` field in
+the header to allow N producers to write parts of one xbstream
+file with explicit "I'm done with my share" signalling. That
+mechanism is more flexible but also more invasive (wire format
+extension, producer-side coordination, receiver-side tally) and we
+don't need it for the rollover case: segments-as-files gets
+per-segment parallelism with zero protocol change.
+
+`PARTIAL_EOF` remains parked. It would only be needed if we ever
+support multiple independent producer processes feeding into one
+xbstream file with no shared coordination -- a use case we do not
+have today. The sketch lives in PXB-3754's design comments for
+future reference.

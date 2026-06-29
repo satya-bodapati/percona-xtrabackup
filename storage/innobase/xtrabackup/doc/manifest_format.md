@@ -216,3 +216,60 @@ This file is the entry point of a larger manifest framework:
 
 See PXB-3754 for the full design doc and PXB-3787 for the
 overarching cloud-direct epic.
+
+### Future: large files split into segments (`.rN`)
+
+When a logical file exceeds a configured rollover threshold (the
+ds_cloud per-object cap, e.g. 5 TiB on S3, or an operator-chosen
+size for any backend) the producer will split it at write time
+and emit **each segment as its own xbstream file**:
+
+```
+test/big.ibd (6 TB, threshold 5 TB) becomes
+  test/big.ibd.r1   first 5 TB     -- complete xbstream file: PAYLOAD ... EOF
+  test/big.ibd.r2   last 1 TB      -- complete xbstream file: PAYLOAD ... EOF
+```
+
+The xbstream protocol sees N independent, fully-formed files.
+No new chunk type, no PARTIAL_EOF, no inter-segment dependency on
+the wire. The wire format does not change.
+
+The "they are one logical file" rollup lives in
+`backup_files.jsonl`:
+
+```json
+{
+  "path": "test/big.ibd",
+  "space_id": 42,
+  "page_size": 16384,
+  "segments": [
+    { "name": "test/big.ibd.r1", "start": 0,             "length": 5497558138880 },
+    { "name": "test/big.ibd.r2", "start": 5497558138880, "length": 1099511627776 }
+  ]
+}
+```
+
+Restore reads the manifest, downloads each segment in whatever
+order is convenient, and `pwrite()`s the segment bytes at `start`
+into the destination file.
+
+Parallelism follows the segment boundary, not the chunk boundary:
+
+| Stage | What runs in parallel |
+|-------|-----------------------|
+| Producer | N writer tasks, one per segment, each emitting its own xbstream file |
+| `xbcloud put` | N parallel PUTs, one cloud object per segment |
+| `xbcloud get` | N parallel GETs |
+| `xbstream -x` | Per-segment write to `.rN`; helper reassembles via the manifest's `segments` list |
+
+Within a single segment the writer is still sequential -- PAYLOAD
+chunks in offset order, EOF last. EOF is one per segment, exactly
+where it has always been.
+
+`PARTIAL_EOF` was sketched in early design conversations as a
+mechanism for many producers contributing to one logical file. It
+is NOT needed for the rollover case above -- segments-as-files
+covers it without any wire-format change. PARTIAL_EOF stays
+parked for a hypothetical future use case where multiple
+independent processes feed parts of ONE xbstream file with no
+shared producer-side coordination, which we don't have today.
