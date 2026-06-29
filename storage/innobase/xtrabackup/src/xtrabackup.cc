@@ -8137,6 +8137,40 @@ static void handle_options(int argc, char **argv, int *argc_client,
                   "--apply-redo-only going forward. Both options work and "
                   "behave identically; --apply-log-only is not being removed.";
   }
+
+  /* Deprecated options that the option parser still accepts for
+  backward compatibility but whose values are no longer consumed.
+  Each emits a one-time startup warning so existing scripts keep
+  running unchanged while operators learn the option is dead. */
+  if (check_if_param_set("log")) {
+    xb::warn() << "--log is deprecated and has no effect.  Kept for "
+                  "MySQL CLI compatibility only.";
+  }
+  if (check_if_param_set("innodb")) {
+    xb::warn() << "--innodb is deprecated and has no effect.  Kept for "
+                  "MySQL CLI compatibility only.";
+  }
+  if (check_if_param_set("create-ib-logfile")) {
+    xb::warn() << "--create-ib-logfile is deprecated and has no effect.  "
+                  "The option's help text has long noted that it does not "
+                  "work; this warning makes that explicit.";
+  }
+  if (check_if_param_set("rebuild-threads") ||
+      check_if_param_set("rebuild_threads")) {
+    xb::warn() << "--rebuild-threads is deprecated and has no effect.  It "
+                  "only ever applied with --rebuild-indexes, which itself "
+                  "was removed.";
+  }
+  if (check_if_param_set("rsync")) {
+    xb::warn() << "--rsync is deprecated and has no effect.  Its role of "
+                  "speeding up non-InnoDB file copy under FTWRL is obsolete "
+                  "now that LOCK INSTANCE FOR BACKUP / LOCK TABLES FOR "
+                  "BACKUP cover that path natively.";
+  }
+  if (check_if_param_set("no-version-check")) {
+    xb::warn() << "--no-version-check is deprecated and has no effect.  The "
+                  "version-check feature it disabled was itself removed.";
+  }
 }
 
 void setup_error_messages() {
