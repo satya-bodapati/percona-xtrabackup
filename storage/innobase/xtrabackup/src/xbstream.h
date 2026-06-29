@@ -35,6 +35,35 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 /* Chunk flags */
 /* Chunk can be ignored if unknown version/format */
 #define XB_STREAM_FLAG_IGNORABLE 0x01
+/* Chunk should be stored as part of a single complete cloud object
+for its path (rather than split into one cloud object per chunk).
+
+The producer side that sets this is xtrabackup's ds_open_plain path:
+it routes a small set of operator-facing files (currently
+backup_metadata.json) past the configured ds_compress and ds_encrypt
+stages, straight to the terminal datasink.  The bytes that hit the
+xbstream layer are therefore plain (uncompressed, unencrypted) -- a
+complete file that operators expect to read directly with `cat`,
+`jq`, `aws s3 cp`, etc., without xbstream-side or xbcloud-side
+decryption.
+
+Downstream consumers use the flag as follows:
+  - xbstream -x  : informational; extraction is already driven by the
+                   path's transform extension (".qp.xbcrypt", ".lz4",
+                   ...), and an unsuffixed single-object path falls
+                   through to a plain write on disk.
+  - xbcloud put  : accumulate all flagged chunks for a given path
+                   into one cloud object named exactly path (no
+                   chunk-index suffix), with cloud-side object
+                   metadata single-object=1.
+  - xbcloud get  : reads the single-object=1 cloud-side metadata on
+                   HEAD; for marked objects, single GET and re-emits
+                   chunks with this flag set.
+Old readers that do not recognise the flag ignore it and treat the
+chunk as a regular PAYLOAD chunk.  Content still lands plain on disk
+because the path lacks any transform extension; only xbcloud's per-
+chunk-object naming differs in that degraded path. */
+#define XB_STREAM_FLAG_SINGLE_OBJECT 0x02
 
 /* Magic + flags + type + path len */
 #define CHUNK_HEADER_CONSTANT_LEN \
@@ -102,6 +131,14 @@ typedef struct {
   char path[FN_REFLEN];
   size_t length;
   size_t raw_length;
+  /* Authoritative write position for this chunk's payload within the
+  logical file identified by path.  Readers must use pwrite() (or
+  equivalent) at this offset, not assume sequential delivery: future
+  producers (xbcloud get doing parallel ranged GETs, or any source
+  feeding multiple xbstream chunks in flight) may emit chunks for the
+  same path out of order.  Current senders still emit in order; this
+  spec note enables out-of-order readers without a further format
+  bump. */
   my_off_t offset;
   my_off_t checksum_offset;
   void *data;
