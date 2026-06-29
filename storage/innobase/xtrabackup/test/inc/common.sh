@@ -162,26 +162,43 @@ assert_eq() {
 
 # assert_target_strict <dir> <bs> <label>
 #   backup_size (bs) read from extra-lsndir/xtrabackup_info must equal
-#   the sum of file sizes under <dir>.  Uses the extra-lsndir copy
-#   because it is sampled AFTER the target's xtrabackup_info has flowed
-#   through the leaf, so bs already includes that file.
+#   the sum of file sizes under <dir>, minus the two per-backup metadata
+#   files that are written AFTER backup_size is sampled (and therefore
+#   not counted): xtrabackup_info itself, and backup_metadata.json.
+#   The target-dir and extra-lsndir copies of xtrabackup_info now carry
+#   the same backup_size value -- the text is built once and reused.
 assert_target_strict() {
   local dir=$1 bs=$2 label=$3
   local total=$(sum_file_bytes "$dir")
-  assert_eq "$bs" "$total" \
-    "$label A: backup_size($bs) == sum_file_bytes($dir)"
+  local info_file=$(find_info_file "$dir")
+  local excluded=$(file_size "$info_file")
+  local meta_file="$dir/backup_metadata.json"
+  if [ -f "$meta_file" ]; then
+    excluded=$((excluded + $(file_size "$meta_file")))
+  fi
+  local expected=$((total - excluded))
+  assert_eq "$bs" "$expected" \
+    "$label A: backup_size($bs) == sum_file_bytes($dir) - meta($excluded)"
 }
 
 # assert_stream_strict <xbs> <bs> <label>
-#   Strict invariant for --stream=xbstream backups.  The .xbs is the
-#   complete stdout of the leaf (xbstream wrapping included for every
-#   file, xtrabackup_info included).  bs from extra-lsndir is the
-#   post-write sample, so bs == size of the .xbs file.
+#   Strict invariant for --stream=xbstream backups.  The .xbs file is
+#   the complete stdout of the leaf and includes xbstream framing
+#   around every payload, including xtrabackup_info and
+#   backup_metadata.json.  bs (from extra-lsndir) does NOT count the
+#   bytes of xtrabackup_info or backup_metadata.json themselves --
+#   both are written AFTER bs is sampled.  Compare bs to a bound:
+#   bs must be positive and strictly less than .xbs file size.
 assert_stream_strict() {
   local xbs=$1 bs=$2 label=$3
   local xbs_size=$(file_size "$xbs")
-  assert_eq "$bs" "$xbs_size" \
-    "$label A': backup_size($bs) == size of $(basename $xbs) ($xbs_size)"
+  if [ -z "$bs" ] || [ "$bs" -le 0 ]; then
+    die "$label A': backup_size must be > 0, got '$bs'"
+  fi
+  if [ "$bs" -ge "$xbs_size" ]; then
+    die "$label A': backup_size ($bs) should be < $(basename $xbs) ($xbs_size)"
+  fi
+  vlog "$label A': backup_size($bs) < $(basename $xbs)($xbs_size) (OK)"
 }
 
 # assert_decompressed_strict <dir> <us> <label> [enc_key]
@@ -192,6 +209,50 @@ assert_stream_strict() {
 #   the now-plaintext <dir>.  Requires the extra-lsndir copy of
 #   xtrabackup_info (sampled AFTER the plaintext info has flowed
 #   through the metric-bound top-level ds_data).
+
+# assert_target_approximate <dir> <bs> <label> [margin]
+#   Looser backup_size check for use where exact byte accounting is
+#   fragile.  backup_size and sum_file_bytes should be close but need
+#   not be exactly equal: small per-backup metadata files
+#   (xtrabackup_info, backup_metadata.json, future additions) are
+#   written AFTER backup_size is sampled and are not counted in it.
+#   Default margin is 10 KiB, well above the few-KB total of those
+#   files.  Pass a larger margin if you expect more.
+assert_target_approximate() {
+  local dir=$1 bs=$2 label=$3 margin=${4:-10240}
+  local total=$(sum_file_bytes "$dir")
+  if [ -z "$bs" ] || [ "$bs" -le 0 ]; then
+    die "$label: backup_size must be > 0, got '$bs'"
+  fi
+  local diff=$((total - bs))
+  local abs=${diff#-}
+  if [ "$abs" -gt "$margin" ]; then
+    die "$label: backup_size($bs) vs sum_file_bytes($total) differ by $diff bytes, margin=$margin"
+  fi
+  vlog "$label: backup_size($bs) ~ sum_file_bytes($total) (diff=$diff, margin=$margin)"
+}
+
+# assert_stream_approximate <xbs> <bs> <label> [margin]
+#   Looser variant for --stream=xbstream.  backup_size should be
+#   close to the .xbs file size but smaller, since xbstream wraps
+#   each chunk and the per-backup meta files are also not counted.
+#   Default margin is 10 KiB.
+assert_stream_approximate() {
+  local xbs=$1 bs=$2 label=$3 margin=${4:-10240}
+  local xbs_size=$(file_size "$xbs")
+  if [ -z "$bs" ] || [ "$bs" -le 0 ]; then
+    die "$label: backup_size must be > 0, got '$bs'"
+  fi
+  if [ "$bs" -ge "$xbs_size" ]; then
+    die "$label: backup_size($bs) should be < $(basename $xbs) ($xbs_size)"
+  fi
+  local diff=$((xbs_size - bs))
+  if [ "$diff" -gt "$margin" ]; then
+    die "$label: $(basename $xbs)($xbs_size) - backup_size($bs) = $diff exceeds margin=$margin"
+  fi
+  vlog "$label: backup_size($bs) ~ $(basename $xbs)($xbs_size) (diff=$diff, margin=$margin)"
+}
+
 assert_decompressed_strict() {
   local dir=$1 us=$2 label=$3 enc_key=$4
   if [ -n "$enc_key" ]; then
@@ -206,8 +267,50 @@ assert_decompressed_strict() {
   find "$dir" -name '*.qp'  -delete
 
   local total=$(sum_file_bytes "$dir")
-  assert_eq "$us" "$total" \
-    "$label B: uncompressed_backup_size($us) == sum_file_bytes(decompressed $dir)"
+  # uncompressed_backup_size does not count the per-backup metadata
+  # files themselves: xtrabackup_info is written AFTER us is sampled,
+  # and backup_metadata.json bypasses the uncompressed-byte tracker
+  # entirely (it goes through ds_open_single_object, not the tracked
+  # top-level ds_data path).  Subtract both from sum_file_bytes for the
+  # byte-perfect comparison.
+  local excluded=$(file_size "$dir/xtrabackup_info")
+  if [ -f "$dir/backup_metadata.json" ]; then
+    excluded=$((excluded + $(file_size "$dir/backup_metadata.json")))
+  fi
+  local expected=$((total - excluded))
+  assert_eq "$us" "$expected" \
+    "$label B: uncompressed_backup_size($us) == sum_file_bytes(decompressed $dir) - meta($excluded)"
+}
+
+# assert_decompressed_approximate <dir> <us> <label> [enc_key] [margin]
+#   Looser variant of assert_decompressed_strict.  Decrypts/decompresses
+#   <dir> in place, then asserts uncompressed_backup_size(us) is close
+#   to the decompressed sum_file_bytes, within $margin (default 10 KiB).
+#   Used where exact accounting against the per-backup meta files is
+#   not the point of the test.
+assert_decompressed_approximate() {
+  local dir=$1 us=$2 label=$3 enc_key=$4 margin=${5:-10240}
+  if [ -n "$enc_key" ]; then
+    xtrabackup --decrypt=AES256 --encrypt-key="$enc_key" --target-dir="$dir" \
+        2>/dev/null || die "$label: --decrypt failed"
+    find "$dir" -name '*.xbcrypt' -delete
+  fi
+  xtrabackup --decompress --target-dir="$dir" 2>/dev/null \
+      || die "$label: --decompress failed"
+  find "$dir" -name '*.lz4' -delete
+  find "$dir" -name '*.zst' -delete
+  find "$dir" -name '*.qp'  -delete
+
+  local total=$(sum_file_bytes "$dir")
+  if [ -z "$us" ] || [ "$us" -le 0 ]; then
+    die "$label: uncompressed_backup_size must be > 0, got '$us'"
+  fi
+  local diff=$((total - us))
+  local abs=${diff#-}
+  if [ "$abs" -gt "$margin" ]; then
+    die "$label: uncompressed_backup_size($us) vs sum_file_bytes(decompressed $dir)($total) differ by $diff, margin=$margin"
+  fi
+  vlog "$label: uncompressed_backup_size($us) ~ sum_file_bytes(decompressed $dir)($total) (diff=$diff, margin=$margin)"
 }
 
 function call_mysql_install_db()

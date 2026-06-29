@@ -65,6 +65,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "typelib.h"
 #include "utils.h"
 #include "xb0xb.h"
+#include "xb_manifest.h"
 #include "xtrabackup.h"
 #include "xtrabackup_version.h"
 
@@ -1484,6 +1485,7 @@ bool write_slave_info(MYSQL *connection) {
 
   mysql_slave_position = mysql_slave_position_s.str();
 
+  xb_manifest::set_legacy_text("xtrabackup_slave_info", slave_info.str());
   result = backup_file_print(XTRABACKUP_SLAVE_INFO, slave_info.str().c_str(),
                              slave_info.str().size());
 
@@ -1526,9 +1528,14 @@ bool write_galera_info(MYSQL *connection) {
     goto cleanup;
   }
 
-  result = backup_file_printf(
-      XTRABACKUP_GALERA_INFO, "%s:%s\n", state_uuid ? state_uuid : state_uuid55,
-      last_committed ? last_committed : last_committed55);
+  {
+    char galera_text[512];
+    snprintf(galera_text, sizeof(galera_text), "%s:%s\n",
+             state_uuid ? state_uuid : state_uuid55,
+             last_committed ? last_committed : last_committed55);
+    xb_manifest::set_legacy_text("xtrabackup_galera_info", galera_text);
+    result = backup_file_printf(XTRABACKUP_GALERA_INFO, "%s", galera_text);
+  }
 
 cleanup:
   free_mysql_variables(status);
@@ -1821,15 +1828,20 @@ bool write_binlog_info(MYSQL *connection) {
 
   mysql_binlog_position = s.str();
 
-  if (!log_status.gtid_executed.empty() && gtid) {
-    result =
-        backup_file_printf(XTRABACKUP_BINLOG_INFO, "%s\t" UINT64PF "\t%s\n",
-                           log_status.filename.c_str(), log_status.position,
-                           log_status.gtid_executed.c_str());
-  } else {
-    result =
-        backup_file_printf(XTRABACKUP_BINLOG_INFO, "%s\t" UINT64PF "\n",
-                           log_status.filename.c_str(), log_status.position);
+  {
+    char binlog_text[FN_REFLEN + 128];
+    if (!log_status.gtid_executed.empty() && gtid) {
+      snprintf(binlog_text, sizeof(binlog_text),
+               "%s\t" UINT64PF "\t%s\n",
+               log_status.filename.c_str(), log_status.position,
+               log_status.gtid_executed.c_str());
+    } else {
+      snprintf(binlog_text, sizeof(binlog_text),
+               "%s\t" UINT64PF "\n",
+               log_status.filename.c_str(), log_status.position);
+    }
+    xb_manifest::set_legacy_text("xtrabackup_binlog_info", binlog_text);
+    result = backup_file_printf(XTRABACKUP_BINLOG_INFO, "%s", binlog_text);
   }
 
 cleanup:
@@ -1975,6 +1987,14 @@ bool write_xtrabackup_info(MYSQL *connection) {
   history_end_time = time(NULL);
 
   xtrabackup_info_data = get_xtrabackup_info(connection);
+  /* Cache the verbatim text so the --extra-lsndir copy of
+  xtrabackup_info uses the SAME text (and therefore the same
+  backup_size value) as the target-dir copy.  Without this cache the
+  two copies would differ: the target-dir write goes through ds_meta
+  and bumps the leaf bytes_written counter, after which a second
+  get_xtrabackup_info() call would re-sample backup_size to a larger
+  value.  Same cache is consumed by backup_metadata.json. */
+  xb_manifest::set_legacy_text("xtrabackup_info", xtrabackup_info_data);
   if (!backup_file_printf(XTRABACKUP_INFO, "%s", xtrabackup_info_data)) {
     goto cleanup;
   }

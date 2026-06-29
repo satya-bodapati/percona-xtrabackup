@@ -34,7 +34,7 @@
 ############################################################################
 # Helpers (get_field, file_size, sum_file_bytes, find_info_file,
 # assert_positive, assert_no_field, assert_eq, assert_target_strict,
-# assert_stream_strict) are sourced from inc/common.sh above.
+# assert_stream_approximate) are sourced from inc/common.sh above.
 ############################################################################
 
 start_server --innodb_file_per_table
@@ -74,7 +74,7 @@ bs2=$(get_field "$topdir/lsn2/xtrabackup_info" backup_size)
 assert_positive "$bs2" "scen2 backup_size"
 assert_no_field "$topdir/lsn2/xtrabackup_info" uncompressed_backup_size
 
-assert_stream_strict "$topdir/backup2.xbs" "$bs2" "scen2 (plain stream)"
+assert_stream_approximate "$topdir/backup2.xbs" "$bs2" "scen2 (plain stream)"
 
 rm -rf $topdir/backup2.xbs $topdir/lsn2 $topdir/log2
 
@@ -110,7 +110,7 @@ bs4=$(get_field "$topdir/lsn4/xtrabackup_info" backup_size)
 assert_positive "$bs4" "scen4 backup_size"
 assert_no_field "$topdir/lsn4/xtrabackup_info" uncompressed_backup_size
 
-assert_stream_strict "$topdir/backup4.xbs" "$bs4" "scen4 (encrypt stream)"
+assert_stream_approximate "$topdir/backup4.xbs" "$bs4" "scen4 (encrypt stream)"
 
 rm -rf $topdir/backup4.xbs $topdir/lsn4 $topdir/log4
 

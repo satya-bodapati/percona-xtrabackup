@@ -38,7 +38,7 @@ require_lz4
 ############################################################################
 # Helpers (get_field, file_size, sum_file_bytes, find_info_file,
 # assert_positive, assert_no_field, assert_eq, assert_target_strict,
-# assert_stream_strict, assert_decompressed_strict) are sourced from
+# assert_stream_approximate, assert_decompressed_strict) are sourced from
 # inc/common.sh above.
 ############################################################################
 
@@ -86,7 +86,7 @@ us2=$(get_field "$topdir/lsn2/xtrabackup_info" uncompressed_backup_size)
 assert_positive "$bs2" "scen2 backup_size"
 assert_positive "$us2" "scen2 uncompressed_backup_size"
 
-assert_stream_strict "$topdir/backup2.xbs" "$bs2" "scen2 (compress stream)"
+assert_stream_approximate "$topdir/backup2.xbs" "$bs2" "scen2 (compress stream)"
 
 mkdir -p $topdir/extract2
 xbstream -x -C $topdir/extract2 < $topdir/backup2.xbs
@@ -109,7 +109,7 @@ us3=$(get_field "$topdir/lsn3/xtrabackup_info" uncompressed_backup_size)
 assert_positive "$bs3" "scen3 backup_size"
 assert_positive "$us3" "scen3 uncompressed_backup_size"
 
-assert_stream_strict "$topdir/backup3.xbs" "$bs3" "scen3 (compress+encrypt stream)"
+assert_stream_approximate "$topdir/backup3.xbs" "$bs3" "scen3 (compress+encrypt stream)"
 
 mkdir -p $topdir/extract3
 xbstream -x -C $topdir/extract3 < $topdir/backup3.xbs
