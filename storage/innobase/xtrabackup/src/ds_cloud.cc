@@ -59,11 +59,157 @@ the Free Software Foundation; version 2 of the License.
 #include "xbcloud/azure.h"
 #include "xbcloud/swift.h"
 
+#include "xb_files_jsonl.h"
+#include <my_rapidjson_size_t.h>
+#include <rapidjson/document.h>
+
+#include <algorithm>
+#include <unordered_map>
+
 using namespace xbcloud;
 
 ds_cloud_config_t g_ds_cloud_config;
 
 namespace {
+
+/* One hole recorded in backup_files.jsonl's per-file sparse_map array:
+{offset, length} are absolute positions in the LOGICAL (unpacked) file
+where the upload skipped zeroes. */
+struct sparse_hole_t {
+  uint64_t offset;
+  uint64_t length;
+};
+
+using sparse_lookup_t =
+    std::unordered_map<std::string, std::vector<sparse_hole_t>>;
+
+/* Parse a backup_files.jsonl byte buffer into a per-path sparse-map
+lookup.  Lines with no sparse_map field map to an empty vector (which
+the caller treats as "no holes" so the file is restored byte-for-byte).
+The header line {"manifest_version":1} carries no "path" field and is
+skipped silently. */
+sparse_lookup_t parse_sparse_map(const char *data, size_t size) {
+  sparse_lookup_t out;
+  size_t i = 0;
+  while (i < size) {
+    /* Find end of the JSONL line. */
+    size_t j = i;
+    while (j < size && data[j] != '\n') ++j;
+    const size_t line_len = j - i;
+    if (line_len == 0) {
+      i = j + 1;
+      continue;
+    }
+    rapidjson::Document doc;
+    doc.Parse(data + i, line_len);
+    i = j + 1;
+    if (doc.HasParseError() || !doc.IsObject()) continue;
+    if (!doc.HasMember("path") || !doc["path"].IsString()) continue;
+    std::string path = doc["path"].GetString();
+    std::vector<sparse_hole_t> holes;
+    if (doc.HasMember("sparse_map") && doc["sparse_map"].IsArray()) {
+      const auto &arr = doc["sparse_map"];
+      holes.reserve(arr.Size());
+      for (auto it = arr.Begin(); it != arr.End(); ++it) {
+        if (!it->IsObject()) continue;
+        if (!it->HasMember("offset") || !it->HasMember("length")) continue;
+        const auto &off = (*it)["offset"];
+        const auto &len = (*it)["length"];
+        if (!off.IsUint64() || !len.IsUint64()) continue;
+        holes.push_back({off.GetUint64(), len.GetUint64()});
+      }
+      std::sort(holes.begin(), holes.end(),
+                [](const sparse_hole_t &a, const sparse_hole_t &b) {
+                  return a.offset < b.offset;
+                });
+    }
+    out.emplace(std::move(path), std::move(holes));
+  }
+  return out;
+}
+
+/* Write the dense cloud body into @p fd at the logical offsets implied
+by @p holes (recorded during upload).  When the lookup has no holes for
+this file, this is a single pwrite covering the whole body.
+
+The cloud object is the packed (hole-excluded) representation, so we
+expand on the fly: walk the holes sorted by offset, write each data
+run from the body between consecutive holes, leave the hole ranges
+unwritten (ftruncate already produced an all-zero / sparse file), and
+finally fallocate(PUNCH_HOLE) each hole so the file system records
+them as real holes on disk.
+
+Returns true on success, false on I/O error. */
+bool restore_sparse_file(int fd, const char *body, size_t body_size,
+                         const std::vector<sparse_hole_t> &holes) {
+  uint64_t total_holes = 0;
+  for (const auto &h : holes) total_holes += h.length;
+  const uint64_t logical_size = body_size + total_holes;
+
+  if (::ftruncate(fd, (off_t)logical_size) != 0) {
+    xb::error() << "--download: ftruncate(" << logical_size
+                << ") failed: " << strerror(errno);
+    return false;
+  }
+
+  uint64_t src = 0;          /* byte offset in body */
+  uint64_t dst = 0;          /* logical offset in target */
+  for (const auto &h : holes) {
+    if (h.offset < dst) {
+      xb::error() << "--download: sparse_map not sorted / overlaps at "
+                  << h.offset;
+      return false;
+    }
+    const uint64_t run = h.offset - dst;
+    if (run > 0) {
+      if (src + run > body_size) {
+        xb::error() << "--download: sparse_map run exceeds body size";
+        return false;
+      }
+      ssize_t n = ::pwrite(fd, body + src, run, (off_t)dst);
+      if (n != (ssize_t)run) {
+        xb::error() << "--download: pwrite data run failed: "
+                    << strerror(errno);
+        return false;
+      }
+      src += run;
+      dst += run;
+    }
+    dst += h.length;
+  }
+  /* Tail data after the last hole. */
+  if (src < body_size) {
+    const uint64_t tail = body_size - src;
+    ssize_t n = ::pwrite(fd, body + src, tail, (off_t)dst);
+    if (n != (ssize_t)tail) {
+      xb::error() << "--download: pwrite tail failed: " << strerror(errno);
+      return false;
+    }
+    src += tail;
+    dst += tail;
+  }
+  if (src != body_size || dst != logical_size) {
+    xb::error() << "--download: sparse expansion mismatch: src=" << src
+                << "/" << body_size << " dst=" << dst << "/" << logical_size;
+    return false;
+  }
+
+#ifdef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
+  for (const auto &h : holes) {
+    if (::fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                    (off_t)h.offset, (off_t)h.length) != 0) {
+      /* Not fatal: ftruncate already left the range unwritten so the
+      file is logically equivalent; we just may use a bit more disk on
+      filesystems that don't lazily keep ranges sparse.  Log and
+      continue. */
+      xb::info() << "--download: fallocate(PUNCH_HOLE) at " << h.offset
+                 << "+" << h.length << " failed (non-fatal): "
+                 << strerror(errno);
+    }
+  }
+#endif
+  return true;
+}
 
 
 
@@ -770,20 +916,61 @@ bool xb_cloud_download(const std::string &target_dir) {
     xb::info() << "--download: wrote " << full << " ("
                << xtrabackup::utils::human_readable(body.size()) << ")";
   }
-  /* TODO(commit-6): load sparse_map entries from backup_files.jsonl and
-     drive the per-file punch_hole restore below.  For commit 2 the
-     download is byte-for-byte and no sparse reclaim happens on restore. */
+  /* Locate backup_files.jsonl alongside the manifest and fetch it
+  next.  We need it before the main download loop so each downloaded
+  file knows whether it has a sparse_map to drive punch_hole restore. */
+  std::string files_jsonl_obj;
+  for (const auto &obj : objects) {
+    if (strip_prefix(obj, prefix) == "backup_files.jsonl") {
+      files_jsonl_obj = obj;
+      break;
+    }
+  }
+  sparse_lookup_t sparse_lookup;
+  if (!files_jsonl_obj.empty()) {
+    bool ok = false;
+    Http_buffer body = store->download_object(g_ds_cloud_config.container,
+                                              files_jsonl_obj, ok);
+    if (!ok) {
+      xb::error() << "--download: failed to fetch " << files_jsonl_obj;
+      return false;
+    }
+    std::string full = target_dir;
+    if (full.empty() || full.back() != '/') full.push_back('/');
+    full.append("backup_files.jsonl");
+    int fd = open(full.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      xb::error() << "--download: cannot open " << full << ": "
+                  << strerror(errno);
+      return false;
+    }
+    if (write(fd, body.begin(), body.size()) !=
+        static_cast<ssize_t>(body.size())) {
+      xb::error() << "--download: short write to " << full;
+      close(fd);
+      return false;
+    }
+    close(fd);
+    sparse_lookup = parse_sparse_map(body.begin(), body.size());
+    xb::info() << "--download: backup_files.jsonl loaded ("
+               << sparse_lookup.size() << " file entries)";
+  } else {
+    xb::info() << "--download: no backup_files.jsonl in bucket -- "
+                  "downloaded files will be dense (no hole restore)";
+  }
 
   /* For each non-manifest object:
        1. Download body into memory.
        2. Write to <full>.de-sparse (atomic-rename staging).
-       3. If the manifest has a sparse_map for this file, apply the
-          manifest-driven punch_hole on the .de-sparse copy.
+       3. If backup_files.jsonl has a sparse_map for this file, expand
+          the dense body to its original logical layout (data runs at
+          the recorded offsets, holes between, punch_hole each hole).
        4. rename(.de-sparse -> canonical).
      The rename pattern keeps a partial fetch from leaving a half-
      written canonical-named file on disk. */
   for (const auto &obj : objects) {
-    if (obj == manifest_obj) continue;  /* already fetched */
+    if (obj == manifest_obj) continue;       /* already fetched */
+    if (obj == files_jsonl_obj) continue;    /* already fetched */
 
     bool ok = false;
     Http_buffer body =
@@ -808,21 +995,26 @@ bool xb_cloud_download(const std::string &target_dir) {
                   << strerror(errno);
       return false;
     }
-    if (write(fd, body.begin(), body.size()) !=
-        static_cast<ssize_t>(body.size())) {
-      xb::error() << "--download: short write to " << staging;
-      close(fd);
-      ::unlink(staging.c_str());
-      return false;
+
+    auto it = sparse_lookup.find(rel);
+    const bool has_holes = it != sparse_lookup.end() && !it->second.empty();
+    if (!has_holes) {
+      /* Dense file: single pwrite. */
+      if (write(fd, body.begin(), body.size()) !=
+          static_cast<ssize_t>(body.size())) {
+        xb::error() << "--download: short write to " << staging;
+        close(fd);
+        ::unlink(staging.c_str());
+        return false;
+      }
+    } else {
+      if (!restore_sparse_file(fd, body.begin(), body.size(), it->second)) {
+        close(fd);
+        ::unlink(staging.c_str());
+        return false;
+      }
     }
     close(fd);
-
-    /* TODO(commit-6): when sparse_map for `rel` is present in
-       backup_files.jsonl, punch the recorded holes into the staged
-       file before the rename below.  For now, downloaded files are
-       byte-for-byte from the cloud object (which is already dense,
-       per the upload-side pre-strip in ds_cloud) so on-disk size
-       matches the logical size minus the cloud-stripped holes. */
 
     if (::rename(staging.c_str(), full.c_str()) != 0) {
       xb::error() << "--download: rename " << staging << " -> " << full
@@ -830,8 +1022,18 @@ bool xb_cloud_download(const std::string &target_dir) {
       ::unlink(staging.c_str());
       return false;
     }
-    xb::info() << "--download: wrote " << rel << " ("
-               << xtrabackup::utils::human_readable(body.size()) << ")";
+    if (has_holes) {
+      uint64_t total = 0;
+      for (const auto &h : it->second) total += h.length;
+      xb::info() << "--download: wrote " << rel << " ("
+                 << xtrabackup::utils::human_readable(body.size()) << " dense, "
+                 << it->second.size() << " holes restored, +"
+                 << xtrabackup::utils::human_readable(total)
+                 << " logical)";
+    } else {
+      xb::info() << "--download: wrote " << rel << " ("
+                 << xtrabackup::utils::human_readable(body.size()) << ")";
+    }
   }
   return true;
 }
