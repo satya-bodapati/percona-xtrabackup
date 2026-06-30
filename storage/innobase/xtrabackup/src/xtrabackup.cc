@@ -267,6 +267,9 @@ uint xtrabackup_compress_threads;
 ulonglong xtrabackup_compress_chunk_size = 0;
 uint xtrabackup_compress_zstd_level = 1;
 
+bool opt_xtra_sha256 = false;
+char *opt_xtra_verify = nullptr;
+
 const char *xtrabackup_encrypt_algo_names[] = {"NONE", "AES128", "AES192",
                                                "AES256", NullS};
 TYPELIB xtrabackup_encrypt_algo_typelib = {
@@ -771,6 +774,8 @@ enum options_xtrabackup {
   OPT_XTRA_COMPRESS_THREADS,
   OPT_XTRA_COMPRESS_CHUNK_SIZE,
   OPT_XTRA_COMPRESS_ZSTD_LEVEL,
+  OPT_XTRA_SHA256,
+  OPT_XTRA_VERIFY,
   OPT_XTRA_ENCRYPT,
   OPT_XTRA_ENCRYPT_KEY,
   OPT_XTRA_ENCRYPT_KEY_FILE,
@@ -1147,6 +1152,15 @@ struct my_option xb_client_options[] = {
      (G_PTR *)&xtrabackup_compress_zstd_level,
      (G_PTR *)&xtrabackup_compress_zstd_level, 0, GET_UINT, REQUIRED_ARG, 1, 1,
      19, 0, 0, 0},
+
+    {"sha256", OPT_XTRA_SHA256,
+     "Compute SHA-256 of each backup file (over the logical, pre-transform "
+     "bytes) and record it in backup_files.jsonl as the per-file 'sha256' "
+     "field.  Off by default.  Sparse files are skipped in this release "
+     "(sha256 = 'skipped:sparse') -- proper hole-aware hashing is a "
+     "PXB-3754 follow-up.  Used by --verify=sha to detect corruption "
+     "between backup and restore.",
+     &opt_xtra_sha256, &opt_xtra_sha256, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
 
     {"encrypt", OPT_XTRA_ENCRYPT,
      "Encrypt individual backup files using the "
@@ -5104,6 +5118,7 @@ void xtrabackup_backup_func(void) {
   created above (mkdir at line ~4458) even in --stream mode where it
   is just scratch.  The staging file is consumed by finalize/publish
   below before xtrabackup_destroy_datasinks. */
+  xb_files_jsonl::g_sha256_enabled = opt_xtra_sha256;
   if (!xb_files_jsonl::begin(xtrabackup_target_dir)) {
     xb::error() << "failed to start backup_files.jsonl writer";
     exit(EXIT_FAILURE);

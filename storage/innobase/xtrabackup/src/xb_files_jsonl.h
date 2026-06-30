@@ -97,6 +97,30 @@ parent file's backup_files.jsonl entry carries the list).  No-op when
 file_ctx is null. */
 void add_segment(void *file_ctx, const char *path, uint64_t size);
 
+/* Per-process opt-in flag for sha256 hashing.  When true,
+new_file_ctx() initialises a streaming SHA-256 context on the
+per-file holder; ds_write feeds it via sha256_update; on close the
+finalised hex digest is annotated as the "sha256" field of the
+backup_files.jsonl entry.  Set once at startup from --sha256.  The
+header line gets a "sha256":"sha-256-logical" tag so consumers can
+detect that the manifest carries digests. */
+extern bool g_sha256_enabled;
+
+/* Feed logical-file bytes (top-level ds_write payload) into the
+sha256 accumulator.  No-op when file_ctx is null, when sha256 is
+not enabled, or when this file was tagged skip via sha256_skip
+(sparse writes disable the hash for that file in the initial
+implementation -- see PXB-3754 followup ticket). */
+void sha256_update(void *file_ctx, const void *buf, size_t len);
+
+/* Disable sha256 for this file.  Called from ds_write_sparse: the
+in-RAM dense payload doesn't represent the file's logical content,
+so hashing it would not match a re-hash of the restored sparse
+file.  A future commit may add proper logical-bytes-with-zero-holes
+hashing; until then we set "sha256":"skipped:sparse" instead of an
+incorrect digest. */
+void sha256_skip(void *file_ctx, const char *reason);
+
 /* Record the holes carried by one ds_write_sparse() call as
 absolute-offset/length entries on the per-file sparse_map array.
 @p file_logical_offset is the byte position in the logical (pre-pack)

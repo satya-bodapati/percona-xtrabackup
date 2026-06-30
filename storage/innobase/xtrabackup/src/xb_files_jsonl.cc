@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <rapidjson/writer.h>
 
 #include <fcntl.h>
+#include <gcrypt.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -60,10 +61,19 @@ constexpr int kSyncSecondsThreshold = 1;
 constexpr size_t kPipeBuf = 4096;
 
 /* Allocator + lifetime helper.  Each per-file document owns its own
-allocator instance for thread-safe construction. */
+allocator instance for thread-safe construction.  When --sha256 is on,
+md_ctx is opened in new_file_ctx; sha256_update feeds the logical-byte
+stream; append_and_release finalises and stamps the hex digest, or
+"skipped:<reason>" if sha256_skip was called for this file. */
 struct file_ctx_holder_t {
   rapidjson::Document doc;
+  gcry_md_hd_t md_ctx{nullptr};   /* nullptr when sha256 disabled */
+  bool md_skipped{false};
+  std::string md_skip_reason;
   file_ctx_holder_t() : doc(rapidjson::kObjectType) {}
+  ~file_ctx_holder_t() {
+    if (md_ctx != nullptr) gcry_md_close(md_ctx);
+  }
 };
 
 inline file_ctx_holder_t *as_holder(void *p) {
@@ -103,6 +113,8 @@ void maybe_sync(size_t just_appended) {
 }  // namespace
 
 namespace xb_files_jsonl {
+
+bool g_sha256_enabled = false;
 
 bool begin(const char *staging_dir) {
   if (g_state.active.load()) {
@@ -157,7 +169,31 @@ void *new_file_ctx(const char *path) {
   rapidjson::Value key("path", alloc);
   rapidjson::Value val(path, alloc);
   h->doc.AddMember(key, val, alloc);
+  if (g_sha256_enabled) {
+    /* GCRY_MD_FLAG_SECURE not needed for a digest (no key material);
+    keep the default flags for speed. */
+    gcry_error_t err = gcry_md_open(&h->md_ctx, GCRY_MD_SHA256, 0);
+    if (err != 0) {
+      msg("xb_files_jsonl::new_file_ctx: gcry_md_open failed for %s\n",
+          path);
+      h->md_ctx = nullptr;
+    }
+  }
   return h;
+}
+
+void sha256_update(void *file_ctx, const void *buf, size_t len) {
+  if (file_ctx == nullptr) return;
+  auto *h = as_holder(file_ctx);
+  if (h->md_ctx == nullptr || h->md_skipped) return;
+  gcry_md_write(h->md_ctx, buf, len);
+}
+
+void sha256_skip(void *file_ctx, const char *reason) {
+  if (file_ctx == nullptr) return;
+  auto *h = as_holder(file_ctx);
+  h->md_skipped = true;
+  if (reason != nullptr) h->md_skip_reason = reason;
 }
 
 void set_string(void *file_ctx, const char *key, const char *value) {
@@ -262,6 +298,36 @@ void append_and_release(void *file_ctx) {
   if (!g_state.active.load()) {
     delete h;
     return;
+  }
+
+  /* Finalise sha256 (if hashing was active and not skipped) and stamp
+  the hex digest as the "sha256" field.  When skipped (e.g. sparse
+  file), stamp "skipped:<reason>" so the verifier can distinguish
+  "no hash for this file" from "hash present but mismatched". */
+  if (h->md_ctx != nullptr) {
+    auto &alloc = h->doc.GetAllocator();
+    if (h->md_skipped) {
+      std::string val =
+          std::string("skipped:") +
+          (h->md_skip_reason.empty() ? "unknown" : h->md_skip_reason);
+      rapidjson::Value k("sha256", alloc);
+      rapidjson::Value v(val.c_str(), alloc);
+      h->doc.AddMember(k, v, alloc);
+    } else {
+      const unsigned char *raw = gcry_md_read(h->md_ctx, GCRY_MD_SHA256);
+      if (raw != nullptr) {
+        char hex[65];
+        for (int i = 0; i < 32; ++i) {
+          static const char *kHex = "0123456789abcdef";
+          hex[i * 2]     = kHex[(raw[i] >> 4) & 0xf];
+          hex[i * 2 + 1] = kHex[raw[i] & 0xf];
+        }
+        hex[64] = '\0';
+        rapidjson::Value k("sha256", alloc);
+        rapidjson::Value v(hex, alloc);
+        h->doc.AddMember(k, v, alloc);
+      }
+    }
   }
 
   /* Serialise to a string buffer + trailing newline. */

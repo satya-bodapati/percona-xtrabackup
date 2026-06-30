@@ -220,6 +220,16 @@ int ds_write(ds_file_t *file, const void *buf, size_t len) {
   if (rc == 0) {
     file->logical_offset += len;
   }
+  /* Stream the logical bytes into the per-file sha256 accumulator.
+  Wrapper-internal ds_writes carry file_ctx == nullptr (we route
+  manifest annotation only through the outermost file), so the hash
+  sees each logical byte exactly once at the top of the chain --
+  before any compress / encrypt transform.  No-op when --sha256 is
+  off (file_ctx_holder_t::md_ctx is nullptr) or when the file has
+  been tagged skip (e.g. sparse). */
+  if (rc == 0 && file->file_ctx != nullptr) {
+    xb_files_jsonl::sha256_update(file->file_ctx, buf, len);
+  }
   return rc;
 }
 
@@ -260,6 +270,11 @@ int ds_write_sparse(ds_file_t *file, const void *buf, size_t len,
     untracked datasinks). */
     xb_files_jsonl::record_sparse_chunks(file->file_ctx, logical_start,
                                          sparse_map_size, sparse_map);
+    /* Skip sha256 for this file: the packed payload doesn't match the
+    logical-file bytes, so the digest can't be verified by re-hashing
+    the restored file without a custom hole-aware walker.  PXB-3754
+    follow-up will lift this. */
+    xb_files_jsonl::sha256_skip(file->file_ctx, "sparse");
     /* Advance the running offset by skip+len across all entries.
     sparse_map covers the entire buffer for this call. */
     uint64_t advance = 0;
