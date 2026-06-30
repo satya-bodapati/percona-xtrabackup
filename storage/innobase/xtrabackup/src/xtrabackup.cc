@@ -102,6 +102,10 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "datasink.h"
 #include "ds_cloud.h"
 #include "xb_files_jsonl.h"
+#include <my_rapidjson_size_t.h>
+#include <rapidjson/document.h>
+#include <gcrypt.h>
+#include <fstream>
 #include "xb_manifest.h"
 #include "xbcloud/util.h" /* xbcloud::parse_http_header */
 #include "xtrabackup_version.h"
@@ -173,6 +177,11 @@ bool xtrabackup_print_param = false;
    (via --cloud-storage). */
 bool xtrabackup_cloud_download = false;
 bool xtrabackup_cloud_delete = false;
+
+/* When --verify is given with no argument, opt_xtra_verify stays NULL
+and we treat that as the default mode "sha".  Explicit values are
+"presence" or "sha".  Any other value is rejected at dispatch time. */
+static bool xb_verify_target_dir(const char *mode);
 
 bool xtrabackup_export = false;
 bool xtrabackup_apply_log_only = false;
@@ -1883,6 +1892,16 @@ struct my_option xb_client_options[] = {
      "confirmation prompt.",
      &xtrabackup_cloud_delete, &xtrabackup_cloud_delete, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"verify", OPT_XTRA_VERIFY,
+     "Verify backup integrity against backup_files.jsonl under "
+     "--target-dir.  Mode: 'presence' = check every listed file exists; "
+     "'sha' = presence + re-hash files that have a sha256 recorded and "
+     "confirm the digest matches.  Returns non-zero on any missing file "
+     "or digest mismatch.  Files marked 'skipped:<reason>' in "
+     "backup_files.jsonl are presence-checked only.",
+     &opt_xtra_verify, &opt_xtra_verify, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
 
     {0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}};
 
@@ -8870,6 +8889,124 @@ void xb_set_plugin_dir() {
   }
 }
 
+/* ---- --verify implementation ----
+
+Walk <target_dir>/backup_files.jsonl line by line.  For each per-file
+entry (every line except the header), assert the file is present at
+<target_dir>/<path>.  In "sha" mode, when the entry carries a
+"sha256":"<64 hex chars>" field, re-hash the on-disk file and confirm
+the digest matches.  "skipped:*" sha256 values are treated as
+"presence only".
+
+This is intentionally simple: we operate on the RESTORED on-disk
+tree (post --download, post xbstream -x, etc.) so transforms have
+already been undone.  Files whose entry has "compress" or "encrypt"
+annotations but no sha256 still pass the presence check; --verify
+does not attempt to re-encrypt or recompress to validate.
+
+Returns true iff every check passed. */
+static std::string sha256_file_hex(const char *path) {
+  int fd = ::open(path, O_RDONLY);
+  if (fd < 0) return std::string{};
+  gcry_md_hd_t md;
+  if (gcry_md_open(&md, GCRY_MD_SHA256, 0) != 0) {
+    ::close(fd);
+    return std::string{};
+  }
+  char buf[64 * 1024];
+  ssize_t n;
+  while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+    gcry_md_write(md, buf, (size_t)n);
+  }
+  ::close(fd);
+  if (n < 0) {
+    gcry_md_close(md);
+    return std::string{};
+  }
+  const unsigned char *raw = gcry_md_read(md, GCRY_MD_SHA256);
+  char hex[65];
+  static const char *kHex = "0123456789abcdef";
+  for (int i = 0; i < 32; ++i) {
+    hex[i * 2]     = kHex[(raw[i] >> 4) & 0xf];
+    hex[i * 2 + 1] = kHex[raw[i] & 0xf];
+  }
+  hex[64] = '\0';
+  gcry_md_close(md);
+  return std::string{hex};
+}
+
+static bool xb_verify_target_dir(const char *mode) {
+  const bool do_sha = std::strcmp(mode, "sha") == 0;
+  if (!do_sha && std::strcmp(mode, "presence") != 0) {
+    xb::error() << "--verify: mode must be 'presence' or 'sha', got '"
+                << mode << "'";
+    return false;
+  }
+  std::string jsonl = xtrabackup_target_dir;
+  if (jsonl.empty() || jsonl.back() != '/') jsonl.push_back('/');
+  jsonl.append(XB_BACKUP_FILES_JSONL);
+  std::ifstream in(jsonl);
+  if (!in) {
+    xb::error() << "--verify: cannot read " << jsonl;
+    return false;
+  }
+  size_t n_checked = 0;
+  size_t n_present_only = 0;
+  size_t n_sha_ok = 0;
+  size_t n_failed = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    rapidjson::Document doc;
+    doc.Parse(line.c_str(), line.size());
+    if (doc.HasParseError() || !doc.IsObject()) continue;
+    if (!doc.HasMember("path") || !doc["path"].IsString()) continue;
+    const std::string path = doc["path"].GetString();
+    std::string full = xtrabackup_target_dir;
+    if (full.empty() || full.back() != '/') full.push_back('/');
+    full.append(path);
+    struct stat st;
+    if (::stat(full.c_str(), &st) != 0) {
+      xb::error() << "--verify: missing " << full;
+      ++n_failed;
+      continue;
+    }
+    ++n_checked;
+
+    if (!do_sha) {
+      ++n_present_only;
+      continue;
+    }
+    if (!doc.HasMember("sha256") || !doc["sha256"].IsString()) {
+      ++n_present_only;
+      continue;
+    }
+    const std::string recorded = doc["sha256"].GetString();
+    if (recorded.size() > 8 && recorded.compare(0, 8, "skipped:") == 0) {
+      ++n_present_only;
+      continue;
+    }
+    const std::string actual = sha256_file_hex(full.c_str());
+    if (actual.empty()) {
+      xb::error() << "--verify: failed to hash " << full;
+      ++n_failed;
+      continue;
+    }
+    if (actual != recorded) {
+      xb::error() << "--verify: sha256 mismatch for " << path
+                  << " (recorded=" << recorded
+                  << " actual=" << actual << ")";
+      ++n_failed;
+      continue;
+    }
+    ++n_sha_ok;
+  }
+  xb::info() << "--verify: " << n_checked << " files checked ("
+             << n_sha_ok << " sha256-verified, " << n_present_only
+             << " presence-only" << ", " << n_failed << " failed)";
+  return n_failed == 0;
+}
+
 /* ================= main =================== */
 
 int main(int argc, char **argv) {
@@ -9091,6 +9228,7 @@ int main(int argc, char **argv) {
     if (xtrabackup_decrypt_decompress) num++;
     if (xtrabackup_cloud_download) num++;
     if (xtrabackup_cloud_delete) num++;
+    if (opt_xtra_verify != nullptr) num++;
     if (num != 1) { /* !XOR (for now) */
       usage();
       exit(EXIT_FAILURE);
@@ -9127,6 +9265,17 @@ int main(int argc, char **argv) {
       if (!xb_cloud_delete(/*force=*/false)) {
         exit(EXIT_FAILURE);
       }
+    }
+    xb::info() << "completed OK!";
+    exit(EXIT_SUCCESS);
+  }
+
+  /* --verify=<mode>: walk backup_files.jsonl under --target-dir.
+  "presence" checks every listed file exists; "sha" extends that with
+  a re-hash of files that carry a sha256 digest. */
+  if (opt_xtra_verify != nullptr) {
+    if (!xb_verify_target_dir(opt_xtra_verify)) {
+      exit(EXIT_FAILURE);
     }
     xb::info() << "completed OK!";
     exit(EXIT_SUCCESS);
