@@ -151,12 +151,35 @@ Each `.rN` cloud object is exactly `threshold` bytes (the last one
 ≤). The wire format does not change: each segment is a complete,
 self-contained cloud object with its own multipart upload session.
 
+## `sha256` *(landed, opt-in)*
+
+When `xtrabackup --backup --sha256` is used, every per-file entry
+carries a 64-hex-character SHA-256 digest over the **logical** (pre-
+transform) bytes of the file:
+
+```jsonl
+{"path":"sakila/film.ibd","space_id":42,"page_size":16384,
+ "compress":"zstd","encrypt":"AES256",
+ "sha256":"e3b0c44298fc1c149afbf4c8996fb924..."}
+```
+
+Sparse files emit `"sha256":"skipped:sparse"` in the initial release
+because the in-RAM dense payload doesn't match the restored sparse
+layout.  Hole-aware logical hashing is a planned follow-up.
+
+`xtrabackup --verify=sha --target-dir=DIR` walks the manifest and
+re-hashes every file with a recorded digest, reporting mismatches.
+`xtrabackup --verify=presence --target-dir=DIR` is the cheap
+existence-only check.
+
 ## Future direction
 
 Forthcoming releases extend this file with:
 
-* **`sha256`** — opt-in per-file logical-file digest under
-  `--sha256`, validated by a dedicated `--verify` mode.
+* **Hole-aware sha256 for sparse files** — drop the "skipped:sparse"
+  placeholder and compute the digest over the logical file (zero
+  bytes for the hole regions) so sparse and dense files use the
+  same verification path.
 * **Per-datasink stats sections** — uncompressed bytes counter,
   encryption key id, etc., as nested objects under the relevant
   transform key.
