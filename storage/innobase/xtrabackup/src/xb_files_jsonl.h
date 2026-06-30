@@ -89,6 +89,14 @@ alive until append_and_release is invoked on the parent
 file_ctx.  No-op (returns nullptr) when file_ctx is null. */
 void *open_section(void *file_ctx, const char *name);
 
+/* Append {"path": <path>, "size": <size>} to the per-file "segments"
+array, find-or-creating the array on file_ctx.  Used by ds_cloud when
+a file is split into multiple cloud objects at the rollover threshold
+(<path>.r1, <path>.r2, ... -- each segment its own cloud object, the
+parent file's backup_files.jsonl entry carries the list).  No-op when
+file_ctx is null. */
+void add_segment(void *file_ctx, const char *path, uint64_t size);
+
 /* Record the holes carried by one ds_write_sparse() call as
 absolute-offset/length entries on the per-file sparse_map array.
 @p file_logical_offset is the byte position in the logical (pre-pack)

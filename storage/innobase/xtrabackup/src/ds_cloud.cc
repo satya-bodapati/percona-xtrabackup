@@ -80,16 +80,26 @@ struct sparse_hole_t {
   uint64_t length;
 };
 
-using sparse_lookup_t =
-    std::unordered_map<std::string, std::vector<sparse_hole_t>>;
+struct segment_ref_t {
+  std::string path;   /* backup-root-relative, e.g. "test/big.ibd.r1" */
+  uint64_t size;
+};
 
-/* Parse a backup_files.jsonl byte buffer into a per-path sparse-map
-lookup.  Lines with no sparse_map field map to an empty vector (which
-the caller treats as "no holes" so the file is restored byte-for-byte).
-The header line {"manifest_version":1} carries no "path" field and is
-skipped silently. */
-sparse_lookup_t parse_sparse_map(const char *data, size_t size) {
-  sparse_lookup_t out;
+struct file_index_entry_t {
+  std::vector<sparse_hole_t> holes;
+  std::vector<segment_ref_t> segments;
+};
+
+using file_index_t = std::unordered_map<std::string, file_index_entry_t>;
+
+/* Parse a backup_files.jsonl byte buffer into a per-path index that
+captures sparse_map (per-file holes) and segments (rollover splits).
+Lines with neither field still get an empty entry so the caller can
+distinguish "file declared in manifest" from "missing".  The header
+line {"manifest_version":1} carries no "path" field and is skipped
+silently. */
+file_index_t parse_files_index(const char *data, size_t size) {
+  file_index_t out;
   size_t i = 0;
   while (i < size) {
     /* Find end of the JSONL line. */
@@ -106,24 +116,35 @@ sparse_lookup_t parse_sparse_map(const char *data, size_t size) {
     if (doc.HasParseError() || !doc.IsObject()) continue;
     if (!doc.HasMember("path") || !doc["path"].IsString()) continue;
     std::string path = doc["path"].GetString();
-    std::vector<sparse_hole_t> holes;
+    file_index_entry_t entry;
     if (doc.HasMember("sparse_map") && doc["sparse_map"].IsArray()) {
       const auto &arr = doc["sparse_map"];
-      holes.reserve(arr.Size());
+      entry.holes.reserve(arr.Size());
       for (auto it = arr.Begin(); it != arr.End(); ++it) {
         if (!it->IsObject()) continue;
         if (!it->HasMember("offset") || !it->HasMember("length")) continue;
         const auto &off = (*it)["offset"];
         const auto &len = (*it)["length"];
         if (!off.IsUint64() || !len.IsUint64()) continue;
-        holes.push_back({off.GetUint64(), len.GetUint64()});
+        entry.holes.push_back({off.GetUint64(), len.GetUint64()});
       }
-      std::sort(holes.begin(), holes.end(),
+      std::sort(entry.holes.begin(), entry.holes.end(),
                 [](const sparse_hole_t &a, const sparse_hole_t &b) {
                   return a.offset < b.offset;
                 });
     }
-    out.emplace(std::move(path), std::move(holes));
+    if (doc.HasMember("segments") && doc["segments"].IsArray()) {
+      const auto &arr = doc["segments"];
+      entry.segments.reserve(arr.Size());
+      for (auto it = arr.Begin(); it != arr.End(); ++it) {
+        if (!it->IsObject()) continue;
+        if (!it->HasMember("path") || !(*it)["path"].IsString()) continue;
+        if (!it->HasMember("size") || !(*it)["size"].IsUint64()) continue;
+        entry.segments.push_back(
+            {(*it)["path"].GetString(), (*it)["size"].GetUint64()});
+      }
+    }
+    out.emplace(std::move(path), std::move(entry));
   }
   return out;
 }
@@ -236,10 +257,84 @@ struct ds_cloud_ctxt_t {
    Stream_multipart_writer encapsulates the part_buf + flush loop +
    small-file fast path; we just feed it bytes. */
 struct ds_cloud_file_t {
-  std::string object_name;                 /* "<backup_prefix>/<path>" */
+  std::string object_name;                 /* "<backup_prefix>/<path>" for
+                                              non-segmented files; for
+                                              segmented files this holds
+                                              the CURRENT segment's full
+                                              object key (".rN"-suffixed). */
   std::unique_ptr<Stream_multipart_writer> writer;
   ds_cloud_ctxt_t *ctxt{nullptr};
+  void *file_ctx{nullptr};                 /* backup_files.jsonl Document */
+
+  /* Rollover state (only meaningful when n_segments > 1).
+
+  When the per-file stat->st_size is known at cloud_open and exceeds
+  --cloud-multipart-rollover-threshold, we pre-compute how many
+  segments the file will be split into.  Segment i (1-based) is the
+  byte-range [(i-1)*threshold, min(i*threshold, st_size)) in the
+  logical file, uploaded as "<backup_prefix>/<rel_path>.r<i>".
+
+  cloud_write splits the incoming buffer at the segment boundary, so
+  each segment object holds exactly threshold bytes (last one ≤).
+  The parent file's backup_files.jsonl entry gets a `segments` array
+  via xb_files_jsonl::add_segment for restoration. */
+  uint64_t threshold{0};
+  uint64_t bytes_in_segment{0};
+  uint64_t n_segments{1};
+  uint64_t current_segment{0};             /* 0 if no rollover, else 1.. */
+  std::string base_object;                 /* "<backup_prefix>/<rel_path>" */
+  std::string base_path;                   /* caller-visible relative path */
+  uint64_t seg_part_size{0};               /* part_size for next segment */
+  uint64_t seg_per_writer_budget{0};       /* budget for next segment */
 };
+
+/* Wire the async-small-file PUT uploader callback on a freshly-built
+Stream_multipart_writer.  Same wiring whether the writer is the first
+segment or a rolled-over follow-on segment, so factor it out. */
+void install_async_small_file_uploader(Stream_multipart_writer *writer,
+                                       ds_cloud_ctxt_t *cc) {
+  auto *cc_ptr = cc;
+  auto *store = cc->object_store.get();
+  auto *event_handler = cc->event_handler.get();
+  const std::string &container = cc->container;
+  writer->set_async_small_file_uploader(
+      [cc_ptr, store, event_handler, container](
+          const std::string &name, const Http_buffer &body) -> bool {
+        size_t length = body.size();
+        return store->async_upload_object(
+            container, name, body, event_handler,
+            [cc_ptr, name, length](bool ok, const Http_buffer &) {
+              if (ok) {
+                xb::info() << "ds_cloud: small-file PUT done: " << name
+                           << " (" << xtrabackup::utils::human_readable(length)
+                           << ")";
+              } else {
+                xb::error() << "ds_cloud: small-file PUT FAILED: " << name
+                            << " (" << xtrabackup::utils::human_readable(length)
+                            << ")";
+                cc_ptr->async_upload_failed.store(true,
+                                                  std::memory_order_relaxed);
+              }
+            });
+      });
+}
+
+/* Build a Stream_multipart_writer for one segment / one object key.
+Returns the writer fully wired (async small-file uploader installed,
+display_name set). */
+std::unique_ptr<Stream_multipart_writer> make_segment_writer(
+    ds_cloud_ctxt_t *cc, const std::string &object_name,
+    const std::string &display_name, uint64_t part_size,
+    uint64_t per_writer_budget) {
+  auto w = std::make_unique<Stream_multipart_writer>(
+      cc->object_store.get(), cc->container, object_name,
+      cc->event_handler.get(), per_writer_budget,
+      static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
+      static_cast<size_t>(part_size));
+  w->set_display_name(display_name);
+  install_async_small_file_uploader(w.get(), cc);
+  return w;
+}
 
 /* ----- Shared helpers (used by both backup-time cloud_init and the
          lifecycle CLI commands xb_cloud_download/delete) ----- */
@@ -620,6 +715,26 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
                << ", concurrent=" << effective_concurrent << shrink_note;
   }
 
+  /* Compute the segments plan up-front when filesize is known.  Each
+     segment is exactly threshold bytes (last one ≤), uploaded as
+     "<base>.r<seg>".  When filesize <= threshold we stay in the
+     single-object path and keep the original object name. */
+  cf->threshold = rollover;
+  cf->base_object = object;
+  cf->base_path = path;
+  if (filesize > rollover && rollover > 0) {
+    cf->n_segments = (filesize + rollover - 1) / rollover;
+    cf->current_segment = 1;
+    cf->object_name = object + ".r1";
+    xb::info() << "ds_cloud: " << path << ": rollover engaged ("
+               << cf->n_segments << " segments of up to "
+               << xtrabackup::utils::human_readable(rollover) << ")";
+  } else {
+    cf->n_segments = 1;
+    cf->current_segment = 0;
+    cf->object_name = object;
+  }
+
   /* Stream_multipart_writer's existing memory_budget parameter is the
      per-writer in-flight byte cap; we pass effective_concurrent *
      part_size so a writer can pipeline its own parts up to the
@@ -627,52 +742,14 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
      writer's atomic-counter backpressure (when implemented) -- for
      now, per-writer is sufficient because writers don't share. */
   const uint64_t per_writer_budget = effective_concurrent * part_size;
-  cf->writer = std::make_unique<Stream_multipart_writer>(
-      cc->object_store.get(), cc->container, object, cc->event_handler.get(),
-      per_writer_budget,
-      static_cast<size_t>(g_ds_cloud_config.multipart_threshold),
-      static_cast<size_t>(part_size));
-  /* Use the short relative path as the display name in multipart
-     log messages -- the full object key includes the bucket prefix
-     and is noisy in logs (a 1 TiB backup at 16 MiB parts would emit
-     ~65K lines with the full key each). */
-  cf->writer->set_display_name(path);
-
-  /* Empirical (perf_wan.sh + real-AWS benchmarks): sync small-file PUT
-     bottlenecks at WAN RTT even when xtrabackup runs many data-copy
-     workers, because each worker still serializes through its own
-     file sequence. Two specific cases hurt:
-       - Lots of small .ibd files: worker N stalls 200ms-per-file on
-         every close while ds_redo and other workers wait.
-       - ds_redo's small final part on close: blocking it stalls the
-         Redo Log reader thread, which we cannot let happen.
-     So install an async small-file uploader that submits through the
-     Event_handler and returns immediately. Failures land in the ctxt's
-     async_upload_failed atomic; cloud_deinit's drain checks it. */
-  auto *cc_ptr = cc;
-  auto *store = cc->object_store.get();
-  auto *event_handler = cc->event_handler.get();
-  const std::string &container = cc->container;
-  cf->writer->set_async_small_file_uploader(
-      [cc_ptr, store, event_handler, container](
-          const std::string &name, const Http_buffer &body) -> bool {
-        size_t length = body.size();
-        return store->async_upload_object(
-            container, name, body, event_handler,
-            [cc_ptr, name, length](bool ok, const Http_buffer &) {
-              if (ok) {
-                xb::info() << "ds_cloud: small-file PUT done: " << name
-                           << " (" << xtrabackup::utils::human_readable(length)
-                           << ")";
-              } else {
-                xb::error() << "ds_cloud: small-file PUT FAILED: " << name
-                            << " (" << xtrabackup::utils::human_readable(length)
-                            << ")";
-                cc_ptr->async_upload_failed.store(true,
-                                                  std::memory_order_relaxed);
-              }
-            });
-      });
+  /* make_segment_writer wires the async small-file PUT uploader and
+     the per-writer display name; the small-file uploader is critical
+     for ds_redo's small final part on close (mustn't block the redo
+     log reader). */
+  cf->writer = make_segment_writer(cc, cf->object_name, path, part_size,
+                                    per_writer_budget);
+  cf->seg_part_size = part_size;
+  cf->seg_per_writer_budget = per_writer_budget;
 
   size_t path_len = strlen(path) + 1;
   auto *file = static_cast<ds_file_t *>(
@@ -686,7 +763,42 @@ ds_file_t *cloud_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *stat
   /* Threaded through the open chain so the top-level ds_close can
   serialize the per-file Document into backup_files.jsonl. */
   file->file_ctx = file_ctx;
+  cf->file_ctx = file_ctx;
   return file;
+}
+
+/* Rotate ds_cloud_file_t to the next segment: close the current
+Multipart_uploader (uploads the in-flight bytes), record the
+{path, size} pair on the parent's file_ctx, then build a new writer
+for "<base>.r<seg+1>".  Called from cloud_write the moment a write
+would cross the segment boundary.
+
+Returns true on success.  On close failure the current writer is left
+in place so the caller logs+returns; we don't try to recover. */
+bool rotate_segment(ds_cloud_file_t *cf, uint64_t part_size,
+                    uint64_t per_writer_budget) {
+  if (!cf->writer->close()) {
+    xb::error() << "ds_cloud: failed to close segment '" << cf->object_name
+                << "'";
+    return false;
+  }
+  /* Record the just-finished segment onto the parent file's
+  backup_files.jsonl entry as {path: <rel>.rN, size: <seg_bytes>}.
+  The cloud_object key uses <backup_prefix>/<rel>.rN; in the manifest
+  we record the rel path so downloaders don't see the prefix. */
+  const std::string seg_rel = cf->base_path + ".r" +
+                              std::to_string(cf->current_segment);
+  xb_files_jsonl::add_segment(cf->file_ctx, seg_rel.c_str(),
+                              cf->bytes_in_segment);
+
+  ++cf->current_segment;
+  cf->bytes_in_segment = 0;
+  cf->object_name = cf->base_object + ".r" +
+                    std::to_string(cf->current_segment);
+  cf->writer = make_segment_writer(cf->ctxt, cf->object_name,
+                                    cf->base_path, part_size,
+                                    per_writer_budget);
+  return true;
 }
 
 /* Single-object open: ds_cloud already uploads each file as one whole
@@ -703,22 +815,65 @@ static ds_file_t *cloud_open_single_object(ds_ctxt_t *ctxt, const char *path,
 
 int cloud_write(ds_file_t *file, const void *buf, size_t len) {
   auto *cf = static_cast<ds_cloud_file_t *>(file->ptr);
-  if (!cf->writer->append(static_cast<const char *>(buf), len)) {
-    xb::error() << "ds_cloud: append failed for " << file->path;
-    return 1;
+
+  /* Single-object path (no rollover planned).  If we accumulate past
+     the threshold while filesize was unknown / undeclared at open
+     time, fail loud -- we'd need to retroactively rename the bare
+     object to ".r1" which the cloud APIs don't support cheaply. */
+  if (cf->n_segments <= 1) {
+    if (!cf->writer->append(static_cast<const char *>(buf), len)) {
+      xb::error() << "ds_cloud: append failed for " << file->path;
+      return 1;
+    }
+    if (cf->threshold > 0 &&
+        cf->writer->bytes_appended() > cf->threshold) {
+      xb::error() << "ds_cloud: file '" << file->path
+                  << "' exceeded --cloud-multipart-rollover-threshold ("
+                  << xtrabackup::utils::human_readable(cf->threshold)
+                  << ") with unknown size at open time; streaming "
+                     "rollover requires the size to be known up front";
+      return 1;
+    }
+    cf->ctxt->bytes_written.fetch_add(len, std::memory_order_relaxed);
+    return 0;
   }
-  /* Streaming rollover not yet supported (size unknown up front). If
-     the writer's running bytes_appended crosses the configured per-
-     object cap, fail fast with a clear message. */
-  if (cf->writer->bytes_appended() >
-      g_ds_cloud_config.multipart_rollover_threshold) {
-    xb::error() << "ds_cloud: file '" << file->path
-                << "' exceeded --cloud-multipart-rollover-threshold ("
-                << xtrabackup::utils::human_readable(
-                       g_ds_cloud_config.multipart_rollover_threshold)
-                << "); streaming rollover is not yet implemented";
-    return 1;
+
+  /* Rollover-active path: split the incoming buffer at segment
+     boundaries so each cloud object contains exactly `threshold`
+     bytes (last one may be less). */
+  const char *cursor = static_cast<const char *>(buf);
+  size_t remaining = len;
+  while (remaining > 0) {
+    const uint64_t space_in_segment =
+        cf->threshold > cf->bytes_in_segment
+            ? cf->threshold - cf->bytes_in_segment
+            : 0;
+    if (space_in_segment == 0) {
+      /* Boundary landed exactly; rotate before appending anything. */
+      if (cf->current_segment >= cf->n_segments) {
+        xb::error() << "ds_cloud: file '" << file->path
+                    << "' grew beyond the planned " << cf->n_segments
+                    << " segments at open time -- aborting upload";
+        return 1;
+      }
+      if (!rotate_segment(cf, cf->seg_part_size,
+                          cf->seg_per_writer_budget)) {
+        return 1;
+      }
+      continue;
+    }
+    const size_t chunk = static_cast<size_t>(
+        std::min<uint64_t>(remaining, space_in_segment));
+    if (!cf->writer->append(cursor, chunk)) {
+      xb::error() << "ds_cloud: append failed for segment '"
+                  << cf->object_name << "'";
+      return 1;
+    }
+    cf->bytes_in_segment += chunk;
+    cursor += chunk;
+    remaining -= chunk;
   }
+
   cf->ctxt->bytes_written.fetch_add(len, std::memory_order_relaxed);
   return 0;
 }
@@ -743,6 +898,14 @@ int cloud_close(ds_file_t *file) {
   int rc = cf->writer->close() ? 0 : 1;
   if (rc != 0) {
     xb::error() << "ds_cloud: close failed for " << file->path;
+  } else if (cf->n_segments > 1) {
+    /* Final segment closed cleanly: record it alongside its earlier
+       siblings.  cf->current_segment is the segment number whose
+       writer just closed; cf->bytes_in_segment is its byte count. */
+    const std::string seg_rel = cf->base_path + ".r" +
+                                std::to_string(cf->current_segment);
+    xb_files_jsonl::add_segment(cf->file_ctx, seg_rel.c_str(),
+                                cf->bytes_in_segment);
   }
   delete cf;
   my_free(file);
@@ -926,7 +1089,8 @@ bool xb_cloud_download(const std::string &target_dir) {
       break;
     }
   }
-  sparse_lookup_t sparse_lookup;
+  file_index_t file_index;
+  std::unordered_set<std::string> segment_objects;  /* full cloud keys */
   if (!files_jsonl_obj.empty()) {
     bool ok = false;
     Http_buffer body = store->download_object(g_ds_cloud_config.container,
@@ -951,26 +1115,95 @@ bool xb_cloud_download(const std::string &target_dir) {
       return false;
     }
     close(fd);
-    sparse_lookup = parse_sparse_map(body.begin(), body.size());
+    file_index = parse_files_index(body.begin(), body.size());
+    /* Build the set of full cloud object keys that are segments of
+    some parent file; the bare-object loop below skips these and the
+    segmented-file loop reconstructs the parent from them. */
+    for (const auto &kv : file_index) {
+      for (const auto &seg : kv.second.segments) {
+        std::string seg_full = prefix;
+        if (!seg_full.empty() && seg_full.back() != '/') seg_full.push_back('/');
+        seg_full.append(seg.path);
+        segment_objects.insert(std::move(seg_full));
+      }
+    }
     xb::info() << "--download: backup_files.jsonl loaded ("
-               << sparse_lookup.size() << " file entries)";
+               << file_index.size() << " file entries, "
+               << segment_objects.size() << " segment objects)";
   } else {
     xb::info() << "--download: no backup_files.jsonl in bucket -- "
-                  "downloaded files will be dense (no hole restore)";
+                  "downloaded files will be dense (no hole restore, no "
+                  "segment concatenation)";
   }
 
-  /* For each non-manifest object:
-       1. Download body into memory.
-       2. Write to <full>.de-sparse (atomic-rename staging).
-       3. If backup_files.jsonl has a sparse_map for this file, expand
-          the dense body to its original logical layout (data runs at
-          the recorded offsets, holes between, punch_hole each hole).
-       4. rename(.de-sparse -> canonical).
-     The rename pattern keeps a partial fetch from leaving a half-
-     written canonical-named file on disk. */
+  /* Helper that stages a logical file from one or more dense byte
+  blobs and applies sparse-map expansion before atomic rename.  Used
+  by both the bare-object path (one body) and the segmented-file path
+  (concatenate segment bodies, then expand). */
+  auto stage_and_publish =
+      [&](const std::string &rel,
+          const std::vector<Http_buffer> &bodies,
+          const std::vector<sparse_hole_t> &holes) -> bool {
+    if (!mkdir_for(target_dir, rel)) {
+      xb::error() << "--download: mkdir_for failed for " << rel;
+      return false;
+    }
+    std::string full = target_dir;
+    if (full.empty() || full.back() != '/') full.push_back('/');
+    full.append(rel);
+    std::string staging = full + ".de-sparse";
+    int fd = open(staging.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      xb::error() << "--download: cannot open " << staging << ": "
+                  << strerror(errno);
+      return false;
+    }
+    uint64_t dense_total = 0;
+    for (const auto &b : bodies) dense_total += b.size();
+    bool ok = true;
+    if (holes.empty()) {
+      /* Dense write: stream every body in order at the current
+      file offset. */
+      for (const auto &b : bodies) {
+        if (write(fd, b.begin(), b.size()) !=
+            static_cast<ssize_t>(b.size())) {
+          xb::error() << "--download: short write to " << staging;
+          ok = false;
+          break;
+        }
+      }
+    } else {
+      /* Concatenate bodies into a single contiguous dense buffer so
+      restore_sparse_file can pwrite at the right logical offsets.
+      This keeps the algorithm simple; for very-large multi-segment
+      files we could stream segment-by-segment but that requires
+      tracking partial sparse-map progress, which is a follow-up. */
+      std::string dense;
+      dense.reserve(dense_total);
+      for (const auto &b : bodies) dense.append(b.begin(), b.size());
+      ok = restore_sparse_file(fd, dense.data(), dense.size(), holes);
+    }
+    close(fd);
+    if (!ok) {
+      ::unlink(staging.c_str());
+      return false;
+    }
+    if (::rename(staging.c_str(), full.c_str()) != 0) {
+      xb::error() << "--download: rename " << staging << " -> " << full
+                  << " failed: " << strerror(errno);
+      ::unlink(staging.c_str());
+      return false;
+    }
+    return true;
+  };
+
+  /* Step 1: download bare-object files (non-segmented).  Iterate the
+  listing; skip the manifest, the file index, and any object that
+  belongs to a segmented file (those are handled in step 2). */
   for (const auto &obj : objects) {
-    if (obj == manifest_obj) continue;       /* already fetched */
-    if (obj == files_jsonl_obj) continue;    /* already fetched */
+    if (obj == manifest_obj) continue;
+    if (obj == files_jsonl_obj) continue;
+    if (segment_objects.count(obj) != 0) continue;
 
     bool ok = false;
     Http_buffer body =
@@ -980,59 +1213,79 @@ bool xb_cloud_download(const std::string &target_dir) {
       return false;
     }
     std::string rel = strip_prefix(obj, prefix);
-    if (!mkdir_for(target_dir, rel)) {
-      xb::error() << "--download: mkdir_for failed for " << rel;
-      return false;
-    }
-    std::string full = target_dir;
-    if (full.empty() || full.back() != '/') full.push_back('/');
-    full.append(rel);
-    std::string staging = full + ".de-sparse";
 
-    int fd = open(staging.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-      xb::error() << "--download: cannot open " << staging << ": "
-                  << strerror(errno);
-      return false;
-    }
+    auto it = file_index.find(rel);
+    const std::vector<sparse_hole_t> &holes =
+        (it != file_index.end()) ? it->second.holes
+                                  : std::vector<sparse_hole_t>{};
+    std::vector<Http_buffer> bodies;
+    bodies.emplace_back(std::move(body));
+    const uint64_t dense_size = bodies.front().size();
+    if (!stage_and_publish(rel, bodies, holes)) return false;
 
-    auto it = sparse_lookup.find(rel);
-    const bool has_holes = it != sparse_lookup.end() && !it->second.empty();
-    if (!has_holes) {
-      /* Dense file: single pwrite. */
-      if (write(fd, body.begin(), body.size()) !=
-          static_cast<ssize_t>(body.size())) {
-        xb::error() << "--download: short write to " << staging;
-        close(fd);
-        ::unlink(staging.c_str());
-        return false;
-      }
-    } else {
-      if (!restore_sparse_file(fd, body.begin(), body.size(), it->second)) {
-        close(fd);
-        ::unlink(staging.c_str());
-        return false;
-      }
-    }
-    close(fd);
-
-    if (::rename(staging.c_str(), full.c_str()) != 0) {
-      xb::error() << "--download: rename " << staging << " -> " << full
-                  << " failed: " << strerror(errno);
-      ::unlink(staging.c_str());
-      return false;
-    }
-    if (has_holes) {
+    if (!holes.empty()) {
       uint64_t total = 0;
-      for (const auto &h : it->second) total += h.length;
+      for (const auto &h : holes) total += h.length;
       xb::info() << "--download: wrote " << rel << " ("
-                 << xtrabackup::utils::human_readable(body.size()) << " dense, "
-                 << it->second.size() << " holes restored, +"
+                 << xtrabackup::utils::human_readable(dense_size) << " dense, "
+                 << holes.size() << " holes restored, +"
                  << xtrabackup::utils::human_readable(total)
                  << " logical)";
     } else {
       xb::info() << "--download: wrote " << rel << " ("
-                 << xtrabackup::utils::human_readable(body.size()) << ")";
+                 << xtrabackup::utils::human_readable(dense_size) << ")";
+    }
+  }
+
+  /* Step 2: reconstruct segmented files.  For each file_index entry
+  with a non-empty segments[] array, fetch every segment object in
+  order, concatenate, then publish (with sparse expansion if the
+  parent has a sparse_map). */
+  for (const auto &kv : file_index) {
+    const std::string &rel = kv.first;
+    const file_index_entry_t &entry = kv.second;
+    if (entry.segments.empty()) continue;
+
+    std::vector<Http_buffer> bodies;
+    bodies.reserve(entry.segments.size());
+    uint64_t total_dense = 0;
+    for (const auto &seg : entry.segments) {
+      std::string seg_obj = prefix;
+      if (!seg_obj.empty() && seg_obj.back() != '/') seg_obj.push_back('/');
+      seg_obj.append(seg.path);
+      bool ok = false;
+      Http_buffer body = store->download_object(g_ds_cloud_config.container,
+                                                 seg_obj, ok);
+      if (!ok) {
+        xb::error() << "--download: failed to fetch segment " << seg_obj
+                    << " of " << rel;
+        return false;
+      }
+      if (body.size() != seg.size) {
+        xb::error() << "--download: segment " << seg.path
+                    << " size mismatch: cloud=" << body.size()
+                    << " manifest=" << seg.size;
+        return false;
+      }
+      total_dense += body.size();
+      bodies.emplace_back(std::move(body));
+    }
+    if (!stage_and_publish(rel, bodies, entry.holes)) return false;
+
+    if (!entry.holes.empty()) {
+      uint64_t total = 0;
+      for (const auto &h : entry.holes) total += h.length;
+      xb::info() << "--download: wrote " << rel << " ("
+                 << entry.segments.size() << " segments, "
+                 << xtrabackup::utils::human_readable(total_dense)
+                 << " dense, " << entry.holes.size() << " holes restored, +"
+                 << xtrabackup::utils::human_readable(total)
+                 << " logical)";
+    } else {
+      xb::info() << "--download: wrote " << rel << " ("
+                 << entry.segments.size() << " segments, "
+                 << xtrabackup::utils::human_readable(total_dense)
+                 << " dense)";
     }
   }
   return true;

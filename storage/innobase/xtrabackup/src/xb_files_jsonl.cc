@@ -223,6 +223,26 @@ void record_sparse_chunks(void *file_ctx, uint64_t file_logical_offset,
   }
 }
 
+void add_segment(void *file_ctx, const char *path, uint64_t size) {
+  if (file_ctx == nullptr) return;
+  auto *h = as_holder(file_ctx);
+  auto &alloc = h->doc.GetAllocator();
+  rapidjson::Value *arr = nullptr;
+  if (h->doc.HasMember("segments")) {
+    arr = &h->doc["segments"];
+  } else {
+    rapidjson::Value key("segments", alloc);
+    rapidjson::Value v(rapidjson::kArrayType);
+    h->doc.AddMember(key, v, alloc);
+    arr = &h->doc["segments"];
+  }
+  rapidjson::Value entry(rapidjson::kObjectType);
+  rapidjson::Value path_v(path, alloc);
+  entry.AddMember("path", path_v, alloc);
+  entry.AddMember("size", rapidjson::Value(size), alloc);
+  arr->PushBack(entry, alloc);
+}
+
 void *open_section(void *file_ctx, const char *name) {
   if (file_ctx == nullptr) return nullptr;
   auto *h = as_holder(file_ctx);

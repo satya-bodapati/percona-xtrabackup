@@ -109,15 +109,52 @@ fetches it as a single bare-named object alongside
 `backup_metadata.json` so cloud consumers can read both with raw
 SDK calls.
 
+## `sparse_map` *(landed)*
+
+Per-file `[{offset, length}, ...]` recording the hole regions
+detected during backup. `offset` is the absolute byte position in
+the **logical** (pre-pack) file where the hole starts; `length` is
+the hole's byte size. The cloud / xbstream payload is the dense
+(hole-stripped) data so consumers can reconstruct the original
+layout by `ftruncate(logical_size); pwrite(data run, offset);`
+followed by `fallocate(PUNCH_HOLE)` over the recorded ranges.
+
+```jsonl
+{"path":"sakila/t_sparse.ibd","space_id":50,"page_size":16384,
+ "sparse_map":[{"offset":16384,"length":49152},
+               {"offset":98304,"length":16384}]}
+```
+
+`xtrabackup --download` already drives this restore automatically
+(see `restore_sparse_file` in `ds_cloud.cc`).
+
+## `segments` *(landed)*
+
+When a file exceeds `--cloud-multipart-rollover-threshold` (default
+5 TiB, the S3 single-object cap), `ds_cloud` splits the logical file
+into N segments uploaded as separate cloud objects named
+`<path>.r1`, `<path>.r2`, …, `<path>.rN`. The parent file's entry
+in `backup_files.jsonl` records the segments in concatenation order:
+
+```jsonl
+{"path":"test/big.ibd","space_id":99,"page_size":16384,
+ "segments":[{"path":"test/big.ibd.r1","size":5497558138880},
+             {"path":"test/big.ibd.r2","size":1099511627776}]}
+```
+
+`xtrabackup --download` fetches every segment in order, concatenates
+into a single dense buffer, then applies `sparse_map` if present.
+Segments are non-overlapping byte ranges of the dense data; the
+parent's `sparse_map` (if any) applies to the concatenated result.
+
+Each `.rN` cloud object is exactly `threshold` bytes (the last one
+≤). The wire format does not change: each segment is a complete,
+self-contained cloud object with its own multipart upload session.
+
 ## Future direction
 
 Forthcoming releases extend this file with:
 
-* **`sparse_map`** — per-file `[{offset, length}, ...]` recording
-  hole regions, written before the transform pipeline so a
-  consumer can reconstruct the sparse layout with `pwrite()`.
-* **`segments`** — per-file `[{path: "...r1", size}, ...]` for
-  files split at ds_cloud rollover, listed in concatenation order.
 * **`sha256`** — opt-in per-file logical-file digest under
   `--sha256`, validated by a dedicated `--verify` mode.
 * **Per-datasink stats sections** — uncompressed bytes counter,
