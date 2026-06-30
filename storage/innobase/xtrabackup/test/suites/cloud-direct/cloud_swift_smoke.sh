@@ -79,9 +79,10 @@ eval xtrabackup --backup --target-dir="$TDIR" $FLAGS
 # Step 2: list the container -- backup_metadata.json must be present, all
 # keys must live under $PREFIX/, none end in '/'.
 ###############################################
-TOKEN=$(curl -fsSI -H "X-Auth-User: $CLOUD_EMU_SWIFT_USER" \
-                  -H "X-Auth-Key: $CLOUD_EMU_SWIFT_KEY" \
-                  "${CLOUD_EMU_SWIFT_ENDPOINT}" \
+# openstackswift's TempAuth returns 405 for HEAD; use GET with -D-.
+TOKEN=$(curl -fsS -D- -H "X-Auth-User: $CLOUD_EMU_SWIFT_USER" \
+                     -H "X-Auth-Key: $CLOUD_EMU_SWIFT_KEY" \
+                     "${CLOUD_EMU_SWIFT_ENDPOINT}" \
         | grep -i '^X-Auth-Token:' | sed 's/.*: //' | tr -d '\r\n')
 [ -n "$TOKEN" ] || die "swift_smoke step 2: no X-Auth-Token after auth"
 

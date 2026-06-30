@@ -33,10 +33,10 @@ cloud_emu_wait_for "$PROVIDER"
 start_server --innodb_file_per_table
 
 mysql -e "CREATE DATABASE cce;"
-mysql -e "CREATE TABLE cce.a (id INT PRIMARY KEY AUTO_INCREMENT, p BLOB) ENGINE=InnoDB;"
+mysql -e "CREATE TABLE cce.a (id INT PRIMARY KEY AUTO_INCREMENT, p LONGBLOB) ENGINE=InnoDB;"
 mysql -e "CREATE TABLE cce.b (id INT PRIMARY KEY AUTO_INCREMENT, p TEXT) ENGINE=InnoDB;"
 for i in $(seq 1 5) ; do
-  mysql -e "INSERT INTO cce.a (p) VALUES (REPEAT('x', 5000000));"
+  mysql --max_allowed_packet=64M -e "INSERT INTO cce.a (p) VALUES (REPEAT('x', 5000000));"
 done
 for i in $(seq 1 50) ; do
   mysql -e "INSERT INTO cce.b (p) VALUES (REPEAT('y', 100));"
@@ -44,7 +44,7 @@ done
 
 HAVE_SPARSE=0
 if ! grep -q 'PUNCH HOLE support not available' "$MYSQLD_ERRFILE" 2>/dev/null ; then
-  mysql -e "CREATE TABLE cce.t_sparse (c1 INT AUTO_INCREMENT PRIMARY KEY, c2 BLOB)
+  mysql -e "CREATE TABLE cce.t_sparse (c1 INT AUTO_INCREMENT PRIMARY KEY, c2 LONGBLOB)
             COMPRESSION='zlib' ENGINE=InnoDB;"
   mysql -e "INSERT INTO cce.t_sparse (c2) VALUES (REPEAT('s', 5000));"
   for i in $(seq 1 6) ; do
@@ -66,10 +66,15 @@ ENCKEY="percona_xtrabackup_is_awesome___"
 run_scenario() {
   local label="$1" ; shift
   local extra="$*"
-  local bucket="cce-$label-$(date +%s)"
+  # S3 bucket names must be lowercase and use only [a-z0-9.-].
+  local label_safe="$(echo "$label" | tr 'A-Z' 'a-z' | tr '_.' '-')"
+  local bucket="cce-$label_safe-$(date +%s)"
   cloud_emu_make_bucket "$PROVIDER" "$bucket"
-  local flags=$(cloud_emu_xb_flags "$PROVIDER" "$bucket")
-  local name="be-$label"
+  # Upload under BUCKET/<label>/ so each scenario's objects sit in
+  # their own sub-prefix and don't collide if reused.
+  local bucket_with_prefix="$bucket/$label_safe"
+  local flags=$(cloud_emu_xb_flags "$PROVIDER" "$bucket_with_prefix")
+  local name="be-$label_safe"
 
   vlog "--- $label : extra='$extra' ---"
 
@@ -83,7 +88,7 @@ run_scenario() {
     s3)
       AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
       aws --endpoint-url="$CLOUD_EMU_S3_ENDPOINT" \
-          s3 cp "s3://$bucket/${name##be-}/backup_metadata.json" \
+          s3 cp "s3://$bucket/$label_safe/backup_metadata.json" \
               $topdir/$name.manifest >/dev/null 2>&1 \
         || die "$label: failed to fetch manifest from bucket"
       jq empty < $topdir/$name.manifest \

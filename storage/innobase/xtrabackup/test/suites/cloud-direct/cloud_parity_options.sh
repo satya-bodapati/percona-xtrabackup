@@ -38,7 +38,9 @@ innodb_wait_for_flush_all
 ############################################################################
 run_backup_with() {
   local case_name="$1"; shift
-  local bucket="pxb-par-${case_name}-$$"
+  # S3 bucket names disallow underscores and dots; coerce to hyphens.
+  local bucket_safe="$(echo "$case_name" | tr '_.' '-')"
+  local bucket="pxb-par-${bucket_safe}-$$"
   local tdir="$topdir/par-$case_name"
   rm -rf "$tdir"; mkdir -p "$tdir"
   cloud_emu_make_bucket s3 "$bucket"
@@ -108,9 +110,12 @@ run_backup_with http_retri --cloud-http-retriable-errors=429,503
 #     LocalStack does not expose request headers via the S3 protocol;
 #     test that xtrabackup accepts the option and the backup completes.
 ############################################################################
+# `eval` inside run_backup_with re-splits "$@", so header values must
+# not contain whitespace.  Use `:` without a trailing space (curl
+# accepts both forms in --header).
 run_backup_with header_single \
-  --cloud-header="X-Pxb-Test: hello"
+  --cloud-header="X-Pxb-Test:hello"
 run_backup_with header_multi \
-  --cloud-header="X-Pxb-A: one" --cloud-header="X-Pxb-B: two"
+  --cloud-header="X-Pxb-A:one" --cloud-header="X-Pxb-B:two"
 
 vlog "==== cloud_parity_options.sh PASSED ===="

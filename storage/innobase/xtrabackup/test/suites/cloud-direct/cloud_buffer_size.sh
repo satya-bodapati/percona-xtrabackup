@@ -29,15 +29,17 @@ start_server --innodb_file_per_table
 mysql -e "CREATE DATABASE bs;"
 mysql -e "CREATE TABLE bs.tiny (id INT PRIMARY KEY) ENGINE=InnoDB;"
 mysql -e "INSERT INTO bs.tiny VALUES (1);"
-mysql -e "CREATE TABLE bs.big (id INT PRIMARY KEY AUTO_INCREMENT, p BLOB) ENGINE=InnoDB;"
+mysql -e "CREATE TABLE bs.big (id INT PRIMARY KEY AUTO_INCREMENT, p LONGBLOB) ENGINE=InnoDB;"
 for i in $(seq 1 8) ; do
-  mysql -e "INSERT INTO bs.big (p) VALUES (REPEAT('b', 5000000));"
+  mysql --max_allowed_packet=64M -e "INSERT INTO bs.big (p) VALUES (REPEAT('b', 5000000));"
 done
 
 run_bench() {
   local label="$1" ; shift
   local extra="$*"
-  local bucket="bs-${label}-$(date +%s)"
+  # S3 bucket names must be lowercase and use only [a-z0-9.-]; coerce.
+  local label_safe="$(echo "$label" | tr 'A-Z' 'a-z' | tr '_.' '-')"
+  local bucket="bs-${label_safe}-$(date +%s)"
   cloud_emu_make_bucket s3 "$bucket"
   local flags=$(cloud_emu_xb_flags s3 "$bucket")
   rm -rf $topdir/bs-$label

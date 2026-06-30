@@ -57,10 +57,12 @@ mysql -e "CREATE TABLE cloud_rt.small_one (id INT PRIMARY KEY, payload TEXT)
           ENGINE=InnoDB;"
 mysql -e "INSERT INTO cloud_rt.small_one VALUES (1, REPEAT('x', 100));"
 # Bigger table that crosses the multipart threshold (16 MiB default).
-mysql -e "CREATE TABLE cloud_rt.big_one (id INT PRIMARY KEY AUTO_INCREMENT, payload BLOB)
+# LONGBLOB so rows of ~5 MiB fit (BLOB caps at 64 KiB).
+mysql -e "CREATE TABLE cloud_rt.big_one (id INT PRIMARY KEY AUTO_INCREMENT, payload LONGBLOB)
           ENGINE=InnoDB;"
 for i in $(seq 1 10) ; do
-  mysql -e "INSERT INTO cloud_rt.big_one (payload) VALUES (REPEAT('x', 5000000));"
+  mysql --max_allowed_packet=64M \
+        -e "INSERT INTO cloud_rt.big_one (payload) VALUES (REPEAT('x', 5000000));"
 done
 # Sparse / page-compressed table.
 if ! grep -q 'PUNCH HOLE support not available' "$MYSQLD_ERRFILE" ; then

@@ -67,6 +67,10 @@ _cloud_emu_compose() {
 }
 
 cloud_emu_start() {
+  # If the caller has the stack already running (e.g. a dev box with a
+  # long-running set of containers, or a CI job that brings up the
+  # stack once across many tests), let them opt out of the bring-up.
+  [ -n "${CLOUD_EMU_KEEP:-}" ] && return 0
   [ -f "$CLOUD_EMU_COMPOSE_FILE" ] \
     || die "cloud_emu: compose file not found at $CLOUD_EMU_COMPOSE_FILE"
   _cloud_emu_compose -f "$CLOUD_EMU_COMPOSE_FILE" up -d >/dev/null \
@@ -74,6 +78,11 @@ cloud_emu_start() {
 }
 
 cloud_emu_stop() {
+  # Same opt-out as cloud_emu_start: when CLOUD_EMU_KEEP is set, leave
+  # the running stack alone so subsequent tests / dev work can reuse
+  # it (the `down -v` below removes volumes, which is destructive for
+  # any state the user/dev has placed there).
+  [ -n "${CLOUD_EMU_KEEP:-}" ] && return 0
   _cloud_emu_compose -f "$CLOUD_EMU_COMPOSE_FILE" down -v >/dev/null 2>&1 || true
 }
 
@@ -90,9 +99,14 @@ cloud_emu_wait_for() {
     *)     die "cloud_emu_wait_for: unknown provider '$provider'" ;;
   esac
   for i in $(seq 1 60); do
-    if curl -fs --max-time 2 "$url" >/dev/null 2>&1; then
-      return 0
-    fi
+    # `curl -f` treats 4xx as a failure -- but Swift's TempAuth endpoint
+    # returns 401 to an unauthenticated GET, which still proves the
+    # service is up and responsive.  Treat any 2xx OR 401 as "ready".
+    local code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$url" \
+                 2>/dev/null || echo 000)
+    case "$code" in
+      2*|401) return 0 ;;
+    esac
     sleep 1
   done
   die "cloud_emu_wait_for $provider: timeout after 60s on $url"
@@ -127,8 +141,10 @@ cloud_emu_make_bucket() {
         || die "cloud_emu_make_bucket azure: failed for $name"
       ;;
     swift)
-      # Get token first, then PUT /v1/<account>/<container>
-      local token=$(curl -fs -I \
+      # Get token first, then PUT /v1/<account>/<container>.  Use GET
+      # (with -D- to dump headers) rather than HEAD: openstackswift's
+      # TempAuth returns 405 for HEAD but 200 + X-Auth-Token for GET.
+      local token=$(curl -fs -D- \
                     -H "X-Auth-User: $CLOUD_EMU_SWIFT_USER" \
                     -H "X-Auth-Key: $CLOUD_EMU_SWIFT_KEY" \
                     "$CLOUD_EMU_SWIFT_ENDPOINT" | grep -i 'X-Auth-Token:' \

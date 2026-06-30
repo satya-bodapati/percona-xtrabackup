@@ -35,14 +35,14 @@ start_server --innodb_file_per_table
 # multiple parts regardless of --cloud-multipart-part-size).
 mysql -e "CREATE DATABASE cmpopt;"
 mysql -e "CREATE TABLE cmpopt.tiny  (id INT PRIMARY KEY, p TEXT) ENGINE=InnoDB;"
-mysql -e "CREATE TABLE cmpopt.medium(id INT PRIMARY KEY AUTO_INCREMENT, p BLOB) ENGINE=InnoDB;"
-mysql -e "CREATE TABLE cmpopt.big   (id INT PRIMARY KEY AUTO_INCREMENT, p BLOB) ENGINE=InnoDB;"
+mysql -e "CREATE TABLE cmpopt.medium(id INT PRIMARY KEY AUTO_INCREMENT, p LONGBLOB) ENGINE=InnoDB;"
+mysql -e "CREATE TABLE cmpopt.big   (id INT PRIMARY KEY AUTO_INCREMENT, p LONGBLOB) ENGINE=InnoDB;"
 mysql -e "INSERT INTO cmpopt.tiny VALUES (1, REPEAT('t', 1000));"
 for i in $(seq 1 4) ; do
-  mysql -e "INSERT INTO cmpopt.medium (p) VALUES (REPEAT('m', 5000000));"
+  mysql --max_allowed_packet=64M -e "INSERT INTO cmpopt.medium (p) VALUES (REPEAT('m', 5000000));"
 done
 for i in $(seq 1 8) ; do
-  mysql -e "INSERT INTO cmpopt.big (p) VALUES (REPEAT('b', 8000000));"
+  mysql --max_allowed_packet=64M -e "INSERT INTO cmpopt.big (p) VALUES (REPEAT('b', 8000000));"
 done
 innodb_wait_for_flush_all
 record_db_state cmpopt
@@ -55,7 +55,9 @@ run_one() {
   local label="$1" ; shift
   local extra="$*"
 
-  local bucket="cmpopt-${label}-$(date +%s)"
+  # S3 bucket names must be lowercase and use only [a-z0-9.-]; coerce.
+  local label_safe="$(echo "$label" | tr 'A-Z' 'a-z' | tr '_.' '-')"
+  local bucket="cmpopt-${label_safe}-$(date +%s)"
   cloud_emu_make_bucket "$PROVIDER" "$bucket"
   local flags=$(cloud_emu_xb_flags "$PROVIDER" "$bucket")
   local name="be-${label}"
