@@ -254,8 +254,11 @@ class Swift_object_store : public Object_store {
   virtual bool list_objects_in_directory(
       const std::string &container, const std::string &directory,
       std::vector<std::string> &objects) override {
-    return swift_client.list_objects_with_prefix(container, directory + "/",
-                                                 objects);
+    /* See S3_object_store::list_objects_in_directory for the empty-
+    directory rationale.  Same applies to Swift. */
+    const std::string prefix =
+        directory.empty() ? std::string{} : directory + "/";
+    return swift_client.list_objects_with_prefix(container, prefix, objects);
   }
   virtual bool upload_object(const std::string &container,
                              const std::string &object,

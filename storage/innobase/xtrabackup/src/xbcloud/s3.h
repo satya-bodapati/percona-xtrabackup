@@ -354,8 +354,15 @@ class S3_object_store : public Object_store {
   virtual bool list_objects_in_directory(
       const std::string &container, const std::string &directory,
       std::vector<std::string> &objects) override {
-    return s3_client.list_objects_with_prefix(container, directory + "/",
-                                              objects);
+    /* When directory is empty (no per-backup prefix configured -- e.g.
+    ds_cloud's --cloud-s3-bucket=BUCKET form vs BUCKET/PREFIX), prefix
+    must stay empty so the listing returns every key in the bucket.
+    Blindly appending "/" turns prefix="" into prefix="/" and S3 then
+    matches nothing because our keys do not start with a leading slash
+    (the upload paths are flat: backup-my.cnf, cmpopt/big.ibd, ...). */
+    const std::string prefix =
+        directory.empty() ? std::string{} : directory + "/";
+    return s3_client.list_objects_with_prefix(container, prefix, objects);
   }
   virtual bool upload_object(const std::string &container,
                              const std::string &object,
