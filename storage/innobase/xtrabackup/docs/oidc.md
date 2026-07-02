@@ -390,19 +390,41 @@ struct field addition plus the one-line `info->is_tls_established = true`
 setter in `sql-common/client.cc:mpvio_info()`. All three edits are
 `#ifdef XTRABACKUP`-guarded.
 
-### Why not `mysql_client_register_plugin()` at runtime?
+### Why ship as `.so` rather than static-link into `libmysqlclient`?
 
-An alternative to adding the plugin to `mysql_client_builtins[]` is to
-call `mysql_client_register_plugin()` from `xb_mysql_connect()` on each
-new connection. That works but has two downsides:
+Two designs were on the table.  We picked (b).
 
-1. It couples plugin availability to `xb_mysql_connect()`; anything else
-   inside libmysqlclient that uses `find_plugin` (async paths,
-   MySQL Router integration) wouldn't see it.
-2. It has to be redone per-connection, which is easy to get wrong.
+(a) Static builtin: compile the plugin into `libmysqlclient.a` as a
+convenience library and add an entry to `mysql_client_builtins[]` in
+`sql-common/client.cc`, so `mysql_client_plugin_init()` pre-registers
+it and `find_plugin` never touches `dlopen`.  This is how
+`caching_sha2_password_client_plugin` works and matches the shape of
+`authentication_win`.  Zero runtime plugin-dir handling in
+xtrabackup.
 
-Adding to `mysql_client_builtins[]` makes registration a compile-time
-concern, matching how `caching_sha2_password` works. Fewer moving parts.
+(b) Loadable `.so`: build the plugin with
+`MYSQL_ADD_PLUGIN(... CLIENT_ONLY MODULE_ONLY)`, install to
+`${INSTALL_PLUGINDIR}`, and have `xb_mysql_connect()` call
+`mysql_options(MYSQL_PLUGIN_DIR, opt_plugin_dir)` so libmysqlclient
+dlopens it.  This is how LDAP, Kerberos, OCI, and FIDO/WebAuthn
+client plugins ship, and how PS's own build produces the plugin
+today.
+
+We chose (b) for three reasons:
+
+1. Consistency with the rest of the MySQL ecosystem.  Every other
+   external client auth plugin ships as a `.so`; static-linking
+   OIDC would have been the odd one out and would have created a
+   "why is OIDC special?" question every time someone new looks at
+   the tree.
+2. Security-fix substitutability.  A `.so` can be swapped in-place
+   without relinking `xtrabackup`.  A static builtin can't.
+3. Room to grow.  We can add third-party client auth plugins to the
+   same directory later without touching `libmysqlclient` or the
+   builtin table.
+
+An earlier commit series (`pxb-oidc` branch) implements design (a)
+and is kept as a reference for anyone considering the trade-off.
 
 ### Percona Server vs. PXB source base skew
 
