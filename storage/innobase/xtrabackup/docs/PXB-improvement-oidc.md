@@ -1,359 +1,394 @@
-# PXB Improvement: Support OIDC authentication in Percona Server for MySQL
+# PXB-XXXX — OpenID Connect authentication support in Percona XtraBackup
 
-Ticket-shaped writeup for the JIRA improvement. Companion to the
-implementation notes in `oidc.md`.
+*Design document for the JIRA improvement ticket. Companion to the
+implementation notes in `oidc.md`.*
 
-## Goal
+---
 
-Support users who enable OpenID Connect (OIDC) authentication in
-Percona Server for MySQL 8.4.10+. Such users should be able to perform
-xtrabackup backups **without configuring a MySQL password** — the
-signed ID token issued by their identity provider is the credential.
+## 1. HLD / Goal
 
-Concretely, an operator who already has an OIDC-identified MySQL user
-should be able to:
+Percona Server 8.4.10 (PS PR #5941) ships a server-side OpenID Connect
+authentication plugin. A MySQL account created with
+
+```sql
+CREATE USER alice IDENTIFIED WITH 'auth_openid_connect' AS '{...}';
+```
+
+can authenticate to `mysqld` by presenting a signed ID token (a JWT)
+instead of a password. Every stock MySQL client — `mysql`, `mysqldump`,
+`mysqlbinlog` — already supports this via the corresponding client
+plugin.
+
+**xtrabackup does not.** It cannot back up a server whose backup account
+is OIDC-identified: libmysqlclient built into PXB has no OIDC client
+plugin to negotiate the handshake, and xtrabackup has no CLI option to
+supply a token.
+
+This improvement closes that gap. After this change, an operator can run
 
 ```
-xtrabackup --backup --user=my-oidc-user \
+xtrabackup --backup --user=alice \
     --authentication-openid-connect-client-id-token-file=/path/to/token \
     --target-dir=/backup/full
 ```
 
-with no `--password`, no `--plugin-dir` override, no `.my.cnf` mapping,
-and no other one-off setup.
+against a PS 8.4.10 instance and get a full backup, no password.
 
-## User Interface
+**Out of scope.** Server-side OIDC work (owned by PS PR #5941).
+Interactive OAuth flows inside xtrabackup — a device-code prompt from a
+backup binary makes no operational sense. Shipping a bundled identity
+provider or a token-refresh daemon.
 
-### New option
+---
 
-`--authentication-openid-connect-client-id-token-file=PATH`
+## 2. User Interface Changes
 
-Points at a file containing a valid ID token (a JWT) issued by the
-OIDC identity provider (Keycloak, Okta, Auth0, Azure AD, Google Cloud
-Identity, etc.). The file is read at connection time — no environment
-variables, no in-memory tokens on the command line.
-
-### Interaction with existing options
-
-- **Mutually exclusive with `--password`.** Passing both is a hard
-  error before any server contact. The token IS the credential; there
-  is no reason to also pass a password, and doing so hints at operator
-  confusion.
-- **Reuses `--xtrabackup-plugin-dir`.** xtrabackup tells libmysqlclient
-  where to find the OIDC client plugin via
-  `mysql_options(MYSQL_PLUGIN_DIR, opt_plugin_dir)`, and
-  `opt_plugin_dir` is the same value `--xtrabackup-plugin-dir`
-  populates (defaulting to the compile-time `PLUGINDIR`). Operators
-  who already override the plugin dir for keyring will find it
-  automatically applies here too.
-
-### Files shipped
-
-- `authentication_openid_connect_client.so` — the client-side OIDC
-  plugin, built from PS PR #5941's source. Installed under
-  `${INSTALL_PLUGINDIR}` in the Client component. Same directory as
-  the keyring components PXB already ships.
-
-### Log output
-
-Before the connection is opened, xtrabackup logs three lines that
-together disambiguate every credential-related decision:
+### 2.1 New option
 
 ```
-[Note] Connecting to MySQL server host: localhost, user: my-oidc-user, password: not set (using OIDC id-token-file), port: not set, socket: /tmp/mysql.sock
-[Note] Using OpenID Connect id-token-file '/path/to/token' for authentication to the server.
-[Note] OIDC client plugin dir (--xtrabackup-plugin-dir): '/usr/lib/mysql/plugin'
-[Note] Loading OIDC client plugin from '/usr/lib/mysql/plugin/authentication_openid_connect_client.so'
+--authentication-openid-connect-client-id-token-file=PATH
 ```
 
-The last two lines are important when a co-installed Percona Server
-also has an OIDC client plugin under its own plugin dir — the log
-tells the operator exactly which `.so` is being dlopen'd.
+Path (absolute or relative) to a file containing a signed JWT ID token.
+Name matches PS PR #5941's addition to `client/mysql.cc`; operators
+learn it once and it applies across the MySQL toolchain.
 
-### Error cases
+### 2.2 Interaction with existing options
 
-| Condition | Error emitted |
+| Option | Interaction |
 |---|---|
-| `--password` + `--authentication-openid-connect-client-id-token-file` both given | `--password and --authentication-openid-connect-client-id-token-file are mutually exclusive; the OIDC ID token is the credential.` |
-| Token file missing / unreadable / malformed | `Failed to set id-token-file '<path>' on authentication_openid_connect_client plugin.` |
-| Plugin `.so` not present in plugin dir | `authentication_openid_connect_client plugin not found: <libmysqlclient error>` |
-| Transport is plain TCP (not TLS/socket/shared-mem) | `The client-server connection is insecure. …` (from the plugin itself) |
+| `--password` | **Mutually exclusive.** Both set → hard error at option-processing time, before any server contact. |
+| `--xtrabackup-plugin-dir` | **Reused.** xtrabackup already consults this to locate keyring plugins; the OIDC client `.so` is installed under the same directory, so no new option is needed. Compile-time default is `${DEFAULT_MYSQL_HOME}/${INSTALL_PLUGINDIR}`. |
+| `--ssl-mode` | Recommended `REQUIRED` or higher. The OIDC client plugin refuses to send the token over plain TCP; a unix socket or TLS is mandatory. This is the plugin's own behavior, not a new xtrabackup check. |
 
-## High-Level Design
+### 2.3 Files shipped
 
-### How xtrabackup currently handles client authentication plugins
+`authentication_openid_connect_client.so` under `${INSTALL_PLUGINDIR}`
+in the `Client` component of the RPM/DEB packages.
 
-libmysqlclient (statically archived into `xtrabackup`) resolves an
-auth plugin the server asks for by looking, in order, at:
+### 2.4 Log output
 
-1. **In-binary builtins.** `caching_sha2_password`,
-   `mysql_native_password`, `sha256_password`, and `clear_password`
-   are compiled directly into `libmysqlclient.a` and registered
-   in `mysql_client_builtins[]` at library init time. No filesystem
-   access.
-2. **`.so` dlopen from `MYSQL_PLUGIN_DIR`.** Precedence:
-   `mysql_options(mysql, MYSQL_PLUGIN_DIR, …)` if set, else
-   `LIBMYSQL_PLUGIN_DIR` env var, else the compile-time `PLUGINDIR`
-   constant.
+Emitted before `mysql_real_connect()`:
 
-Historically PXB **never** called `mysql_options(MYSQL_PLUGIN_DIR, …)`
-and never shipped its own auth `.so`. So anything beyond the four
-builtins silently relied on the compile-time `PLUGINDIR` happening to
-match the runtime path where a co-installed Percona Server had put
-the corresponding `.so`. This is why LDAP / Kerberos / OCI / FIDO
-xtrabackup connections work "on my machine" but are brittle across
-distributions and install layouts.
-
-### What we import from Percona Server
-
-Percona Server PR #5941 (PS-10999) adds the client-side OIDC plugin
-at `libmysql/authentication_openid_connect_client/`. It's a ~250-line
-plugin that does exactly four things:
-
-1. Reads the ID-token file from disk.
-2. Verifies the file is a well-formed JWT (three base64URL segments,
-   sane sizes). No cryptographic verification client-side — the
-   signature is verified by the server against its JWKS.
-3. Refuses to send the token unless the transport is TLS, unix
-   socket, or shared memory. Refuses plain TCP.
-4. Sends the token over the plugin VIO.
-
-PXB imports this file verbatim (with a `SYNCED-FROM: percona-server
-PR #5941` header at the top) into
-`libmysql/authentication_openid_connect_client/`. The CMake setup
-mirrors `authentication_oci_client`:
-
-```cmake
-MYSQL_ADD_PLUGIN(
-  authentication_openid_connect_client
-  authentication_openid_connect_client_plugin.cc
-  LINK_LIBRARIES mysys
-  CLIENT_ONLY
-  MODULE_ONLY MODULE_OUTPUT_NAME "authentication_openid_connect_client"
-)
+```
+[Note] Connecting to MySQL server host: <h>, user: <u>, password: not set (using OIDC id-token-file), port: <p>, socket: <s>
+[Note] Using OpenID Connect id-token-file '<path>' for authentication to the server.
+[Note] OIDC client plugin dir (--xtrabackup-plugin-dir): '<dir>'
+[Note] Loading OIDC client plugin from '<dir>/authentication_openid_connect_client.so'
 ```
 
-The `.so` is installed under `${INSTALL_PLUGINDIR}` in the Client
-component. Same shape and shipping location as PS's other client
-auth plugins.
+Last two lines disambiguate which `.so` was loaded when a co-installed
+Percona Server also has a client-plugin dir on the box.
 
-We also import two small companion changes from the same PR, both
-`#ifdef XTRABACKUP`-guarded so the ABI check preprocessor (which
-runs without `-DXTRABACKUP`) doesn't see them:
+### 2.5 Error surface
 
-- A `bool is_tls_established;` field on `MYSQL_PLUGIN_VIO_INFO`
-  (`include/mysql/plugin_auth_common.h`). The OIDC plugin's
-  insecure-transport check reads it.
-- The setter for that field in `sql-common/client.cc:mpvio_info()`
-  under the `VIO_TYPE_SSL` case.
+| Condition | Message | Fires at |
+|---|---|---|
+| `--password` + OIDC option both given | `--password and --authentication-openid-connect-client-id-token-file are mutually exclusive; the OIDC ID token is the credential.` | `xb_mysql_connect` entry, before any I/O |
+| Token file missing / unreadable / malformed | `Failed to set id-token-file '<path>' on authentication_openid_connect_client plugin.` | Plugin `option()` callback, before server contact |
+| `.so` absent from plugin_dir | `authentication_openid_connect_client plugin not found: <dlopen error>` | `mysql_client_find_plugin` |
+| Insecure transport | Plugin's own message: `The client-server connection is insecure. …` | During handshake |
 
-Nothing else from the PR is needed — the server-side plugin, jwt-cpp,
-JWKS fetch, group→role mapping all stay in Percona Server.
+---
 
-### How the plugin gets loaded and driven
+## 3. Requirements
 
-Inside `xb_mysql_connect()` in `storage/innobase/xtrabackup/src/backup_mysql.cc`,
-before `mysql_real_connect`:
+### 3.1 Functional
 
-1. If `--password` was also set, hard-error out (mutex).
-2. Emit the reformatted `Connecting to MySQL server host: …` line
-   with `password: not set (using OIDC id-token-file)`.
-3. Emit the `Using OpenID Connect id-token-file '…'` line.
-4. Call `mysql_options(connection, MYSQL_PLUGIN_DIR, opt_plugin_dir)`.
-5. Emit the `OIDC client plugin dir (--xtrabackup-plugin-dir): '…'` +
-   `Loading OIDC client plugin from '…/authentication_openid_connect_client.so'`
-   pair.
-6. Call `mysql_client_find_plugin("authentication_openid_connect_client",
-   MYSQL_CLIENT_AUTHENTICATION_PLUGIN)`. On the first call for a
-   given process this triggers `dlopen`.
-7. Call `mysql_plugin_options(plugin, "id-token-file", opt_openid_connect_id_token_file)`.
-   The plugin's `option()` callback opens the file eagerly and
-   rejects invalid paths — so a bad path fails before any server
-   contact.
-8. Proceed to `mysql_real_connect`. During its authentication
-   handshake libmysqlclient will call the OIDC plugin's
-   `authenticate_user` callback, which reads the token and hands it
-   to the server over the plugin VIO.
+FR1 — `xtrabackup --backup` with a valid OIDC user and a valid token
+      succeeds against a PS 8.4.10 instance with `auth_openid_connect`
+      installed and configured. `--prepare` + `--copy-back` produce a
+      restored server whose data matches the source.
 
-### What is passed to the plugin at runtime
+FR2 — Invalid token (missing, malformed, expired, signature mismatch)
+      causes a clean failure that names the token file. No server
+      contact is initiated for the "missing / malformed" cases.
 
-Only one option key: `"id-token-file"` → the absolute path.
+FR3 — `--password` and the OIDC option together cause a hard error at
+      option-processing time. Both option names appear in the message.
 
-The plugin reads and validates the file itself; xtrabackup never
-touches the token bytes. Over the wire (during the MySQL protocol
-handshake) the plugin sends:
+FR4 — Every backup-time connection site (`xb_mysql_connect` — full
+      backup, `LOCK INSTANCE`, MDL, redo-log-consumer) uses the OIDC
+      credential when the option is set. No code path silently falls
+      back to password authentication mid-backup.
 
-- A 2-byte capability field (currently always `0x0001`).
-- A length-encoded string carrying the raw JWT (up to 20 KB).
+FR5 — `--xtrabackup-plugin-dir` overrides the compile-time default for
+      both existing keyring plugins and the new OIDC client plugin.
 
-The server-side `auth_openid_connect` plugin then verifies the JWT
-signature against its configured JWKS, checks `iss` / `aud` / `exp`
-claims, and matches `sub` against the `CREATE USER … IDENTIFIED WITH
-'auth_openid_connect' AS '{…,"user":"…"}'` clause.
+FR6 — `xtrabackup --help` documents the new option.
 
-### Ownership boundary
+### 3.2 Non-functional
 
-| Concern | Owner |
+NFR1 — **No new binary in `libmysqlclient`.** The OIDC client plugin is
+       `MODULE_ONLY` (loadable `.so`), not archived into
+       `libmysqlclient.a`. A security fix ships as a `.so` swap; no
+       xtrabackup relink required.
+
+NFR2 — **No ABI change visible to external `libmysqlclient` consumers.**
+       The one struct-field addition (`is_tls_established`) is
+       `#ifdef XTRABACKUP`-guarded. The ABI check runs without
+       `-DXTRABACKUP`, so `include/mysql/*.h.pp` stay unchanged.
+
+NFR3 — **No plaintext token over the wire.** Enforced by the plugin
+       itself (refuses non-TLS/socket/shm transports). PXB does not
+       relax or wrap this check.
+
+NFR4 — **Skip-clean tests.** In every representative environment the
+       suite runs with 0 failures — tests missing prerequisites skip,
+       don't fail:
+
+       | Environment | Passes | Skips |
+       |---|---|---|
+       | dev, no VPN, no Docker, no PS build | 0 | 3 |
+       | dev, PS build present, no VPN | 1 (`oidc_jwt`) | 2 |
+       | dev + VPN, no Docker | 2 (`oidc_jwt`, `oidc_percona`) | 1 |
+       | Jenkins + Docker | 3 | 0 |
+
+NFR5 — **Package inclusion.** RPM (`packaging/rpm/*.spec`) and DEB
+       (`packaging/deb/*.install`) definitions for
+       `percona-xtrabackup-84` include the new `.so`.
+
+NFR6 — **No new dependency in the xtrabackup binary.** The client
+       plugin links only `mysys`. It does not depend on `jwt-cpp`,
+       `openssl`, or any transitive new library — JWT signature
+       verification is entirely server-side.
+
+NFR7 — **Fail-closed on ambiguity.** When multiple copies of the
+       client `.so` could plausibly be loaded (PS's install + PXB's
+       install), the operator can determine which one is used by
+       reading the xtrabackup log (§2.4). No silent selection.
+
+---
+
+## 4. HLS
+
+### 4.1 Component view
+
+```
+       operator                                          identity provider
+   (Jenkins or human)                                (Keycloak/Okta/Auth0/…)
+           │                                                    │
+           │ writes ID token to a file                          │ issues signed
+           ▼                                                    │  ID token (JWT)
+    ┌──────────────┐    MySQL wire (TLS/socket)  ┌──────────────┴──────────┐
+    │  xtrabackup  │───────────────────────────► │  Percona Server 8.4.10  │
+    │              │                             │  auth_openid_connect    │
+    │  --auth-…    │                             │  (verifies signature    │
+    │  -id-token-  │                             │   against JWKS; checks  │
+    │   file=…     │                             │   iss/aud/exp/sub)      │
+    └──────┬───────┘                             └─────────────────────────┘
+           │
+           │ mysql_options(MYSQL_PLUGIN_DIR, opt_plugin_dir)
+           ▼
+    ┌──────────────┐   dlopen    ┌────────────────────────────────┐
+    │libmysqlclient│───────────► │ authentication_openid_         │
+    │find_plugin() │             │ connect_client.so              │
+    └──────────────┘             │ (reads token file, writes it   │
+                                 │  over the plugin VIO)          │
+                                 └────────────────────────────────┘
+```
+
+xtrabackup is deliberately dumb about JWT semantics — it moves the
+token from disk to the wire; every semantic check lives in the server
+plugin or the client plugin, both imported unchanged from PS.
+
+### 4.2 How xtrabackup currently loads client auth plugins
+
+libmysqlclient (archived into `xtrabackup`) resolves a client auth
+plugin the server asks for in this order:
+
+1. **In-binary builtins** — `caching_sha2_password`,
+   `mysql_native_password`, `sha256_password`, `clear_password`.
+   Statically archived into `libmysqlclient.a`, registered at
+   library init via `mysql_client_builtins[]`
+   (`sql-common/client.cc:4071`).
+
+2. **`.so` dlopen** — precedence:
+   `mysql_options(mysql, MYSQL_PLUGIN_DIR, …)` if set →
+   `LIBMYSQL_PLUGIN_DIR` env → compile-time `PLUGINDIR`.
+
+Historically PXB has never called `mysql_options(MYSQL_PLUGIN_DIR, …)`
+anywhere, and has never shipped a client auth `.so`. Anything beyond
+the four builtins has silently relied on the compile-time `PLUGINDIR`
+matching whatever a co-installed PS put its `.so` under — brittle and
+undocumented. This improvement is the first time PXB owns a client
+auth plugin end-to-end.
+
+### 4.3 What is imported from Percona Server
+
+From `libmysql/authentication_openid_connect_client/` in PS PR #5941:
+
+- `authentication_openid_connect_client_plugin.cc` (~250 lines). Reads
+  the token file, does a syntactic JWT-shape check (three base64URL
+  segments, sane sizes), refuses to release the token on plain TCP,
+  sends it over the plugin VIO. No cryptography client-side.
+- `CMakeLists.txt` — rewritten to fit PXB's build layout, but
+  structurally the same as `libmysql/authentication_oci_client/`:
+  `MYSQL_ADD_PLUGIN(... CLIENT_ONLY MODULE_ONLY MODULE_OUTPUT_NAME ...)`.
+  Installs to `${INSTALL_PLUGINDIR}`, Client component.
+
+Two small companion changes needed by the plugin's TLS check
+(also from PR #5941), `#ifdef XTRABACKUP`-guarded:
+
+- `include/mysql/plugin_auth_common.h` — adds a `bool
+  is_tls_established;` field to `MYSQL_PLUGIN_VIO_INFO`.
+- `sql-common/client.cc` — sets that field in `mpvio_info()`'s
+  `VIO_TYPE_SSL` branch.
+
+Everything else PS's PR touched — the server plugin under
+`plugin/auth_openid_connect/`, the `jwt-cpp` submodule, PS's own
+MTR suite — is server-side and not imported.
+
+### 4.4 How the plugin is loaded and driven
+
+`xb_mysql_connect()` in `storage/innobase/xtrabackup/src/backup_mysql.cc`
+gains the following before `mysql_real_connect`:
+
+1. If `opt_openid_connect_id_token_file != nullptr && opt_password != nullptr`
+   → `xb::error` + `mysql_close` + return null. Satisfies FR3.
+2. Emit the connection-summary line with the `password: not set
+   (using OIDC id-token-file)` variant.
+3. Emit the token-file `[Note]` line.
+4. `set_client_ssl_options(connection)` (existing).
+5. Emit the plugin-dir `[Note]` and the resolved-`.so`-path `[Note]`.
+6. `mysql_options(connection, MYSQL_PLUGIN_DIR, opt_plugin_dir)` —
+   `opt_plugin_dir` is already resolved by `xb_set_plugin_dir()`
+   from `--xtrabackup-plugin-dir` or the compile-time default.
+7. `mysql_client_find_plugin(conn, "authentication_openid_connect_client",
+   MYSQL_CLIENT_AUTHENTICATION_PLUGIN)` — this triggers `dlopen` the
+   first time it's called. Failure → `xb::error` + close + null.
+8. `mysql_plugin_options(plugin, "id-token-file",
+   opt_openid_connect_id_token_file)`. The plugin's `option()` callback
+   opens the file eagerly and returns non-zero on failure, satisfying
+   FR2 without any server contact.
+9. Proceed to `mysql_real_connect`. During its handshake libmysqlclient
+   dispatches to the OIDC plugin's `authenticate_user` callback, which
+   reads the token file (once) and writes it over the plugin VIO.
+
+Because every xtrabackup MySQL connection funnels through
+`xb_mysql_connect()`, FR4 (every connection uses OIDC when the option
+is set) holds trivially.
+
+### 4.5 What is passed to the plugin
+
+At configuration time, exactly one key/value:
+
+- `"id-token-file"` → absolute path to the token file.
+
+At handshake time (plugin → server, over the VIO):
+
+- 2-byte capability field (currently constant `0x0001`).
+- Length-prefixed raw JWT (up to 20 KB).
+
+xtrabackup never handles the token bytes.
+
+### 4.6 Design trade-off: static builtin vs loadable `.so`
+
+Two implementations were prototyped.
+
+**(a) Static builtin.** Compile the plugin into `libmysqlclient.a`
+via `ADD_CONVENIENCE_LIBRARY`; register in `mysql_client_builtins[]`.
+No plugin_dir handling needed at runtime.
+Same shape as `caching_sha2_password_client_plugin` and
+`authentication_win`.
+
+**(b) Loadable `.so`.** `MYSQL_ADD_PLUGIN(... CLIENT_ONLY MODULE_ONLY)`,
+installed to `${INSTALL_PLUGINDIR}`, dlopen'd via
+`mysql_options(MYSQL_PLUGIN_DIR)`. Same shape as
+`authentication_ldap_sasl_client`, `authentication_oci_client`,
+`authentication_kerberos_client`, `authentication_webauthn_client`,
+and PS's own build of the OIDC plugin.
+
+We ship **(b)**:
+
+1. Consistency. Every external client auth plugin in the tree is
+   already a `.so`; making OIDC the odd builtin creates a "why is
+   this special?" question every time.
+2. Substitutability. A `.so` can be replaced for a security fix
+   without relinking xtrabackup.
+3. Extensibility. The same directory can hold third-party client
+   auth plugins later without touching `libmysqlclient` or the
+   builtin table.
+
+The static-builtin design lives on the `pxb-oidc` branch as a
+reference; the target implementation is on `pxb-oidc-shared`.
+
+### 4.7 Testing strategy
+
+Three tests under `storage/innobase/xtrabackup/test/suites/oidc/`,
+one per token source. The rest of the flow (install server plugin,
+create user, backup, prepare, restore, verify) is shared via
+`test/inc/oidc_common.sh`.
+
+| Test | Token source | Where it runs |
+|---|---|---|
+| `oidc_jwt.sh` | `create_id_token` locally-signed JWT + dummy JWKS from PS `std_data/oidc/` | Any dev host with a PS 8.4.10 build. Deterministic, ~15 s. Also covers the `--password` + OIDC mutex and the missing-token-file rejection. |
+| `oidc_percona.sh` | Live Percona Keycloak (`keycloak.int.percona.com`) via ROPC | Percona VPN. Skipped otherwise. |
+| `oidc_keycloak.sh` | Dev Keycloak via Docker (`quay.io/keycloak/keycloak:26.0`) — auto-bootstrap on `OIDC_BOOTSTRAP_KEYCLOAK=1`, or external via `KEYCLOAK_*` env vars | Jenkins or dev with Docker. Skipped otherwise. |
+
+Framework additions under `test/inc/`:
+
+- `oidc_common.sh` — `oidc_require_server_plugin`,
+  `oidc_install_and_configure_server_plugin`, `oidc_create_backup_user`,
+  `oidc_extract_sub` (real IdPs stamp UUIDs in `sub`, not usernames —
+  extracted dynamically so tests survive IdP re-provisioning),
+  `oidc_fetch_ropc_token`, `oidc_backup_prepare_restore_verify` (full
+  backup + prepare + copy-back + row-count verify).
+- `oidc_keycloak_docker.sh` — Docker Keycloak lifecycle: `docker run` +
+  health-poll + `kcadm.sh` realm/client/user/mapper provisioning + ROPC
+  token fetch + `EXIT`-trap teardown.
+
+Each test's first log line lists the env vars it needs, so anyone
+reading `results/<test>` sees the setup even before any skip.
+
+### 4.8 Risks and mitigations
+
+| Risk | Mitigation |
 |---|---|
-| ID-token issuance | Identity provider (Keycloak / Okta / Auth0 / …) |
-| Token file placement + rotation | Operator |
-| JWKS fetch, signature verify, claim check | Percona Server `auth_openid_connect` plugin |
-| Group→role mapping, proxy accounts | Percona Server (already in PR #5941) |
-| Reading the file, TLS-safety check, wire transport | PXB client plugin (imported from PS) |
-| Wiring plugin_dir, option handoff, `--password` mutex, logs | PXB `xb_mysql_connect()` |
+| PS 8.4.10 slips or ships without PR #5941 | Runtime path is inert without a server plugin; tests skip cleanly on `AUTH_OIDC_SERVER_SO` unset. No PXB-side release blocker. |
+| ABI drift breaks external `libmysqlclient` consumers | The single struct-field addition is `#ifdef XTRABACKUP`-guarded and the `abi_check` target passes (§ NFR2). |
+| Two `.so`s installed (PS's + PXB's) → operator confusion | The two provenance `[Note]` lines (§2.4) name the exact resolved path. |
+| Real IdP outage in CI | `oidc_percona.sh` skips on unreachable JWKS URL; `oidc_keycloak.sh` runs in-Docker and is unaffected. |
+| Keycloak image tag drift | Pinned to `quay.io/keycloak/keycloak:26.0` in the helper. Bump is a one-line change. |
+| ROPC used in tests is production-inappropriate | The plugin's public API takes a token file — how it was produced is opaque. Production uses whatever flow the IdP mandates. Documented in test headers. |
 
-xtrabackup is deliberately dumb about JWT semantics — it just moves
-the token from disk to the wire.
+### 4.9 Acceptance criteria
 
-## Testing
+1. `pxb-oidc-shared` reviewed and merged to `8.4`.
+2. `packaging/rpm/*.spec` and `packaging/deb/*.install` for
+   `percona-xtrabackup-84` include the new `.so`.
+3. Jenkins runs the 3-test OIDC suite green (all three passes) at
+   least once against a Docker-provisioned Keycloak.
+4. `xtrabackup --help` output shows the new option.
+5. docs.percona.com PXB reference documents the option and links to a
+   short "using OIDC with PXB" walkthrough.
+6. First release carrying the change calls it out in release notes.
 
-### Test suite
+### 4.10 Dependencies
 
-A new suite `storage/innobase/xtrabackup/test/suites/oidc/` with three
-tests, each covering a different IdP scenario:
+- **Hard.** Percona Server 8.4.10 with PR #5941 merged, and the
+  matching `create_id_token` helper built and shipped alongside.
+- **Soft.** `jwt-cpp` submodule initialized in the PS build tree
+  (server-side dependency; PXB itself does not depend on it).
+- **CI.** Docker CLI + egress to `quay.io/keycloak` for the auto-bootstrap
+  test, or a persistent Keycloak provisioned by the Jenkins job.
+- **Testing (optional).** VPN access to `keycloak.int.percona.com`
+  for the live-IdP variant.
 
-1. **`oidc_jwt.sh` — locally-signed JWT (fast, deterministic).**
-   Uses PS's dummy in-memory JWKS (`mysql-test/std_data/oidc/`) and
-   the `create_id_token` helper to sign a JWT that the server plugin
-   verifies against the baked-in public key. No live IdP. Also
-   covers the two negative paths in `xb_mysql_connect()`: the
-   `--password` + OIDC mutex, and the missing-token-file rejection.
+### 4.11 Deliverables
 
-2. **`oidc_percona.sh` — live Percona-hosted Keycloak.**
-   Hits `https://keycloak.int.percona.com` (mirrors PS's own
-   `mysql-test/suite/auth_openid_connect/t/idp.test`), fetches a
-   real ID token via ROPC password grant, drives the full backup
-   round-trip against it. Skips cleanly if unreachable (no VPN,
-   IdP maintenance).
+- Branch `pxb-oidc-shared` — target implementation, ready for review.
+- Branch `pxb-oidc` — reference implementation (static-builtin design),
+  kept for review-time comparison.
+- `storage/innobase/xtrabackup/docs/oidc.md` — implementation-focused
+  notes for future maintainers.
+- This document — design + plan for the improvement ticket.
 
-3. **`oidc_keycloak.sh` — dev-provisioned Keycloak.**
-   Two modes:
-   - **Auto-bootstrap:** `OIDC_BOOTSTRAP_KEYCLOAK=1` → the test
-     starts `quay.io/keycloak/keycloak:26.0` (Apache 2.0) in dev
-     mode, provisions realm/client/user + audience mapper via
-     `kcadm.sh`, fetches a token, installs an `EXIT` trap so the
-     container is torn down at end of run.
-   - **External Keycloak:** operator provisions the container out of
-     band and hands the test its coordinates via `KEYCLOAK_*` env
-     vars (same shape as `XBCLOUD_CREDENTIALS`).
-
-Every test uses the same core flow — INSTALL PLUGIN + configure +
-CREATE USER + `xtrabackup --backup` + `--prepare` + restore + verify
-row count of `sakila.actor` matches the source. Green means the
-OIDC-authenticated round-trip actually preserved data, not just that
-xtrabackup exited zero.
-
-### Test framework changes
-
-New helpers under `storage/innobase/xtrabackup/test/inc/`:
-
-- **`oidc_common.sh`** — reusable across the three tests:
-  - `oidc_require_server_plugin` — env-var gate + plugin-dir discovery.
-  - `oidc_install_and_configure_server_plugin` — INSTALL PLUGIN +
-    SET GLOBAL `auth_openid_connect_configuration`.
-  - `oidc_create_backup_user` — CREATE USER + grants xtrabackup needs.
-  - `oidc_extract_sub` — decode JWT, echo `.sub` claim (needed
-    because real IdPs stamp UUIDs there rather than login names).
-  - `oidc_fetch_ropc_token` — POST an ROPC grant, write ID token
-    to a file.
-  - `oidc_backup_prepare_restore_verify` — full backup +
-    prepare + copy-back + row-count-verify cycle.
-- **`oidc_keycloak_docker.sh`** — Docker Keycloak lifecycle:
-  container start with health-poll wait, `kcadm.sh` provisioning
-  of realm/client/user/mapper, ROPC token fetch, `EXIT`-trap
-  teardown. Auto-runs when the caller exports
-  `OIDC_BOOTSTRAP_KEYCLOAK=1`.
-
-Each test's log starts with a `vlog` line summarising its required
-env vars, so anyone reading `results/<test>` can see the expected
-setup even if the test skipped or failed before any real action.
-
-### Environment variables required for testing
-
-**All three tests:**
-
-| Variable | Meaning |
-|---|---|
-| `AUTH_OIDC_SERVER_SO` | Absolute path to `auth_openid_connect.so` (from a Percona Server 8.4.10+ build). |
-
-**`oidc_jwt.sh` also needs:**
-
-| Variable | Meaning |
-|---|---|
-| `CREATE_ID_TOKEN` | Path to PS's `create_id_token` helper. |
-| `AUTH_OIDC_STD_DATA` | Directory containing `idp_private.pem` + `dummy_oidc_conf.json` (PS `mysql-test/std_data/oidc`). |
-
-**`oidc_percona.sh` also needs:**
-
-| Requirement | Meaning |
-|---|---|
-| VPN reachability to `keycloak.int.percona.com` | Skipped cleanly if unreachable. |
-| `curl`, `jq` on PATH | For ROPC token fetch + sub extraction. |
-
-**`oidc_keycloak.sh` also needs one of:**
-
-Auto-bootstrap:
-
-| Variable | Meaning |
-|---|---|
-| `OIDC_BOOTSTRAP_KEYCLOAK=1` | Opt into container lifecycle inside the test. |
-| `docker`, `curl`, `jq` on PATH | Prerequisites for the bootstrap. |
-
-Or external Keycloak:
-
-| Variable | Meaning |
-|---|---|
-| `KEYCLOAK_ISSUER` | OIDC issuer URL, must match token's `iss`. |
-| `KEYCLOAK_AUDIENCE` | Expected `aud` claim value. |
-| `KEYCLOAK_JWKS_URL` | JWKS endpoint URL. |
-| `KEYCLOAK_ID_TOKEN` | Path to a valid ID-token file. |
-| `KEYCLOAK_MYSQL_USER` | Optional; mysql-side user name (default `mysql_oidc_user`). |
-
-### CI / Jenkins considerations
-
-Following the pattern already used for `xbcloud` tests (external
-MinIO / Azurite / fake-gcs / etc.): Jenkins either provisions a
-Keycloak container up-front and passes `KEYCLOAK_*` vars to the
-test, or sets `OIDC_BOOTSTRAP_KEYCLOAK=1` for isolated per-run
-containers. Either shape is a small addition to the existing PXB
-Jenkins jobs.
-
-### Skip behavior — clean by design
-
-Every test skips (not fails) when its prerequisites aren't available.
-This is important because the suite must run cleanly in a variety of
-environments:
-
-| Environment | Expected outcome |
-|---|---|
-| Dev laptop, no VPN, no Docker, no PS build handy | 3 skipped, 0 failed |
-| Dev laptop with PS build, no VPN | 1 pass (`oidc_jwt`) + 2 skipped |
-| Percona VPN, no Docker | 2 passes (`oidc_jwt`, `oidc_percona`) + 1 skipped |
-| Jenkins with Docker | 3 passes |
-
-Concretely observed today on a laptop with PS 8.4.10 build + VPN:
-`./run.sh -f -s oidc` → 2 passed + 1 skipped, in ~34s.
-
-## Deliverables
-
-The work lives on two branches so reviewers can compare the design
-choice for the client plugin:
-
-- **`pxb-oidc`** — first-cut with the client plugin compiled as a
-  static builtin merged into `libmysqlclient.a` (`ADD_CONVENIENCE_LIBRARY`
-  pattern; entry in `mysql_client_builtins[]`). No `.so` shipped.
-  Kept as reference and for its clean 4-commit split (source /
-  helpers / tests / docs).
-- **`pxb-oidc-shared`** — the target design. Plugin ships as a
-  loadable `.so` under `${INSTALL_PLUGINDIR}`; xtrabackup calls
-  `mysql_options(MYSQL_PLUGIN_DIR, opt_plugin_dir)` to point
-  libmysqlclient at it. Same test suite; docs updated to match.
-
-The `.so` shape (`pxb-oidc-shared`) is what should ship.
+---
 
 ## References
 
-- PS PR #5941: [PS 10999 8.4 OIDC authentication](https://github.com/percona/percona-server/pull/5941)
-- Implementation notes: `storage/innobase/xtrabackup/docs/oidc.md`
-- OpenID Connect Core 1.0: https://openid.net/specs/openid-connect-core-1_0.html
-- Keycloak: https://www.keycloak.org
+- PS PR #5941: [PS-10999 [8.4]: OIDC Authentication for Percona Server](https://github.com/percona/percona-server/pull/5941)
+- OpenID Connect Core 1.0: <https://openid.net/specs/openid-connect-core-1_0.html>
+- RFC 7519 (JWT): <https://datatracker.ietf.org/doc/html/rfc7519>
+- Keycloak (Apache 2.0): <https://www.keycloak.org>
