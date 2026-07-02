@@ -46,6 +46,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "library_version_check.h"
 #include "msg.h"
 #include "nulls.h"
+#include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
 #include "xbcloud/azure.h"
 #include "xbcloud/s3.h"
@@ -1511,20 +1512,23 @@ int main(int argc, char **argv) {
         static_cast<s3_bucket_lookup_t>(opt_s3_bucket_lookup),
         static_cast<s3_api_version_t>(opt_s3_api_version)));
 
-    // PXB-XXXX credential-provider migration.  Wire an HmacProvider
-    // holding the long-lived (or, in the ec2_instance case, already-
-    // fetched) HMAC credentials.  Behaviour-neutral: sign() will
-    // pull the same three strings from the provider every request.
-    // Later commits swap in an Ec2InstanceProfileProvider that
-    // refreshes from IMDS internally instead of relying on the
-    // response-handler branch in S3_client::retry_error().
-    reinterpret_cast<S3_object_store *>(object_store.get())
-        ->set_credential_provider(
-            std::make_unique<auth::aws::HmacProvider>(
-                access_key, secret_key, session_token,
-                ec2_instance->get_is_ec2_instance_with_profile()
-                    ? std::string("aws:ec2-instance-profile:legacy")
-                    : std::string("aws:hmac:cli-flags")));
+    // Credential provider selection: on an EC2 instance with an
+    // attached IAM role, use Ec2InstanceProfileProvider so refresh
+    // (on ExpiredToken responses via retry_error → invalidate) is
+    // handled uniformly by the provider abstraction.  Otherwise
+    // fall back to long-lived HMAC.
+    if (ec2_instance->get_is_ec2_instance_with_profile()) {
+      reinterpret_cast<S3_object_store *>(object_store.get())
+          ->set_credential_provider(
+              std::make_unique<auth::aws::Ec2InstanceProfileProvider>(
+                  ec2_instance));
+    } else {
+      reinterpret_cast<S3_object_store *>(object_store.get())
+          ->set_credential_provider(
+              std::make_unique<auth::aws::HmacProvider>(
+                  access_key, secret_key, session_token,
+                  "aws:hmac:cli-flags"));
+    }
 
     if (opt_s3_bucket == nullptr) {
       msg_ts("%s: S3 bucket is not specified.\n", my_progname);

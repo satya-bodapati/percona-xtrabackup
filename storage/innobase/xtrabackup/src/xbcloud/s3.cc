@@ -748,13 +748,12 @@ void S3_client::retry_error(Http_response *resp, bool *retry) {
     if (s3_resp.error_code() == "ExpiredToken" ||
         s3_resp.error_code() == "InvalidToken" ||
         s3_resp.error_code() == "TokenRefreshRequired") {
-      if (api_version == S3_V4 && ec2_instance != nullptr &&
-          ec2_instance->get_is_ec2_instance_with_profile() &&
-          ec2_instance->fetch_metadata()) {
-        access_key = ec2_instance->get_access_key();
-        secret_key = ec2_instance->get_secret_key();
-        session_token = ec2_instance->get_session_token();
-        signer.get()->update_keys(access_key, secret_key, session_token);
+      // Post-C6 path: any registered provider (Ec2InstanceProfile,
+      // STS, Roles Anywhere, …) knows how to refresh itself.  Just
+      // invalidate + retry; sign() on the retry will pull fresh
+      // credentials via provider->get_hmac().
+      if (credential_provider_) {
+        credential_provider_->invalidate();
         *retry = true;
       }
     }

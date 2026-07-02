@@ -55,7 +55,8 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   library_version_check.cc
   auth/token_cache.cc
   auth/retry_backoff.cc
-  auth/aws/hmac_provider.cc)
+  auth/aws/hmac_provider.cc
+  auth/aws/ec2_instance_profile.cc)
 
 SET_TARGET_PROPERTIES(xbcloud
         PROPERTIES LINKER_LANGUAGE CXX
