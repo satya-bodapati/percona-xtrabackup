@@ -236,12 +236,25 @@ class S3_client {
 
   // Refresh the signer's key material from the CredentialProvider (if
   // one was set) and delegate to signer->sign_request().  For
-  // long-lived HMAC keys this is a no-op update (constants); for
-  // temporary-credential providers it forces refresh-if-needed via
-  // get_hmac() before every request.
+  // HMAC-mode providers (AWS, GCS interop, Azure Shared Key)
+  // update_keys() gets fresh credentials before sign_request(); for
+  // BEARER-mode providers (GCS OAuth2 ADC, Azure Managed Identity)
+  // we skip SigV4 signing entirely and attach the Bearer token as an
+  // Authorization header.  Everything else about the outgoing
+  // request — URL, verb, body, multipart flow — is unchanged.
   void sign(const std::string &host_hint, const std::string &bucket,
             Http_request &req, time_t t) {
-    if (credential_provider_) {
+    if (credential_provider_ &&
+        credential_provider_->wire_mode() == auth::WireMode::BEARER) {
+      const std::string tok = credential_provider_->get_bearer();
+      req.add_header("Authorization", "Bearer " + tok);
+      // Bearer-authenticated GCS requests still need Host + Date
+      // computed by the signer for consistency with the S3 XML API
+      // expectations, but not the AWS4-HMAC-SHA256 signature.
+      // S3 signers already skip signature work when access_key is
+      // empty, so clear it before the call.
+      signer->update_keys("", "", "");
+    } else if (credential_provider_) {
       const auth::HmacCredentials c = credential_provider_->get_hmac();
       signer->update_keys(c.access_key, c.secret_key, c.session_token);
     }

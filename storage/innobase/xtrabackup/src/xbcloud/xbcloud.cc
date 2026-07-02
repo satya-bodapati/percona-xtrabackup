@@ -49,6 +49,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
 #include "xbcloud/auth/azure/shared_key_provider.h"
+#include "xbcloud/auth/gcp/adc_credential.h"
+#include "xbcloud/auth/gcp/adc_provider.h"
 #include "xbcloud/auth/gcp/interop_hmac_provider.h"
 #include "xbcloud/auth/swift/keystone_provider.h"
 #include "xbcloud/azure.h"
@@ -120,6 +122,7 @@ static char *opt_google_secret_key = nullptr;
 static char *opt_google_session_token = nullptr;
 static char *opt_google_storage_class = nullptr;
 static char *opt_google_bucket = nullptr;
+static char *opt_google_service_account_file = nullptr;
 
 static char *opt_azure_account = nullptr;
 static char *opt_azure_container = nullptr;
@@ -204,6 +207,7 @@ enum {
   OPT_GOOGLE_SECRET_KEY,
   OPT_GOOGLE_SESSION_TOKEN,
   OPT_GOOGLE_STORAGE_CLASS,
+  OPT_GOOGLE_SERVICE_ACCOUNT_FILE,
   OPT_GOOGLE_BUCKET,
 
   OPT_PARALLEL,
@@ -444,6 +448,13 @@ static struct my_option my_long_options[] = {
     {"google-bucket", OPT_GOOGLE_BUCKET, "Google cloud storage bucket.",
      &opt_google_bucket, &opt_google_bucket, 0, GET_STR_ALLOC, REQUIRED_ARG, 0,
      0, 0, 0, 0, 0},
+
+    {"google-service-account-file", OPT_GOOGLE_SERVICE_ACCOUNT_FILE,
+     "Path to a Google Cloud Application Default Credentials JSON file "
+     "(service_account or authorized_user).  Mutually exclusive with "
+     "--google-access-key/--google-secret-key.",
+     &opt_google_service_account_file, &opt_google_service_account_file, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 
     {"cacert", OPT_CACERT, "CA certificate file.", &opt_cacert, &opt_cacert, 0,
      GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
@@ -1574,15 +1585,43 @@ int main(int argc, char **argv) {
                                        : "https://storage.googleapis.com/",
         LOOKUP_DNS, S3_V4));
 
-    // GCS goes through the S3 XML API — same SigV4 signer, but with
-    // GCS-issued "interoperability" HMAC keys.  Use a dedicated
-    // provider so source_description() reports gcp:hmac-interop and
-    // future GCP-specific providers (OAuth2 ADC, GCE metadata) slot
-    // into the same auth/gcp/ namespace.
-    reinterpret_cast<S3_object_store *>(object_store.get())
-        ->set_credential_provider(
-            std::make_unique<auth::gcp::InteropHmacProvider>(
-                access_key, secret_key, session_token));
+    // Credential provider selection for GCS:
+    //   (1) --google-service-account-file → OAuth2 Bearer via AdcProvider.
+    //       Also picked up from GOOGLE_APPLICATION_CREDENTIALS env if
+    //       set.  Mutually exclusive with --google-access-key.
+    //   (2) --google-access-key/--google-secret-key → interop HMAC keys.
+    // The S3 XML API accepts both; sign() branches on wire_mode().
+    const char *sa_path = opt_google_service_account_file;
+    if (sa_path == nullptr) {
+      // GOOGLE_APPLICATION_CREDENTIALS is the standard ADC env var.
+      sa_path = getenv("GOOGLE_APPLICATION_CREDENTIALS");
+    }
+    if (sa_path != nullptr && *sa_path != '\0') {
+      if (opt_google_access_key != nullptr || opt_google_secret_key != nullptr) {
+        msg_ts("%s: --google-service-account-file is mutually exclusive with "
+               "--google-access-key/--google-secret-key.\n", my_progname);
+        return EXIT_FAILURE;
+      }
+      auth::gcp::AdcCredential adc;
+      std::string adc_err;
+      if (!auth::gcp::load_adc_from_file(sa_path, &adc, &adc_err)) {
+        msg_ts("%s: %s\n", my_progname, adc_err.c_str());
+        return EXIT_FAILURE;
+      }
+      msg_ts("%s: Using GCP OAuth2 ADC credentials from %s\n", my_progname,
+             sa_path);
+      reinterpret_cast<S3_object_store *>(object_store.get())
+          ->set_credential_provider(std::make_unique<auth::gcp::AdcProvider>(
+              std::move(adc),
+              "https://www.googleapis.com/auth/devstorage.read_write",
+              sa_path));
+    } else {
+      // Interop HMAC keys — the existing default path.
+      reinterpret_cast<S3_object_store *>(object_store.get())
+          ->set_credential_provider(
+              std::make_unique<auth::gcp::InteropHmacProvider>(
+                  access_key, secret_key, session_token));
+    }
 
     if (opt_google_bucket == nullptr) {
       msg_ts("%s: Google bucket is not specified.\n", my_progname);
