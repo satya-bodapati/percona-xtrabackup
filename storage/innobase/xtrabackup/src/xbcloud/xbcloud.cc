@@ -48,6 +48,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "nulls.h"
 #include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
+#include "xbcloud/auth/aws/profile_file.h"
 #include "xbcloud/auth/azure/shared_key_provider.h"
 #include "xbcloud/auth/gcp/adc_credential.h"
 #include "xbcloud/auth/gcp/adc_provider.h"
@@ -110,6 +111,7 @@ static char *opt_s3_endpoint = nullptr;
 static char *opt_s3_access_key = nullptr;
 static char *opt_s3_secret_key = nullptr;
 static char *opt_s3_session_token = nullptr;
+static char *opt_s3_profile = nullptr;
 static char *opt_s3_storage_class = nullptr;
 static char *opt_s3_bucket = nullptr;
 static ulong opt_s3_bucket_lookup;
@@ -189,6 +191,7 @@ enum {
   OPT_S3_ACCESS_KEY,
   OPT_S3_SECRET_KEY,
   OPT_S3_SESSION_TOKEN,
+  OPT_S3_PROFILE,
   OPT_S3_STORAGE_CLASS,
   OPT_S3_BUCKET,
   OPT_S3_BUCKET_LOOKUP,
@@ -369,6 +372,13 @@ static struct my_option my_long_options[] = {
     {"s3-session-token", OPT_S3_SESSION_TOKEN, "S3 session token.",
      &opt_s3_session_token, &opt_s3_session_token, 0, GET_STR_ALLOC,
      REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"s3-profile", OPT_S3_PROFILE,
+     "Name of profile in ~/.aws/credentials to read HMAC credentials from. "
+     "Also honours AWS_PROFILE env var.  Mutually exclusive with explicit "
+     "--s3-access-key/--s3-secret-key.",
+     &opt_s3_profile, &opt_s3_profile, 0, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0,
+     0, 0, 0},
 
     {"s3-storage-class", OPT_S3_STORAGE_CLASS,
      "S3 storage class. STANDARD|STANDARD_IA|GLACIER|...     "
@@ -1488,6 +1498,39 @@ int main(int argc, char **argv) {
   } else if (opt_storage == S3) {
     std::shared_ptr<S3_ec2_instance> ec2_instance =
         std::make_shared<S3_ec2_instance>(&http_client);
+    // Credential-source precedence for S3:
+    //   1. --s3-access-key/--s3-secret-key (explicit).
+    //   2. --s3-profile or AWS_PROFILE env → ~/.aws/credentials.
+    //   3. EC2 IAM instance profile via IMDS.
+    if (opt_s3_access_key == nullptr && opt_s3_secret_key == nullptr &&
+        opt_s3_session_token == nullptr) {
+      const char *profile_name = opt_s3_profile;
+      if (profile_name == nullptr) profile_name = getenv("AWS_PROFILE");
+      if (profile_name != nullptr) {
+        auth::HmacCredentials pf_creds;
+        std::string pf_err;
+        const std::string cred_path = auth::aws::default_credentials_path();
+        if (auth::aws::load_profile(cred_path, profile_name, &pf_creds,
+                                     &pf_err)) {
+          opt_s3_access_key = my_strdup(PSI_NOT_INSTRUMENTED,
+                                         pf_creds.access_key.c_str(),
+                                         MYF(MY_FAE));
+          opt_s3_secret_key = my_strdup(PSI_NOT_INSTRUMENTED,
+                                         pf_creds.secret_key.c_str(),
+                                         MYF(MY_FAE));
+          if (!pf_creds.session_token.empty()) {
+            opt_s3_session_token = my_strdup(
+                PSI_NOT_INSTRUMENTED, pf_creds.session_token.c_str(),
+                MYF(MY_FAE));
+          }
+          msg_ts("%s: Using AWS profile '%s' from %s\n", my_progname,
+                 profile_name, cred_path.c_str());
+        } else {
+          msg_ts("%s: %s\n", my_progname, pf_err.c_str());
+          return EXIT_FAILURE;
+        }
+      }
+    }
     if (opt_s3_access_key == nullptr && opt_s3_secret_key == nullptr &&
         opt_s3_session_token == nullptr) {
       if (ec2_instance->fetch_metadata() &&
