@@ -48,6 +48,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "nulls.h"
 #include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
+#include "xbcloud/auth/azure/shared_key_provider.h"
 #include "xbcloud/auth/gcp/interop_hmac_provider.h"
 #include "xbcloud/azure.h"
 #include "xbcloud/s3.h"
@@ -1632,6 +1633,15 @@ int main(int argc, char **argv) {
         &http_client, storage_account, access_key,
         opt_azure_development_storage, storage_class, opt_max_retries,
         opt_max_backoff, azure_endpoint));
+
+    // Stash a SharedKeyProvider so provenance logging + Phase-5
+    // Managed Identity wiring have a uniform seat.  Azure_client
+    // signs from its own strings today; the Bearer switch on
+    // wire_mode() is added by the Managed Identity commit.
+    reinterpret_cast<Azure_object_store *>(object_store.get())
+        ->set_credential_provider(
+            std::make_unique<auth::azure::SharedKeyProvider>(storage_account,
+                                                             access_key));
 
     reinterpret_cast<Azure_object_store *>(object_store.get())
         ->set_extra_http_headers(extra_http_headers);

@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 #include <iostream>
 #include "object_store.h"
+#include "xbcloud/auth/credential_provider.h"
 #include "xbcloud/http.h"
 #include "xbcloud/util.h"
 
@@ -185,8 +186,19 @@ class Azure_object_store : public Object_store {
  private:
   Azure_client azure_client;
   Http_request::headers_t extra_http_headers;
+  // Owned CredentialProvider.  Set by xbcloud.cc at construction time
+  // (SharedKeyProvider today; ManagedIdentityProvider will follow).
+  // Azure_client keeps signing directly against its own copy of the
+  // storage_account/access_key strings for now — Phase 5 wires the
+  // Bearer path through the provider once ManagedIdentityProvider
+  // lands, and Shared Key signing continues untouched.
+  std::unique_ptr<auth::CredentialProvider> credential_provider_;
 
  public:
+  void set_credential_provider(
+      std::unique_ptr<auth::CredentialProvider> provider) {
+    credential_provider_ = std::move(provider);
+  }
   Azure_object_store(const Http_client *client,
                      const std::string &storage_account,
                      const std::string &access_key, bool development_storage,
