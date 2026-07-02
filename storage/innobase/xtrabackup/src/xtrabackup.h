@@ -237,6 +237,7 @@ extern uint opt_read_buffer_size;
 extern char *opt_xtra_plugin_dir;
 extern char *server_plugin_dir;
 extern char *opt_transition_key;
+extern char *opt_openid_connect_id_token_file;
 extern char *opt_keyring_file_data;
 extern char *opt_component_keyring_config;
 extern bool opt_generate_transition_key;

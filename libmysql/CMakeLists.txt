@@ -304,6 +304,15 @@ ADD_SUBDIRECTORY(authentication_kerberos)
 # authentication IAM client plug-in
 ADD_SUBDIRECTORY(authentication_oci_client)
 
+# PXB: OpenID Connect client authentication plug-in (PS PR #5941).
+# PXB integrates this as a static builtin (convenience library merged into
+# libmysqlclient) rather than a loadable .so, so xtrabackup can use OIDC
+# without requiring a runtime plugin_dir pointing at PS's shared plugin.
+IF(WITH_XTRABACKUP)
+  ADD_SUBDIRECTORY(authentication_openid_connect_client)
+  LIST(APPEND LIBS_TO_MERGE auth_openid_connect_client)
+ENDIF()
+
 # Fido and Webauthn clients
 ADD_SUBDIRECTORY(fido_client)
 

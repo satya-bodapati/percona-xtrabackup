@@ -352,6 +352,7 @@ char *opt_transition_key = NULL;
 char *opt_xtra_plugin_dir = NULL;
 char *server_plugin_dir = NULL;
 char *opt_xtra_plugin_load = NULL;
+char *opt_openid_connect_id_token_file = nullptr;
 char *opt_keyring_file_data = nullptr;
 char *opt_component_keyring_config = nullptr;
 char *opt_component_keyring_file_config = nullptr;
@@ -794,6 +795,7 @@ enum options_xtrabackup {
   OPT_GENERATE_TRANSITION_KEY,
   OPT_XTRA_PLUGIN_DIR,
   OPT_XTRA_PLUGIN_LOAD,
+  OPT_AUTHENTICATION_OPENID_CONNECT_CLIENT_ID_TOKEN_FILE,
   OPT_GENERATE_NEW_MASTER_KEY,
   OPT_REGISTER_REDO_LOG_CONSUMER,
 
@@ -1404,6 +1406,13 @@ struct my_option xb_client_options[] = {
     {"plugin-load", OPT_XTRA_PLUGIN_LOAD, "List of plugins to load.",
      &opt_xtra_plugin_load, &opt_xtra_plugin_load, 0, GET_STR, REQUIRED_ARG, 0,
      0, 0, 0, 0, 0},
+
+    {"authentication-openid-connect-client-id-token-file",
+     OPT_AUTHENTICATION_OPENID_CONNECT_CLIENT_ID_TOKEN_FILE,
+     "Path to the OpenID Connect ID token file used to authenticate the "
+     "connection to the source MySQL server.",
+     &opt_openid_connect_id_token_file, &opt_openid_connect_id_token_file, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 
     {"generate-new-master-key", OPT_GENERATE_NEW_MASTER_KEY,
      "Generate new master key when doing copy-back.",

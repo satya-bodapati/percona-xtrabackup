@@ -44,6 +44,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <my_sys.h>
 #include <my_systime.h>
 #include <mysql.h>
+#include <mysql/client_plugin.h>
 #include <os0thread-create.h>
 #include <rapidjson/document.h>
 #include <rpl_log_encryption.h>
@@ -158,6 +159,7 @@ static xtrabackup::utils::time ftwrl_end_time = xtrabackup::utils::INVALID_TIME;
 MYSQL *xb_mysql_connect() {
   MYSQL *connection = mysql_init(NULL);
   char mysql_port_str[std::numeric_limits<int>::digits10 + 3];
+  const bool using_oidc = (opt_openid_connect_id_token_file != nullptr);
 
   sprintf(mysql_port_str, "%d", opt_port);
 
@@ -166,14 +168,58 @@ MYSQL *xb_mysql_connect() {
     return (NULL);
   }
 
+  if (using_oidc && opt_password != nullptr) {
+    xb::error() << "--password and "
+                   "--authentication-openid-connect-client-id-token-file are "
+                   "mutually exclusive; the OIDC ID token is the credential.";
+    mysql_close(connection);
+    return (NULL);
+  }
+
   xb::info() << "Connecting to MySQL server host: "
              << (opt_host ? opt_host : "localhost")
              << ", user: " << (opt_user ? opt_user : "not set")
-             << ", password: " << (opt_password ? "set" : "not set")
+             << ", password: "
+             << (using_oidc ? "not set (using OIDC id-token-file)"
+                            : (opt_password ? "set" : "not set"))
              << ", port: " << (opt_port != 0 ? mysql_port_str : "not set")
              << ", socket: " << (opt_socket ? opt_socket : "not set");
 
+  if (using_oidc) {
+    xb::info() << "Using OpenID Connect id-token-file '"
+               << opt_openid_connect_id_token_file
+               << "' for authentication to the server.";
+  }
+
   set_client_ssl_options(connection);
+
+  if (using_oidc) {
+    /*
+      The authentication_openid_connect_client plugin is baked into
+      libmysqlclient as a builtin (see
+      libmysql/authentication_openid_connect_client/), so
+      mysql_client_find_plugin() locates it without touching plugin_dir.
+      The plugin needs the ID-token path handed to it via the
+      option() callback before mysql_real_connect() drives the handshake.
+    */
+    auto *oidc_plugin = mysql_client_find_plugin(
+        connection, "authentication_openid_connect_client",
+        MYSQL_CLIENT_AUTHENTICATION_PLUGIN);
+    if (oidc_plugin == nullptr) {
+      xb::error() << "authentication_openid_connect_client plugin not found: "
+                  << mysql_error(connection);
+      mysql_close(connection);
+      return (NULL);
+    }
+    if (mysql_plugin_options(oidc_plugin, "id-token-file",
+                             opt_openid_connect_id_token_file)) {
+      xb::error() << "Failed to set id-token-file '"
+                  << opt_openid_connect_id_token_file
+                  << "' on authentication_openid_connect_client plugin.";
+      mysql_close(connection);
+      return (NULL);
+    }
+  }
 
   if (!mysql_real_connect(connection, opt_host ? opt_host : "localhost",
                           opt_user, opt_password, "" /*database*/, opt_port,
