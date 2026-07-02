@@ -48,6 +48,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "nulls.h"
 #include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
+#include "xbcloud/auth/gcp/interop_hmac_provider.h"
 #include "xbcloud/azure.h"
 #include "xbcloud/s3.h"
 #include "xbcloud/s3_ec2.h"
@@ -1567,17 +1568,15 @@ int main(int argc, char **argv) {
                                        : "https://storage.googleapis.com/",
         LOOKUP_DNS, S3_V4));
 
-    // GCS goes through the S3 XML API — same signer, same code path
-    // as AWS.  Distinguish source in the log line so operators can
-    // tell which credential set is in play.  A dedicated
-    // GcsInteropHmacProvider will land in a later commit; for now
-    // an HmacProvider with a gcs-labelled source is functionally
-    // equivalent.
+    // GCS goes through the S3 XML API — same SigV4 signer, but with
+    // GCS-issued "interoperability" HMAC keys.  Use a dedicated
+    // provider so source_description() reports gcp:hmac-interop and
+    // future GCP-specific providers (OAuth2 ADC, GCE metadata) slot
+    // into the same auth/gcp/ namespace.
     reinterpret_cast<S3_object_store *>(object_store.get())
         ->set_credential_provider(
-            std::make_unique<auth::aws::HmacProvider>(
-                access_key, secret_key, session_token,
-                "gcs:hmac-interop:cli-flags"));
+            std::make_unique<auth::gcp::InteropHmacProvider>(
+                access_key, secret_key, session_token));
 
     if (opt_google_bucket == nullptr) {
       msg_ts("%s: Google bucket is not specified.\n", my_progname);
