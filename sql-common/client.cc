@@ -4057,14 +4057,6 @@ static auth_plugin_t caching_sha2_password_client_plugin = {
 extern "C" auth_plugin_t win_auth_client_plugin;
 #endif
 
-#ifdef XTRABACKUP /* PXB: OIDC client plugin integration (PS PR #5941).
-                     Compiled into libmysqlclient as a convenience library
-                     (see libmysql/authentication_openid_connect_client/) so
-                     xtrabackup can authenticate via OIDC without needing a
-                     runtime plugin_dir pointing at a shared object. */
-extern auth_plugin_t openid_connect_client_plugin;
-#endif /* XTRABACKUP */
-
 /*
   Test trace plugin can be used only in debug builds. In non-debug ones
   it is ignored, even if it was enabled by build options (TEST_TRACE_PLUGIN
@@ -4084,9 +4076,6 @@ struct st_mysql_client_plugin *mysql_client_builtins[] = {
     (struct st_mysql_client_plugin *)&clear_password_client_plugin,
     (struct st_mysql_client_plugin *)&sha256_password_client_plugin,
     (struct st_mysql_client_plugin *)&caching_sha2_password_client_plugin,
-#ifdef XTRABACKUP /* PXB: OIDC client plugin integration (PS PR #5941) */
-    (struct st_mysql_client_plugin *)&openid_connect_client_plugin,
-#endif /* XTRABACKUP */
 #ifdef AUTHENTICATION_WIN
     (struct st_mysql_client_plugin *)&win_auth_client_plugin,
 #endif

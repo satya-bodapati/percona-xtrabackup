@@ -96,6 +96,7 @@ oidc_backup_prepare_restore_verify \
 ########################################################################
 vlog "Case 2: rejecting --password alongside OIDC id-token option"
 run_cmd_expect_failure xtrabackup \
+    --xtrabackup-plugin-dir="${XB_CLIENT_PLUGIN_DIR}" \
     --user="${MYSQL_OIDC_USER}" \
     --password=whatever \
     --authentication-openid-connect-client-id-token-file="${TOKEN_FILE}" \
@@ -109,6 +110,7 @@ run_cmd_expect_failure xtrabackup \
 ########################################################################
 vlog "Case 3: missing ID-token file must fail"
 run_cmd_expect_failure xtrabackup \
+    --xtrabackup-plugin-dir="${XB_CLIENT_PLUGIN_DIR}" \
     --user="${MYSQL_OIDC_USER}" \
     --authentication-openid-connect-client-id-token-file="${topdir}/nonexistent_token.txt" \
     --backup \

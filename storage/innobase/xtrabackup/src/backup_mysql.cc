@@ -195,12 +195,37 @@ MYSQL *xb_mysql_connect() {
 
   if (using_oidc) {
     /*
-      The authentication_openid_connect_client plugin is baked into
-      libmysqlclient as a builtin (see
-      libmysql/authentication_openid_connect_client/), so
-      mysql_client_find_plugin() locates it without touching plugin_dir.
-      The plugin needs the ID-token path handed to it via the
-      option() callback before mysql_real_connect() drives the handshake.
+      Point libmysqlclient at xtrabackup's plugin_dir so it can dlopen
+      authentication_openid_connect_client.so (installed there by
+      libmysql/authentication_openid_connect_client/CMakeLists.txt).
+      opt_plugin_dir is the server-side global that xb_set_plugin_dir()
+      already filled with either the user's --xtrabackup-plugin-dir
+      value or the compile-time PLUGINDIR default, so it's always safe
+      to hand to libmysqlclient here.
+
+      We log both the plugin_dir and the expected .so name so the
+      operator can tell which copy of the plugin was loaded — useful
+      when both PXB and a co-installed server ship their own client
+      plugin dirs.
+    */
+    const char *const oidc_plugin_dir =
+        (opt_plugin_dir != nullptr && *opt_plugin_dir != '\0')
+            ? opt_plugin_dir
+            : "(compile-time default)";
+    xb::info() << "OIDC client plugin dir (--xtrabackup-plugin-dir): '"
+               << oidc_plugin_dir << "'";
+    xb::info() << "Loading OIDC client plugin from '" << oidc_plugin_dir
+               << "/authentication_openid_connect_client.so'";
+
+    if (opt_plugin_dir != nullptr && *opt_plugin_dir != '\0') {
+      mysql_options(connection, MYSQL_PLUGIN_DIR, opt_plugin_dir);
+    }
+
+    /*
+      Resolve the OIDC client plugin (dlopen'd from MYSQL_PLUGIN_DIR
+      the first time we ask for it) and hand it the id-token path via
+      the option() callback before mysql_real_connect() drives the
+      handshake.
     */
     auto *oidc_plugin = mysql_client_find_plugin(
         connection, "authentication_openid_connect_client",

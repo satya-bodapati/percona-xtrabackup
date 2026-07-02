@@ -98,6 +98,7 @@ oidc_backup_prepare_restore_verify \
 ########################################################################
 vlog "Negative: missing id-token-file must fail"
 run_cmd_expect_failure ${XB_BIN} ${XB_ARGS} \
+    --xtrabackup-plugin-dir="${XB_CLIENT_PLUGIN_DIR}" \
     --user="${MYSQL_OIDC_USER}" \
     --authentication-openid-connect-client-id-token-file="${TEST_VAR_ROOT}/nonexistent_token.txt" \
     --backup \

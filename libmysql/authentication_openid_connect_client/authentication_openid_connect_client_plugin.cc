@@ -25,13 +25,12 @@
   SYNCED-FROM: percona-server PR #5941
     (PS-11019 [8.4]: Client side OIDC authentication plugin)
 
-  Differences from upstream:
-    - Upstream declares the plugin via mysql_declare_client_plugin(AUTHENTICATION)
-      which mints the generic symbol name _mysql_client_plugin_declaration_ suitable
-      for a MODULE_ONLY .so.  In PXB we compile this file into libmysqlclient as a
-      convenience library and register it as a builtin in
-      sql-common/client.cc:mysql_client_builtins[], so the struct is defined as a
-      plain named auth_plugin_t (openid_connect_client_plugin).
+  Built as a CLIENT_ONLY MODULE_ONLY plugin (loadable .so) — same shape
+  as authentication_ldap_sasl_client / authentication_oci_client / etc.
+  PXB ships the .so in ${INSTALL_PLUGINDIR} and xtrabackup points
+  libmysqlclient at that dir via mysql_options(MYSQL_PLUGIN_DIR, …) in
+  xb_mysql_connect() so the plugin is dlopen'd transparently at
+  connection time.
 */
 
 /*
@@ -258,24 +257,11 @@ static int authentication_openid_connect_client_option(const char *option,
   return 1;
 }
 
-/*
-  PXB: this plugin is compiled into libmysqlclient as a convenience library
-  and registered as a builtin in sql-common/client.cc:mysql_client_builtins[]
-  (not loaded from a shared object).  See the SYNCED-FROM note at the top of
-  this file for the divergence from the upstream declaration.
-*/
-auth_plugin_t openid_connect_client_plugin = {
-    MYSQL_CLIENT_AUTHENTICATION_PLUGIN,
-    MYSQL_CLIENT_AUTHENTICATION_PLUGIN_INTERFACE_VERSION,
-    "authentication_openid_connect_client",
+mysql_declare_client_plugin(
+    AUTHENTICATION) "authentication_openid_connect_client",
     MYSQL_CLIENT_PLUGIN_AUTHOR_ORACLE,
-    "OpenID Connect Client Authentication Plugin",
-    {0, 1, 0},
-    "COMMUNITY",
-    nullptr,
-    initialize_plugin,
-    deinitialize_plugin,
+    "OpenID Connect Client Authentication Plugin", {0, 1, 0}, "COMMUNITY",
+    nullptr, initialize_plugin, deinitialize_plugin,
     authentication_openid_connect_client_option,
-    nullptr,
-    openid_connect_authentication_client_plugin,
-    nullptr};
+    nullptr, openid_connect_authentication_client_plugin,
+    nullptr mysql_end_client_plugin;

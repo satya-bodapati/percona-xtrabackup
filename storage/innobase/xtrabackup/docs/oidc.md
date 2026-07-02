@@ -11,39 +11,66 @@ two sections before making changes; skim the rest as reference.
 
 - xtrabackup can now authenticate to a source server as an OIDC-identified
   user by presenting a signed ID-token (JWT) — no password.
-- The client plugin (`authentication_openid_connect_client`) is compiled
-  **statically into `libmysqlclient`** as a convenience library — no `.so`
-  shipped, no `--plugin-dir` needed at runtime.
+- The client plugin (`authentication_openid_connect_client`) is shipped
+  as a loadable `.so` alongside xtrabackup, in `${INSTALL_PLUGINDIR}`.
+- xtrabackup calls `mysql_options(MYSQL_PLUGIN_DIR, opt_plugin_dir)` in
+  `xb_mysql_connect()` before contacting the plugin, so libmysqlclient
+  dlopens it transparently — no operator action needed when PXB is
+  installed normally. Override via `--xtrabackup-plugin-dir`.
 - New CLI option:
   `--authentication-openid-connect-client-id-token-file=PATH`.
 - Mutually exclusive with `--password`.
+- xtrabackup logs the plugin dir and the resolved `.so` path so
+  ambiguity between multiple installed OIDC client plugins is visible.
 - Server side is Percona Server ≥ 8.4.10 with the `auth_openid_connect`
   server plugin installed (from PS PR #5941).
 
-## Why the client plugin is static-linked
+## How xtrabackup finds the client plugin
 
-Every other external client auth plugin (LDAP, Kerberos, OCI, FIDO/WebAuthn)
-in the MySQL tree is built as a loadable `.so` and installed under the
-compile-time `PLUGINDIR`. libmysqlclient's `mysql_load_plugin_v()` finds
-them by:
+Every external client auth plugin in the MySQL tree (LDAP, Kerberos,
+OCI, FIDO/WebAuthn, and now OIDC in PXB) is built as a loadable `.so`
+and installed under the compile-time `PLUGINDIR`. libmysqlclient's
+`mysql_load_plugin_v()` resolves the dir it dlopens from as:
 
 1. `mysql_options(mysql, MYSQL_PLUGIN_DIR, ...)` if set, else
 2. `LIBMYSQL_PLUGIN_DIR` env var, else
-3. Compile-time `PLUGINDIR` (from CMake: `${DEFAULT_MYSQL_HOME}/${INSTALL_PLUGINDIR}`).
+3. Compile-time `PLUGINDIR` (`${DEFAULT_MYSQL_HOME}/${INSTALL_PLUGINDIR}`).
 
-PXB doesn't ship auth `.so` files. It relies on `libmysqlclient` finding
-plugins at wherever Percona Server installed them — but PS's `plugin_dir`
-at runtime often doesn't match the compile-time `PLUGINDIR` baked into
-PXB, and PXB doesn't call `mysql_options(MYSQL_PLUGIN_DIR, ...)` anywhere.
-The result today is: auth plugins that libmysqlclient links **statically**
-(`caching_sha2_password`, `mysql_native_password`, `sha256_password`,
-`clear_password`) work; auth plugins that would need a `.so` don't.
+Historically PXB has done none of the above — it never called
+`mysql_options(MYSQL_PLUGIN_DIR, ...)` — so plugins that libmysqlclient
+links **statically** (`caching_sha2_password`, `mysql_native_password`,
+`sha256_password`, `clear_password`) work but any `.so`-based plugin
+would silently fall back to whatever the compile-time `PLUGINDIR`
+happened to be.
 
-For OIDC we chose to **make it a builtin** — following the same pattern
-as `caching_sha2_password_client_plugin` — so xtrabackup gets it
-transparently with zero plugin_dir configuration. The alternative (ship
-a `.so` and point `MYSQL_PLUGIN_DIR` at PXB's own plugin dir) is planned
-as a follow-up on the `pxb-oidc-shared` branch; see [Future work](#future-work).
+For OIDC we ship the client plugin as a `.so` under `${INSTALL_PLUGINDIR}`
+(same location as PS's client-side auth plugins) and explicitly point
+libmysqlclient at it. Inside `xb_mysql_connect()`:
+
+```c
+if (opt_plugin_dir != nullptr && *opt_plugin_dir != '\0') {
+  mysql_options(connection, MYSQL_PLUGIN_DIR, opt_plugin_dir);
+}
+```
+
+`opt_plugin_dir` is the server-side global filled by `xb_set_plugin_dir()`
+from `--xtrabackup-plugin-dir` (user override) or the compile-time
+`PLUGINDIR` default. So xtrabackup uses one plugin-dir setting for both
+its keyring plugins and its OIDC client plugin. If the operator wants
+to test against a specific `.so` (e.g. a PS-shipped copy), passing
+`--xtrabackup-plugin-dir=…` moves both.
+
+Two info lines are logged before the connect call so the operator sees
+exactly which `.so` will be dlopen'd:
+
+```
+[Note] OIDC client plugin dir (--xtrabackup-plugin-dir): '/usr/lib/mysql/plugin'
+[Note] Loading OIDC client plugin from '/usr/lib/mysql/plugin/authentication_openid_connect_client.so'
+```
+
+This is important because a co-installed Percona Server also ships an
+`authentication_openid_connect_client.so` in its own plugin dir — the
+log line disambiguates which one xtrabackup is loading.
 
 ## Files changed / added
 
@@ -57,35 +84,27 @@ libmysql/authentication_openid_connect_client/
 └── authentication_openid_connect_client_plugin.cc  (new, ~250 lines)
 ```
 
-The `.cc` is a verbatim port from PS's PR with **one** change: the tail
+The `.cc` is a verbatim port from PS's PR — same
 `mysql_declare_client_plugin(AUTHENTICATION) … mysql_end_client_plugin;`
-block (which mints the generic `_mysql_client_plugin_declaration_` symbol
-suitable for a MODULE_ONLY `.so`) is replaced with a named
-`auth_plugin_t openid_connect_client_plugin = { … };` struct. This gives
-the symbol a stable unique name so it can safely coexist inside the
-merged `libmysqlclient.a`.
+tail, same everything.
 
-The `CMakeLists.txt` uses `ADD_CONVENIENCE_LIBRARY(auth_openid_connect_client
-authentication_openid_connect_client_plugin.cc LINK_LIBRARIES mysys)` —
-mirrors `libmysql/authentication_win/CMakeLists.txt`. Unlike the OCI /
-LDAP / FIDO client plugins (which use `MYSQL_ADD_PLUGIN(... MODULE_ONLY)`
-to produce a `.so`), the convenience library gets archived into
-`libmysqlclient.a`.
+The `CMakeLists.txt` uses `MYSQL_ADD_PLUGIN(authentication_openid_connect_client
+authentication_openid_connect_client_plugin.cc CLIENT_ONLY MODULE_ONLY
+MODULE_OUTPUT_NAME "authentication_openid_connect_client")` — mirrors
+`libmysql/authentication_oci_client/CMakeLists.txt`. Produces a
+`.so` installed to `${INSTALL_PLUGINDIR}` under the `Client` component,
+the same location where LDAP / OCI / FIDO / Kerberos client plugins live.
 
 ### 2. Wired into libmysqlclient
 
 - `libmysql/CMakeLists.txt` — under `IF(WITH_XTRABACKUP)`,
-  `ADD_SUBDIRECTORY(authentication_openid_connect_client)` and
-  `LIST(APPEND LIBS_TO_MERGE auth_openid_connect_client)`. The existing
-  `MERGE_CONVENIENCE_LIBRARIES(mysqlclient …)` line archives the plugin
-  into `libmysqlclient.a`.
-- `sql-common/client.cc` — three `#ifdef XTRABACKUP` blocks: the extern
-  declaration of `openid_connect_client_plugin`, an entry in the
-  `mysql_client_builtins[]` array (so `mysql_client_plugin_init()`
-  pre-registers it and `find_plugin(name)` never touches `dlopen`), and
+  `ADD_SUBDIRECTORY(authentication_openid_connect_client)`. Nothing
+  else — the plugin is a standalone `.so`, not merged into
+  `libmysqlclient.a`.
+- `sql-common/client.cc` — single `#ifdef XTRABACKUP` block:
   `info->is_tls_established = true;` inside `mpvio_info()`'s
-  `VIO_TYPE_SSL` branch (so the client plugin can confirm TLS is up
-  before releasing the token).
+  `VIO_TYPE_SSL` branch (so the OIDC client plugin can confirm TLS is
+  up before releasing the token).
 - `include/mysql/plugin_auth_common.h` — `#ifdef XTRABACKUP` blocks
   adding `#include <stdbool.h>` and the `bool is_tls_established;`
   field to `MYSQL_PLUGIN_VIO_INFO`. The `.h.pp` ABI-check files are
@@ -107,14 +126,20 @@ to produce a `.so`), the convenience library gets archived into
   1. Reject `--password` + OIDC option together — mutually exclusive.
   2. Rewrite the "Connecting to MySQL server host: …" log line to say
      `password: not set (using OIDC id-token-file)` when OIDC is used.
-  3. Emit a `Using OpenID Connect id-token-file '…' for authentication
-     to the server.` info line.
-  4. Call `mysql_client_find_plugin(conn,
+  3. Emit `Using OpenID Connect id-token-file '…' for authentication
+     to the server.` (which token file).
+  4. Emit `OIDC client plugin dir (--xtrabackup-plugin-dir): '…'`
+     (which dir libmysqlclient will search).
+  5. Emit `Loading OIDC client plugin from '…/authentication_openid_connect_client.so'`
+     (which `.so` will be dlopen'd — disambiguates from a co-installed
+     PS-shipped copy).
+  6. Call `mysql_options(connection, MYSQL_PLUGIN_DIR, opt_plugin_dir)`
+     so libmysqlclient looks in xtrabackup's plugin dir.
+  7. Call `mysql_client_find_plugin(conn,
      "authentication_openid_connect_client",
-     MYSQL_CLIENT_AUTHENTICATION_PLUGIN)` to resolve the pre-registered
-     builtin, then hand it the token path via
-     `mysql_plugin_options(p, "id-token-file", …)`. Bail on either
-     error.
+     MYSQL_CLIENT_AUTHENTICATION_PLUGIN)` — this triggers the dlopen —
+     then hand the plugin the token path via `mysql_plugin_options(p,
+     "id-token-file", …)`. Bail on either error.
 
   The plugin's own `option()` callback opens the token file at this
   point and rejects invalid paths, so a bad path fails **before** any
@@ -394,39 +419,6 @@ PXB 8.4 is based on MySQL 8.4.0; PS PR #5941 was cut against MySQL
   which PXB doesn't build.
 
 ## Future work
-
-### Ship as `.so` in xtrabackup's plugin dir
-
-Rationale: making the client plugin a dynamically-loaded `.so` (like
-LDAP / Kerberos / OCI / FIDO) is more consistent with the rest of the
-MySQL ecosystem, easier to substitute for security fixes without
-relinking xtrabackup, and gives us a natural place to ship third-party
-auth plugins in the same directory.
-
-Concrete plan (targeted for the `pxb-oidc-shared` branch):
-
-1. In `libmysql/authentication_openid_connect_client/CMakeLists.txt`,
-   replace `ADD_CONVENIENCE_LIBRARY(...)` with
-   `MYSQL_ADD_PLUGIN(authentication_openid_connect_client
-   authentication_openid_connect_client_plugin.cc CLIENT_ONLY MODULE_ONLY
-   MODULE_OUTPUT_NAME "authentication_openid_connect_client")`. Add
-   `INSTALL(TARGETS ... DESTINATION ${INSTALL_PLUGINDIR})` (or a dedicated
-   xtrabackup subdir like `${INSTALL_PLUGINDIR}/xtrabackup/`).
-2. In `libmysql/CMakeLists.txt`, drop the `LIST(APPEND LIBS_TO_MERGE
-   auth_openid_connect_client)` line — no more static merge.
-3. In `sql-common/client.cc`, remove the extern declaration and the
-   `mysql_client_builtins[]` entry we added.
-4. In `storage/innobase/xtrabackup/src/backup_mysql.cc:xb_mysql_connect()`,
-   add `mysql_options(connection, MYSQL_PLUGIN_DIR, opt_xtra_plugin_dir);`
-   before the `mysql_client_find_plugin` call — points libmysqlclient at
-   PXB's plugin dir so it can `dlopen` the OIDC `.so` from there.
-5. Package build (`packaging/rpm/*.spec`, `packaging/deb/*.install`):
-   include the new `.so` in the `percona-xtrabackup-84` package.
-
-The tests in this doc need no changes for that refactor — they don't
-care whether the plugin is builtin or `.so`-loaded, as long as
-`find_plugin` returns it. The MD file, however, should be updated when
-this ships.
 
 ### Better test coverage
 

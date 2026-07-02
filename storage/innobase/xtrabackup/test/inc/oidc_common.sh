@@ -28,6 +28,18 @@ function oidc_require_server_plugin()
     AUTH_OIDC_PLUGIN_DIR=$(dirname "${AUTH_OIDC_SERVER_SO}")
     AUTH_OIDC_SO_NAME=$(basename "${AUTH_OIDC_SERVER_SO}")
     export AUTH_OIDC_PLUGIN_DIR AUTH_OIDC_SO_NAME
+
+    # Locate PXB's own plugin_output_directory — that's where
+    # authentication_openid_connect_client.so was built.  xtrabackup
+    # only knows about the compile-time PLUGINDIR (the install target
+    # path), so when running out of the build tree we have to point
+    # --xtrabackup-plugin-dir at the build's plugin_output_directory.
+    XB_CLIENT_PLUGIN_DIR="$(dirname "${XB_BIN}")/../plugin_output_directory"
+    if [ ! -f "${XB_CLIENT_PLUGIN_DIR}/authentication_openid_connect_client.so" ]; then
+        skip_test "authentication_openid_connect_client.so not found under" \
+                  "${XB_CLIENT_PLUGIN_DIR} — rebuild pxb-oidc-shared (make -j16)"
+    fi
+    export XB_CLIENT_PLUGIN_DIR
 }
 
 ##########################################################################
@@ -183,6 +195,7 @@ function oidc_backup_prepare_restore_verify()
 
     vlog "xtrabackup --backup as ${mysql_user} using OIDC id-token"
     xtrabackup \
+        --xtrabackup-plugin-dir="${XB_CLIENT_PLUGIN_DIR}" \
         --user="${mysql_user}" \
         --authentication-openid-connect-client-id-token-file="${token_file}" \
         --backup \

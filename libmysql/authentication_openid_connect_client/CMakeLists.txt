@@ -23,17 +23,23 @@
 
 #
 # Configuration for building the OpenID Connect client-side authentication
-# plugin as a convenience library merged into libmysqlclient (so that
-# xtrabackup links it statically without needing a plugin_dir).
+# plugin as a loadable .so (CLIENT_ONLY, MODULE_ONLY).  Ships in
+# ${INSTALL_PLUGINDIR} alongside the other CLIENT_ONLY auth plugins so
+# libmysqlclient's mysql_load_plugin_v() can dlopen it at connection
+# time.  xtrabackup arranges for it to be found via
+# mysql_options(MYSQL_PLUGIN_DIR, opt_xtra_plugin_dir) inside
+# xb_mysql_connect().
 #
-# Upstream PS builds this as a MODULE_ONLY .so under
-# libmysql/authentication_openid_connect_client/CMakeLists.txt.  In PXB we
-# want the plugin to be part of libmysqlclient itself; the ADD_CONVENIENCE_LIBRARY
-# pattern below mirrors libmysql/authentication_win/CMakeLists.txt, and the
-# resulting object is merged into libmysqlclient via LIBS_TO_MERGE in the
-# parent libmysql/CMakeLists.txt.
+# Mirrors libmysql/authentication_oci_client/CMakeLists.txt in shape.
 #
 
-ADD_CONVENIENCE_LIBRARY(auth_openid_connect_client
+MYSQL_ADD_PLUGIN(
+  authentication_openid_connect_client
+
   authentication_openid_connect_client_plugin.cc
-  LINK_LIBRARIES mysys)
+
+  LINK_LIBRARIES mysys
+
+  CLIENT_ONLY
+  MODULE_ONLY MODULE_OUTPUT_NAME "authentication_openid_connect_client"
+)
