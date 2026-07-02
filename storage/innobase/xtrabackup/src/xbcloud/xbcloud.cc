@@ -50,6 +50,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/aws/hmac_provider.h"
 #include "xbcloud/auth/azure/shared_key_provider.h"
 #include "xbcloud/auth/gcp/interop_hmac_provider.h"
+#include "xbcloud/auth/swift/keystone_provider.h"
 #include "xbcloud/azure.h"
 #include "xbcloud/s3.h"
 #include "xbcloud/s3_ec2.h"
@@ -1466,6 +1467,10 @@ int main(int argc, char **argv) {
     object_store = std::unique_ptr<Object_store>(
         new Swift_object_store(&http_client, auth_info.url, auth_info.token,
                                opt_max_retries, opt_max_backoff));
+
+    reinterpret_cast<Swift_object_store *>(object_store.get())
+        ->set_credential_provider(
+            std::make_unique<auth::swift::KeystoneProvider>(auth_info.token));
 
     container_name = opt_swift_container;
 

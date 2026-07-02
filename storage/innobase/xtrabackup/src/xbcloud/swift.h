@@ -21,7 +21,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #ifndef XBCLOUD_SWIFT_H
 #define XBCLOUD_SWIFT_H
 
+#include <memory>
+
 #include "object_store.h"
+#include "xbcloud/auth/credential_provider.h"
 #include "xbcloud/http.h"
 #include "xbcloud/util.h"
 
@@ -207,8 +210,18 @@ class Swift_client {
 class Swift_object_store : public Object_store {
  private:
   Swift_client swift_client;
+  // Stashed CredentialProvider — Swift signs X-Auth-Token directly
+  // from Swift_client's member today; this seat is here so a future
+  // KeystoneProvider gets a natural home in the same shape S3 and
+  // Azure use.  See auth/swift/keystone_provider.h.
+  std::unique_ptr<auth::CredentialProvider> credential_provider_;
 
  public:
+  void set_credential_provider(
+      std::unique_ptr<auth::CredentialProvider> provider) {
+    credential_provider_ = std::move(provider);
+  }
+
   Swift_object_store(const Http_client *http_client, const std::string &url,
                      const std::string &token, const ulong max_retries,
                      const ulong max_backoff)
