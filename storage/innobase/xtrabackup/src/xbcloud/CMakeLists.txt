@@ -56,7 +56,8 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   auth/token_cache.cc
   auth/retry_backoff.cc
   auth/aws/hmac_provider.cc
-  auth/aws/ec2_instance_profile.cc)
+  auth/aws/ec2_instance_profile.cc
+  auth/oauth2_client.cc)
 
 SET_TARGET_PROPERTIES(xbcloud
         PROPERTIES LINKER_LANGUAGE CXX
@@ -69,6 +70,7 @@ TARGET_LINK_LIBRARIES(xbcloud
   ext::curl
   mysys
   crc
+  OpenSSL::Crypto
   )
 
 IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
