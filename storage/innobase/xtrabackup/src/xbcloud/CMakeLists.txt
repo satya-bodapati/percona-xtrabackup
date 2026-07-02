@@ -88,7 +88,8 @@ IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
       auth/token_cache.cc
       auth/token_cache-t.cc
       auth/retry_backoff.cc
-      auth/retry_backoff-t.cc)
+      auth/retry_backoff-t.cc
+      auth/adc_lookup-t.cc)
 
     TARGET_LINK_LIBRARIES(xbcloud-t
       ${GCRYPT_LIBS}
