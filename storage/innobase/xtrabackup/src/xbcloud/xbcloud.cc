@@ -46,6 +46,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "library_version_check.h"
 #include "msg.h"
 #include "nulls.h"
+#include "xbcloud/auth/aws/hmac_provider.h"
 #include "xbcloud/azure.h"
 #include "xbcloud/s3.h"
 #include "xbcloud/s3_ec2.h"
@@ -1510,6 +1511,21 @@ int main(int argc, char **argv) {
         static_cast<s3_bucket_lookup_t>(opt_s3_bucket_lookup),
         static_cast<s3_api_version_t>(opt_s3_api_version)));
 
+    // PXB-XXXX credential-provider migration.  Wire an HmacProvider
+    // holding the long-lived (or, in the ec2_instance case, already-
+    // fetched) HMAC credentials.  Behaviour-neutral: sign() will
+    // pull the same three strings from the provider every request.
+    // Later commits swap in an Ec2InstanceProfileProvider that
+    // refreshes from IMDS internally instead of relying on the
+    // response-handler branch in S3_client::retry_error().
+    reinterpret_cast<S3_object_store *>(object_store.get())
+        ->set_credential_provider(
+            std::make_unique<auth::aws::HmacProvider>(
+                access_key, secret_key, session_token,
+                ec2_instance->get_is_ec2_instance_with_profile()
+                    ? std::string("aws:ec2-instance-profile:legacy")
+                    : std::string("aws:hmac:cli-flags")));
+
     if (opt_s3_bucket == nullptr) {
       msg_ts("%s: S3 bucket is not specified.\n", my_progname);
       return EXIT_FAILURE;
@@ -1546,6 +1562,18 @@ int main(int argc, char **argv) {
         opt_google_endpoint != nullptr ? opt_google_endpoint
                                        : "https://storage.googleapis.com/",
         LOOKUP_DNS, S3_V4));
+
+    // GCS goes through the S3 XML API — same signer, same code path
+    // as AWS.  Distinguish source in the log line so operators can
+    // tell which credential set is in play.  A dedicated
+    // GcsInteropHmacProvider will land in a later commit; for now
+    // an HmacProvider with a gcs-labelled source is functionally
+    // equivalent.
+    reinterpret_cast<S3_object_store *>(object_store.get())
+        ->set_credential_provider(
+            std::make_unique<auth::aws::HmacProvider>(
+                access_key, secret_key, session_token,
+                "gcs:hmac-interop:cli-flags"));
 
     if (opt_google_bucket == nullptr) {
       msg_ts("%s: Google bucket is not specified.\n", my_progname);

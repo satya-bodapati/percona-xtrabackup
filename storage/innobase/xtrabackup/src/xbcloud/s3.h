@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define XBCLOUD_S3_H
 
 #include "object_store.h"
+#include "xbcloud/auth/credential_provider.h"
 #include "xbcloud/http.h"
 #include "xbcloud/s3_ec2.h"
 #include "xbcloud/util.h"
@@ -142,6 +143,14 @@ class S3_client {
  private:
   const Http_client *http_client;
   std::shared_ptr<S3_ec2_instance> ec2_instance;
+  // Owned CredentialProvider.  When set, sign() pulls fresh HMAC
+  // credentials from it before every signer->sign_request() call, so
+  // temporary-credential providers (EC2 instance profile, STS,
+  // Roles Anywhere) transparently refresh under any request.  When
+  // null, the signer's stashed keys are used unchanged — this stays
+  // for backwards compatibility until every S3 construction site
+  // supplies a provider (Phase 2 migration).
+  std::unique_ptr<auth::CredentialProvider> credential_provider_;
   s3_api_version_t api_version{S3_V_AUTO};
 
   std::string region;
@@ -219,7 +228,25 @@ class S3_client {
   void set_ec2_instance(std::shared_ptr<S3_ec2_instance> instance) {
     ec2_instance = instance;
   }
+  void set_credential_provider(
+      std::unique_ptr<auth::CredentialProvider> provider) {
+    credential_provider_ = std::move(provider);
+  }
   void set_session_token(const std::string &st) { session_token = st; }
+
+  // Refresh the signer's key material from the CredentialProvider (if
+  // one was set) and delegate to signer->sign_request().  For
+  // long-lived HMAC keys this is a no-op update (constants); for
+  // temporary-credential providers it forces refresh-if-needed via
+  // get_hmac() before every request.
+  void sign(const std::string &host_hint, const std::string &bucket,
+            Http_request &req, time_t t) {
+    if (credential_provider_) {
+      const auth::HmacCredentials c = credential_provider_->get_hmac();
+      signer->update_keys(c.access_key, c.secret_key, c.session_token);
+    }
+    signer->sign_request(host_hint, bucket, req, t);
+  }
 
   void set_storage_class(const std::string &sc) { storage_class = sc; }
 
@@ -302,6 +329,10 @@ class S3_object_store : public Object_store {
   }
   void set_ec2_instance(std::shared_ptr<S3_ec2_instance> instance) {
     s3_client.set_ec2_instance(instance);
+  }
+  void set_credential_provider(
+      std::unique_ptr<auth::CredentialProvider> provider) {
+    s3_client.set_credential_provider(std::move(provider));
   }
   bool probe_api_version_and_lookup(const std::string &bucket) {
     return s3_client.probe_api_version_and_lookup(bucket);

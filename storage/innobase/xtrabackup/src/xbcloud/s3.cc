@@ -296,7 +296,7 @@ bool S3_client::delete_object(const std::string &bucket,
                               const std::string &name) {
   Http_request req(Http_request::DELETE, protocol, hostname(bucket),
                    bucketname(bucket) + "/" + name);
-  signer->sign_request(hostname(bucket), bucket, req, time(0));
+  sign(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -334,7 +334,7 @@ bool S3_client::async_delete_object(const std::string &bucket,
            bucket.c_str(), name.c_str());
     return false;
   }
-  signer->sign_request(hostname(bucket), bucket, *req, time(0));
+  sign(hostname(bucket), bucket, *req, time(0));
 
   Http_response *resp = new Http_response();
   if (resp == nullptr) {
@@ -375,7 +375,7 @@ Http_buffer S3_client::download_object(const std::string &bucket,
                                        const std::string &name, bool &success) {
   Http_request req(Http_request::GET, protocol, hostname(bucket),
                    bucketname(bucket) + "/" + name);
-  signer->sign_request(hostname(bucket), bucket, req, time(0));
+  sign(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -404,7 +404,7 @@ bool S3_client::create_bucket(const std::string &name) {
     req.append_payload(region);
     req.append_payload("</LocationConstraint></CreateBucketConfiguration>");
   }
-  signer->sign_request(hostname(name), name, req, time(0));
+  sign(hostname(name), name, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -478,7 +478,7 @@ bool S3_client::probe_api_version_and_lookup(const std::string &bucket) {
 bool S3_client::bucket_exists(const std::string &name, bool &exists) {
   Http_request req(Http_request::HEAD, protocol, hostname(name),
                    bucketname(name) + "/");
-  signer->sign_request(hostname(name), name, req, time(0));
+  sign(hostname(name), name, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -505,7 +505,7 @@ bool S3_client::upload_object(const std::string &bucket,
                    bucketname(bucket) + "/" + name);
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload(contents);
-  signer->sign_request(hostname(bucket), bucket, req, time(0));
+  sign(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
 
@@ -563,7 +563,7 @@ bool S3_client::async_upload_object(
     req->add_header(h.first, h.second);
   }
   req->append_payload(contents);
-  signer->sign_request(hostname(bucket), bucket, *req, time(0));
+  sign(hostname(bucket), bucket, *req, time(0));
 
   Http_response *resp = new Http_response();
   if (resp == nullptr) {
@@ -606,7 +606,7 @@ bool S3_client::async_download_object(
   for (const auto &h : extra_http_headers) {
     req->add_header(h.first, h.second);
   }
-  signer->sign_request(hostname(bucket), bucket, *req, time(0));
+  sign(hostname(bucket), bucket, *req, time(0));
 
   Http_response *resp = new Http_response();
   if (resp == nullptr) {
@@ -643,7 +643,7 @@ bool S3_client::list_objects_with_prefix(const std::string &bucket,
     if (!continuation_token.empty()) {
       req.add_param("continuation-token", continuation_token);
     }
-    signer->sign_request(hostname(bucket), bucket, req, time(0));
+    sign(hostname(bucket), bucket, req, time(0));
 
     Http_response resp;
     if (!http_client->make_request(req, resp)) {
