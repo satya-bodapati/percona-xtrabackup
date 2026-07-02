@@ -1,0 +1,49 @@
+services:
+  # S3 emulator (covers --storage=s3)
+  localstack:
+    image: localstack/localstack:3.7
+    container_name: pxb-cloud-emu-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+      - DEBUG=0
+
+  # GCS emulator.  fake-gcs-server accepts arbitrary bearer tokens,
+  # which makes it fine for exercising the OAuth2 wire path even
+  # though it doesn't cryptographically validate the token.
+  fake-gcs-server:
+    image: fsouza/fake-gcs-server:1.49
+    container_name: pxb-cloud-emu-fake-gcs
+    ports:
+      - "4443:4443"
+    command:
+      - "-scheme"
+      - "http"
+      - "-port"
+      - "4443"
+      - "-host"
+      - "0.0.0.0"
+      - "-public-host"
+      - "localhost:4443"
+
+  # Azure block blob emulator
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.31.0
+    container_name: pxb-cloud-emu-azurite
+    ports:
+      - "10000:10000"
+    command:
+      - "azurite-blob"
+      - "--blobHost"
+      - "0.0.0.0"
+      - "--blobPort"
+      - "10000"
+
+  # OpenStack Swift all-in-one (TempAuth)
+  swift:
+    image: openstackswift/saio:latest
+    container_name: pxb-cloud-emu-swift
+    ports:
+      - "8080:8080"
