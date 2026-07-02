@@ -12,6 +12,8 @@ the Free Software Foundation; version 2 of the License.
 
 #include <utility>
 
+#include "../retry_backoff.h"
+
 namespace xbcloud {
 namespace auth {
 namespace aws {
@@ -30,15 +32,19 @@ Ec2InstanceProfileProvider::Ec2InstanceProfileProvider(
 
 HmacCredentials Ec2InstanceProfileProvider::get_hmac() {
   std::lock_guard<std::mutex> lk(mu_);
-  if (!have_creds_) {
-    // fetch_metadata returns false if we're not on an EC2 instance
-    // or IMDS is unreachable.  In either case we hand back empty
-    // credentials — sign_request will produce a request that the
-    // server rejects, which is the correct behaviour (the operator
-    // then sees an authentication failure and knows to fix their
-    // setup).  We intentionally don't die here so a transient IMDS
-    // outage can be retried by the caller via invalidate() + retry.
-    if (instance_ && instance_->fetch_metadata()) {
+  if (!have_creds_ && instance_) {
+    // IMDS calls are local-subnet (~1-5ms) but can fail transiently
+    // during metadata-service restarts or docker/systemd-networkd
+    // rewires.  Wrap fetch_metadata in the shared retry+backoff so
+    // a brief outage doesn't propagate as an authentication failure.
+    RetryPolicy policy;  // defaults: 5 attempts, 32s cap
+    (void)retry_with_backoff(
+        policy, [&](int /*attempt*/, std::string *err) {
+          if (instance_->fetch_metadata()) return RetryDecision::Success;
+          *err = "IMDS fetch failed";
+          return RetryDecision::RetryableFailure;
+        });
+    if (instance_->get_is_ec2_instance_with_profile()) {
       have_creds_ = true;
     }
   }
