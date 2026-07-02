@@ -52,7 +52,8 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   ../xbcrypt_common.cc
   ../file_utils.cc
   swift.cc
-  library_version_check.cc)
+  library_version_check.cc
+  auth/token_cache.cc)
 
 SET_TARGET_PROPERTIES(xbcloud
         PROPERTIES LINKER_LANGUAGE CXX
@@ -82,7 +83,9 @@ IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
       http.cc
       s3.cc
       azure.cc
-      swift.cc)
+      swift.cc
+      auth/token_cache.cc
+      auth/token_cache-t.cc)
 
     TARGET_LINK_LIBRARIES(xbcloud-t
       ${GCRYPT_LIBS}
