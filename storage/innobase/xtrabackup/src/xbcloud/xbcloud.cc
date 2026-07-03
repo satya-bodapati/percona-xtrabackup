@@ -49,9 +49,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
 #include "xbcloud/auth/aws/profile_file.h"
+#include "xbcloud/auth/aws/roles_anywhere.h"
+#include "xbcloud/auth/aws/sts_assume_role.h"
+#include "xbcloud/auth/azure/managed_identity_provider.h"
 #include "xbcloud/auth/azure/shared_key_provider.h"
 #include "xbcloud/auth/gcp/adc_credential.h"
 #include "xbcloud/auth/gcp/adc_provider.h"
+#include "xbcloud/auth/gcp/gce_metadata_provider.h"
 #include "xbcloud/auth/gcp/interop_hmac_provider.h"
 #include "xbcloud/auth/swift/keystone_provider.h"
 #include "xbcloud/azure.h"
@@ -112,6 +116,16 @@ static char *opt_s3_access_key = nullptr;
 static char *opt_s3_secret_key = nullptr;
 static char *opt_s3_session_token = nullptr;
 static char *opt_s3_profile = nullptr;
+static char *opt_s3_role_arn = nullptr;
+static char *opt_s3_role_session_name = nullptr;
+static char *opt_s3_external_id = nullptr;
+static char *opt_s3_rolesanywhere_cert = nullptr;
+static char *opt_s3_rolesanywhere_private_key = nullptr;
+static char *opt_s3_rolesanywhere_trust_anchor_arn = nullptr;
+static char *opt_s3_rolesanywhere_profile_arn = nullptr;
+static char *opt_s3_rolesanywhere_role_arn = nullptr;
+static bool opt_azure_managed_identity = false;
+static char *opt_azure_managed_identity_client_id = nullptr;
 static char *opt_s3_storage_class = nullptr;
 static char *opt_s3_bucket = nullptr;
 static ulong opt_s3_bucket_lookup;
@@ -192,6 +206,16 @@ enum {
   OPT_S3_SECRET_KEY,
   OPT_S3_SESSION_TOKEN,
   OPT_S3_PROFILE,
+  OPT_S3_ROLE_ARN,
+  OPT_S3_ROLE_SESSION_NAME,
+  OPT_S3_EXTERNAL_ID,
+  OPT_S3_ROLESANYWHERE_CERT,
+  OPT_S3_ROLESANYWHERE_PRIVATE_KEY,
+  OPT_S3_ROLESANYWHERE_TRUST_ANCHOR_ARN,
+  OPT_S3_ROLESANYWHERE_PROFILE_ARN,
+  OPT_S3_ROLESANYWHERE_ROLE_ARN,
+  OPT_AZURE_MANAGED_IDENTITY,
+  OPT_AZURE_MANAGED_IDENTITY_CLIENT_ID,
   OPT_S3_STORAGE_CLASS,
   OPT_S3_BUCKET,
   OPT_S3_BUCKET_LOOKUP,
@@ -380,6 +404,48 @@ static struct my_option my_long_options[] = {
      &opt_s3_profile, &opt_s3_profile, 0, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0,
      0, 0, 0},
 
+    {"s3-role-arn", OPT_S3_ROLE_ARN,
+     "IAM role ARN to assume via STS AssumeRole.  Chains under whatever "
+     "parent credentials --s3-access-key / --s3-profile / IMDS provide.",
+     &opt_s3_role_arn, &opt_s3_role_arn, 0, GET_STR_ALLOC, REQUIRED_ARG, 0, 0,
+     0, 0, 0, 0},
+
+    {"s3-role-session-name", OPT_S3_ROLE_SESSION_NAME,
+     "Session name for --s3-role-arn (default: xbcloud-backup).",
+     &opt_s3_role_session_name, &opt_s3_role_session_name, 0, GET_STR_ALLOC,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"s3-external-id", OPT_S3_EXTERNAL_ID,
+     "Optional AWS STS ExternalId for --s3-role-arn.",
+     &opt_s3_external_id, &opt_s3_external_id, 0, GET_STR_ALLOC, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
+
+    {"s3-rolesanywhere-cert", OPT_S3_ROLESANYWHERE_CERT,
+     "Path to X.509 certificate PEM for AWS Roles Anywhere.",
+     &opt_s3_rolesanywhere_cert, &opt_s3_rolesanywhere_cert, 0, GET_STR_ALLOC,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"s3-rolesanywhere-private-key", OPT_S3_ROLESANYWHERE_PRIVATE_KEY,
+     "Path to RSA private key PEM matching --s3-rolesanywhere-cert.",
+     &opt_s3_rolesanywhere_private_key, &opt_s3_rolesanywhere_private_key, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"s3-rolesanywhere-trust-anchor-arn", OPT_S3_ROLESANYWHERE_TRUST_ANCHOR_ARN,
+     "Trust anchor ARN for AWS Roles Anywhere.",
+     &opt_s3_rolesanywhere_trust_anchor_arn,
+     &opt_s3_rolesanywhere_trust_anchor_arn, 0, GET_STR_ALLOC, REQUIRED_ARG, 0,
+     0, 0, 0, 0, 0},
+
+    {"s3-rolesanywhere-profile-arn", OPT_S3_ROLESANYWHERE_PROFILE_ARN,
+     "Profile ARN for AWS Roles Anywhere.",
+     &opt_s3_rolesanywhere_profile_arn, &opt_s3_rolesanywhere_profile_arn, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"s3-rolesanywhere-role-arn", OPT_S3_ROLESANYWHERE_ROLE_ARN,
+     "Role ARN for AWS Roles Anywhere.",
+     &opt_s3_rolesanywhere_role_arn, &opt_s3_rolesanywhere_role_arn, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
     {"s3-storage-class", OPT_S3_STORAGE_CLASS,
      "S3 storage class. STANDARD|STANDARD_IA|GLACIER|...     "
      "... is meant for passing "
@@ -406,6 +472,19 @@ static struct my_option my_long_options[] = {
     {"azure-container-name", OPT_AZURE_CONTAINER, "AZURE container name. ",
      &opt_azure_container, &opt_azure_container, 0, GET_STR_ALLOC, REQUIRED_ARG,
      0, 0, 0, 0, 0, 0},
+
+    {"azure-managed-identity", OPT_AZURE_MANAGED_IDENTITY,
+     "Authenticate to Azure Blob using Managed Identity via IMDS instead of "
+     "a Shared Key.  Mutually exclusive with --azure-access-key.",
+     &opt_azure_managed_identity, &opt_azure_managed_identity, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"azure-managed-identity-client-id", OPT_AZURE_MANAGED_IDENTITY_CLIENT_ID,
+     "Client ID for a user-assigned Azure Managed Identity.  When unset the "
+     "system-assigned identity is used.",
+     &opt_azure_managed_identity_client_id,
+     &opt_azure_managed_identity_client_id, 0, GET_STR_ALLOC, REQUIRED_ARG, 0,
+     0, 0, 0, 0, 0},
 
     {"azure-access-key", OPT_AZURE_ACCESS_KEY, "AZURE access key.",
      &opt_azure_access_key, &opt_azure_access_key, 0, GET_STR_ALLOC,
@@ -1573,23 +1652,68 @@ int main(int argc, char **argv) {
         static_cast<s3_bucket_lookup_t>(opt_s3_bucket_lookup),
         static_cast<s3_api_version_t>(opt_s3_api_version)));
 
-    // Credential provider selection: on an EC2 instance with an
-    // attached IAM role, use Ec2InstanceProfileProvider so refresh
-    // (on ExpiredToken responses via retry_error → invalidate) is
-    // handled uniformly by the provider abstraction.  Otherwise
-    // fall back to long-lived HMAC.
-    if (ec2_instance->get_is_ec2_instance_with_profile()) {
-      reinterpret_cast<S3_object_store *>(object_store.get())
-          ->set_credential_provider(
-              std::make_unique<auth::aws::Ec2InstanceProfileProvider>(
-                  ec2_instance));
+    // Credential provider selection.  Precedence (each mode wraps
+    // the previous where it makes sense):
+    //   4. --s3-rolesanywhere-* → X.509-signed mint against
+    //      rolesanywhere.amazonaws.com.  Independent of parent
+    //      creds (X.509 IS the credential).
+    //   3. --s3-role-arn → STS AssumeRole under whatever mode
+    //      supplies HMAC keys (2, 1, or IMDS).
+    //   2. EC2 instance profile → Ec2InstanceProfileProvider.
+    //   1. Long-lived HMAC keys → HmacProvider.
+    std::unique_ptr<auth::CredentialProvider> provider;
+    if (opt_s3_rolesanywhere_cert != nullptr &&
+        opt_s3_rolesanywhere_private_key != nullptr) {
+      if (opt_s3_rolesanywhere_trust_anchor_arn == nullptr ||
+          opt_s3_rolesanywhere_profile_arn == nullptr ||
+          opt_s3_rolesanywhere_role_arn == nullptr) {
+        msg_ts("%s: --s3-rolesanywhere-cert requires --s3-rolesanywhere-"
+               "trust-anchor-arn, --s3-rolesanywhere-profile-arn, and "
+               "--s3-rolesanywhere-role-arn\n", my_progname);
+        return EXIT_FAILURE;
+      }
+      auth::aws::RolesAnywhereConfig cfg;
+      cfg.cert_pem_path = opt_s3_rolesanywhere_cert;
+      cfg.private_key_pem_path = opt_s3_rolesanywhere_private_key;
+      cfg.trust_anchor_arn = opt_s3_rolesanywhere_trust_anchor_arn;
+      cfg.profile_arn = opt_s3_rolesanywhere_profile_arn;
+      cfg.role_arn = opt_s3_rolesanywhere_role_arn;
+      cfg.region = region;
+      msg_ts("%s: Using AWS Roles Anywhere (cert=%s, role=%s)\n",
+             my_progname, opt_s3_rolesanywhere_cert,
+             opt_s3_rolesanywhere_role_arn);
+      provider = std::make_unique<auth::aws::RolesAnywhereProvider>(
+          std::move(cfg));
     } else {
-      reinterpret_cast<S3_object_store *>(object_store.get())
-          ->set_credential_provider(
-              std::make_unique<auth::aws::HmacProvider>(
-                  access_key, secret_key, session_token,
-                  "aws:hmac:cli-flags"));
+      // Build the base HMAC-producing provider (long-lived or EC2 IMDS).
+      std::unique_ptr<auth::CredentialProvider> base;
+      if (ec2_instance->get_is_ec2_instance_with_profile()) {
+        base = std::make_unique<auth::aws::Ec2InstanceProfileProvider>(
+            ec2_instance);
+      } else {
+        base = std::make_unique<auth::aws::HmacProvider>(
+            access_key, secret_key, session_token, "aws:hmac:cli-flags");
+      }
+      if (opt_s3_role_arn != nullptr) {
+        auth::aws::StsAssumeRoleConfig sts;
+        sts.parent = std::move(base);
+        sts.region = region;
+        sts.role_arn = opt_s3_role_arn;
+        sts.role_session_name = opt_s3_role_session_name
+                                     ? opt_s3_role_session_name
+                                     : "xbcloud-backup";
+        if (opt_s3_external_id != nullptr)
+          sts.external_id = opt_s3_external_id;
+        msg_ts("%s: Assuming role %s via AWS STS\n", my_progname,
+               opt_s3_role_arn);
+        provider = std::make_unique<auth::aws::StsAssumeRoleProvider>(
+            std::move(sts));
+      } else {
+        provider = std::move(base);
+      }
     }
+    reinterpret_cast<S3_object_store *>(object_store.get())
+        ->set_credential_provider(std::move(provider));
 
     if (opt_s3_bucket == nullptr) {
       msg_ts("%s: S3 bucket is not specified.\n", my_progname);
@@ -1628,17 +1752,18 @@ int main(int argc, char **argv) {
                                        : "https://storage.googleapis.com/",
         LOOKUP_DNS, S3_V4));
 
-    // Credential provider selection for GCS:
-    //   (1) --google-service-account-file → OAuth2 Bearer via AdcProvider.
-    //       Also picked up from GOOGLE_APPLICATION_CREDENTIALS env if
-    //       set.  Mutually exclusive with --google-access-key.
-    //   (2) --google-access-key/--google-secret-key → interop HMAC keys.
-    // The S3 XML API accepts both; sign() branches on wire_mode().
+    // Credential provider selection for GCS, in precedence order:
+    //   1. --google-service-account-file (or GOOGLE_APPLICATION_CREDENTIALS)
+    //      → OAuth2 Bearer via AdcProvider.
+    //   2. GCE metadata IMDS (auto-detected if no keys/ADC given
+    //      and metadata endpoint is reachable) → GceMetadataProvider.
+    //   3. --google-access-key/--google-secret-key → interop HMAC.
+    // S3 XML API accepts all three; sign() branches on wire_mode().
     const char *sa_path = opt_google_service_account_file;
     if (sa_path == nullptr) {
-      // GOOGLE_APPLICATION_CREDENTIALS is the standard ADC env var.
       sa_path = getenv("GOOGLE_APPLICATION_CREDENTIALS");
     }
+    std::unique_ptr<auth::CredentialProvider> gcs_provider;
     if (sa_path != nullptr && *sa_path != '\0') {
       if (opt_google_access_key != nullptr || opt_google_secret_key != nullptr) {
         msg_ts("%s: --google-service-account-file is mutually exclusive with "
@@ -1653,18 +1778,22 @@ int main(int argc, char **argv) {
       }
       msg_ts("%s: Using GCP OAuth2 ADC credentials from %s\n", my_progname,
              sa_path);
-      reinterpret_cast<S3_object_store *>(object_store.get())
-          ->set_credential_provider(std::make_unique<auth::gcp::AdcProvider>(
-              std::move(adc),
-              "https://www.googleapis.com/auth/devstorage.read_write",
-              sa_path));
+      gcs_provider = std::make_unique<auth::gcp::AdcProvider>(
+          std::move(adc), "https://www.googleapis.com/auth/devstorage.read_write",
+          sa_path);
+    } else if (opt_google_access_key == nullptr &&
+               opt_google_secret_key == nullptr &&
+               auth::gcp::GceMetadataProvider::probe_reachable()) {
+      // IMDS-first: no explicit creds + GCE metadata service is up.
+      msg_ts("%s: Using GCE metadata service (auto-detected)\n", my_progname);
+      gcs_provider = std::make_unique<auth::gcp::GceMetadataProvider>();
     } else {
-      // Interop HMAC keys — the existing default path.
-      reinterpret_cast<S3_object_store *>(object_store.get())
-          ->set_credential_provider(
-              std::make_unique<auth::gcp::InteropHmacProvider>(
-                  access_key, secret_key, session_token));
+      // Interop HMAC keys — the existing default when explicit keys given.
+      gcs_provider = std::make_unique<auth::gcp::InteropHmacProvider>(
+          access_key, secret_key, session_token);
     }
+    reinterpret_cast<S3_object_store *>(object_store.get())
+        ->set_credential_provider(std::move(gcs_provider));
 
     if (opt_google_bucket == nullptr) {
       msg_ts("%s: Google bucket is not specified.\n", my_progname);
@@ -1721,14 +1850,32 @@ int main(int argc, char **argv) {
         opt_azure_development_storage, storage_class, opt_max_retries,
         opt_max_backoff, azure_endpoint));
 
-    // Stash a SharedKeyProvider so provenance logging + Phase-5
-    // Managed Identity wiring have a uniform seat.  Azure_client
-    // signs from its own strings today; the Bearer switch on
-    // wire_mode() is added by the Managed Identity commit.
-    reinterpret_cast<Azure_object_store *>(object_store.get())
-        ->set_credential_provider(
-            std::make_unique<auth::azure::SharedKeyProvider>(storage_account,
-                                                             access_key));
+    // Credential provider selection for Azure:
+    //   * --azure-managed-identity → ManagedIdentityProvider (Bearer
+    //     via IMDS at 169.254.169.254).
+    //   * default → SharedKeyProvider around --azure-access-key.
+    // sign() branches on wire_mode() to attach either Shared Key
+    // (default) or Bearer.
+    if (opt_azure_managed_identity) {
+      if (opt_azure_access_key != nullptr) {
+        msg_ts("%s: --azure-managed-identity is mutually exclusive with "
+               "--azure-access-key.\n", my_progname);
+        return EXIT_FAILURE;
+      }
+      msg_ts("%s: Using Azure Managed Identity via IMDS\n", my_progname);
+      reinterpret_cast<Azure_object_store *>(object_store.get())
+          ->set_credential_provider(
+              std::make_unique<auth::azure::ManagedIdentityProvider>(
+                  "https://storage.azure.com/",
+                  opt_azure_managed_identity_client_id
+                      ? opt_azure_managed_identity_client_id
+                      : ""));
+    } else {
+      reinterpret_cast<Azure_object_store *>(object_store.get())
+          ->set_credential_provider(
+              std::make_unique<auth::azure::SharedKeyProvider>(storage_account,
+                                                               access_key));
+    }
 
     reinterpret_cast<Azure_object_store *>(object_store.get())
         ->set_extra_http_headers(extra_http_headers);
