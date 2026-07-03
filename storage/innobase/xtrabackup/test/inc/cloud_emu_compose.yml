@@ -1,10 +1,12 @@
 services:
-  # S3 emulator (covers --storage=s3)
+  # S3 emulator (covers --storage=s3).  Port shifted out of the
+  # default 4566 to reduce conflict with a co-installed LocalStack
+  # on a shared dev host; override via env if needed.
   localstack:
     image: localstack/localstack:3.7
     container_name: pxb-cloud-emu-localstack
     ports:
-      - "4566:4566"
+      - "${CLOUD_EMU_S3_HOST_PORT:-24566}:4566"
     environment:
       - SERVICES=s3
       - DEFAULT_REGION=us-east-1
@@ -17,7 +19,7 @@ services:
     image: fsouza/fake-gcs-server:1.49
     container_name: pxb-cloud-emu-fake-gcs
     ports:
-      - "4443:4443"
+      - "${CLOUD_EMU_GCS_HOST_PORT:-14443}:4443"
     command:
       - "-scheme"
       - "http"
@@ -26,14 +28,14 @@ services:
       - "-host"
       - "0.0.0.0"
       - "-public-host"
-      - "localhost:4443"
+      - "localhost:${CLOUD_EMU_GCS_HOST_PORT:-14443}"
 
   # Azure block blob emulator
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:3.31.0
     container_name: pxb-cloud-emu-azurite
     ports:
-      - "10000:10000"
+      - "${CLOUD_EMU_AZURE_HOST_PORT:-20000}:10000"
     command:
       - "azurite-blob"
       - "--blobHost"
@@ -46,4 +48,4 @@ services:
     image: openstackswift/saio:latest
     container_name: pxb-cloud-emu-swift
     ports:
-      - "8080:8080"
+      - "${CLOUD_EMU_SWIFT_HOST_PORT:-28080}:8080"

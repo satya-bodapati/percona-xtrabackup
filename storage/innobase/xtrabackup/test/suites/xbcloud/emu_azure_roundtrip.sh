@@ -17,7 +17,11 @@ trap cloud_emu_stop EXIT
 cloud_emu_wait_for azure
 
 container="pxb-azure-$(date +%s)-$$"
-cloud_emu_make_bucket azure "$container"
+# xbcloud auto-creates the container on `put` if it doesn't exist
+# (xbcloud.cc:1048 create_container branch), so we don't need to
+# pre-create via a signed Azure REST call from the shell — Azurite
+# accepts the container-create request from xbcloud with the
+# devstoreaccount1 Shared Key.
 
 start_server --innodb_file_per_table
 load_dbase_schema sakila

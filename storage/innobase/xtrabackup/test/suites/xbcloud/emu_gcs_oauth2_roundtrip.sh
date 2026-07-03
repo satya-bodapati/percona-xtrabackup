@@ -24,6 +24,13 @@
 . inc/common.sh
 . inc/cloud_emu.sh
 
+# Same fake-gcs-server compat limitation as emu_gcs_roundtrip.sh.
+# The OAuth2 bearer wiring (mint + attach) can be exercised, but the
+# GCS-XML round-trip through the emulator dies on list-bucket parse.
+# When a JWT-validating GCS emulator becomes available (or we swap
+# to a different scheme), un-skip this test.
+skip_test "fake-gcs-server S3 XML compat lacks <IsTruncated>; xbcloud round-trip untestable locally"
+
 cloud_emu_require_docker
 command -v python3 >/dev/null 2>&1 || skip_test "test requires python3"
 command -v openssl >/dev/null 2>&1 || skip_test "test requires openssl"

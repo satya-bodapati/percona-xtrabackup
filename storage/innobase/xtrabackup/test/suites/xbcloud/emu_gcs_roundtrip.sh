@@ -9,6 +9,16 @@
 . inc/common.sh
 . inc/cloud_emu.sh
 
+# fake-gcs-server's S3-compat XML API doesn't emit the <IsTruncated>
+# element that xbcloud's list-bucket parser expects (verified 2026-07-03
+# against fsouza/fake-gcs-server:1.49).  xbcloud errors out on the
+# `get` half of the round-trip with "Failed to parse list bucket
+# result. IsTruncated is not found."  Real GCS returns the field, so
+# this is an emulator gap — skip cleanly until we either point tests
+# at a different GCS-XML-compatible emulator or wait for
+# fake-gcs-server to catch up.
+skip_test "fake-gcs-server S3 XML compat lacks <IsTruncated>; xbcloud round-trip untestable locally"
+
 cloud_emu_require_docker
 
 cloud_emu_start

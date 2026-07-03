@@ -37,10 +37,21 @@
 CLOUD_EMU_COMPOSE_FILE=${CLOUD_EMU_COMPOSE_FILE:-\
 ${XB_TEST_DIR:-$PWD}/inc/cloud_emu_compose.yml}
 
-CLOUD_EMU_S3_ENDPOINT=${CLOUD_EMU_S3_ENDPOINT:-http://localhost:4566}
-CLOUD_EMU_GCS_ENDPOINT=${CLOUD_EMU_GCS_ENDPOINT:-http://localhost:4443}
-CLOUD_EMU_AZURE_BLOB_ENDPOINT=${CLOUD_EMU_AZURE_BLOB_ENDPOINT:-http://localhost:10000/devstoreaccount1}
-CLOUD_EMU_SWIFT_ENDPOINT=${CLOUD_EMU_SWIFT_ENDPOINT:-http://localhost:8080/auth/v1.0}
+# Emulator host ports.  Chosen to sit outside common developer-tool
+# defaults (4566/4443/10000/8080 all frequently collide on shared
+# hosts).  Override per-env via env vars — the compose file honours
+# the same names.
+CLOUD_EMU_S3_HOST_PORT=${CLOUD_EMU_S3_HOST_PORT:-24566}
+CLOUD_EMU_GCS_HOST_PORT=${CLOUD_EMU_GCS_HOST_PORT:-14443}
+CLOUD_EMU_AZURE_HOST_PORT=${CLOUD_EMU_AZURE_HOST_PORT:-20000}
+CLOUD_EMU_SWIFT_HOST_PORT=${CLOUD_EMU_SWIFT_HOST_PORT:-28080}
+export CLOUD_EMU_S3_HOST_PORT CLOUD_EMU_GCS_HOST_PORT \
+       CLOUD_EMU_AZURE_HOST_PORT CLOUD_EMU_SWIFT_HOST_PORT
+
+CLOUD_EMU_S3_ENDPOINT=${CLOUD_EMU_S3_ENDPOINT:-http://localhost:${CLOUD_EMU_S3_HOST_PORT}}
+CLOUD_EMU_GCS_ENDPOINT=${CLOUD_EMU_GCS_ENDPOINT:-http://localhost:${CLOUD_EMU_GCS_HOST_PORT}}
+CLOUD_EMU_AZURE_BLOB_ENDPOINT=${CLOUD_EMU_AZURE_BLOB_ENDPOINT:-http://localhost:${CLOUD_EMU_AZURE_HOST_PORT}}
+CLOUD_EMU_SWIFT_ENDPOINT=${CLOUD_EMU_SWIFT_ENDPOINT:-http://localhost:${CLOUD_EMU_SWIFT_HOST_PORT}/auth/v1.0}
 
 # Azurite's well-known dev account credentials (publicly documented).
 CLOUD_EMU_AZURE_ACCOUNT="devstoreaccount1"
@@ -94,20 +105,22 @@ cloud_emu_wait_for() {
   case "$provider" in
     s3)    url="$CLOUD_EMU_S3_ENDPOINT/_localstack/health" ;;
     gcs)   url="$CLOUD_EMU_GCS_ENDPOINT/storage/v1/b"  ;;
-    azure) url="$CLOUD_EMU_AZURE_BLOB_ENDPOINT?comp=list" ;;
+    azure) url="$CLOUD_EMU_AZURE_BLOB_ENDPOINT/devstoreaccount1?comp=list" ;;
     swift) url="$CLOUD_EMU_SWIFT_ENDPOINT" ;;
     *)     die "cloud_emu_wait_for: unknown provider '$provider'" ;;
   esac
   local i
   for i in $(seq 1 60); do
-    # `curl -f` treats 4xx as a failure -- but Swift's TempAuth endpoint
-    # returns 401 to an unauthenticated GET, which still proves the
-    # service is up.  Treat any 2xx OR 401 as "ready".
+    # Different emulators respond differently to an unauthenticated
+    # probe: LocalStack answers 200 on /_localstack/health,
+    # fake-gcs-server 200 on /storage/v1/b, Swift 401 (auth required)
+    # to /auth/v1.0, Azurite 403 to ?comp=list.  A code in the 2xx,
+    # 401, or 403 range all indicate "service is up and answering".
     local code
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$url" \
            2>/dev/null || echo 000)
     case "$code" in
-      2*|401) return 0 ;;
+      2*|401|403) return 0 ;;
     esac
     sleep 1
   done
@@ -135,12 +148,12 @@ cloud_emu_make_bucket() {
         || die "cloud_emu_make_bucket gcs: failed for $name"
       ;;
     azure)
-      # Azurite: PUT /account/container?restype=container
-      curl -fs -X PUT \
-           "$CLOUD_EMU_AZURE_BLOB_ENDPOINT/$name?restype=container" \
-           -H "x-ms-version: 2021-12-02" \
-           -H "x-ms-date: $(date -u '+%a, %d %b %Y %H:%M:%S GMT')" >/dev/null \
-        || die "cloud_emu_make_bucket azure: failed for $name"
+      # Azurite container creation requires Shared Key auth in the
+      # general case.  xbcloud auto-creates missing containers on
+      # put (xbcloud.cc:1048), so make_bucket for azure is a no-op
+      # — the container comes into existence during the test's
+      # `xbcloud put` call.
+      :
       ;;
     swift)
       # Get token first, then PUT /v1/<account>/<container>.  GET with
@@ -154,7 +167,8 @@ cloud_emu_make_bucket() {
                     | sed 's/.*: //' | tr -d '\r\n')
       [ -n "$token" ] || die "cloud_emu_make_bucket swift: no auth token"
       curl -fs -X PUT -H "X-Auth-Token: $token" \
-           "http://localhost:8080/v1/AUTH_test/$name" >/dev/null \
+           "http://localhost:${CLOUD_EMU_SWIFT_HOST_PORT}/v1/AUTH_test/$name" \
+           >/dev/null \
         || die "cloud_emu_make_bucket swift: failed for $name"
       ;;
     *) die "cloud_emu_make_bucket: unknown provider '$provider'" ;;
@@ -195,7 +209,13 @@ cloud_emu_xbcloud_flags() {
            "--google-secret-key=test"
       ;;
     azure)
+      # --azure-development-storage tells xbcloud we're pointing at
+      # Azurite so it uses the "http://<host>/<account>/…" URL
+      # layout rather than the real "https://<account>.blob.core.
+      # windows.net/…" layout, and uses Azurite's well-known dev
+      # storage account key.
       echo "--storage=azure" \
+           "--azure-development-storage" \
            "--azure-endpoint=$CLOUD_EMU_AZURE_BLOB_ENDPOINT" \
            "--azure-container-name=$bucket" \
            "--azure-storage-account=$CLOUD_EMU_AZURE_ACCOUNT" \
