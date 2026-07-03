@@ -102,7 +102,14 @@ IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
       auth/token_cache-t.cc
       auth/retry_backoff.cc
       auth/retry_backoff-t.cc
-      auth/adc_lookup-t.cc)
+      auth/adc_lookup-t.cc
+      auth/aws/hmac_provider.cc
+      auth/aws/ec2_instance_profile.cc
+      auth/aws/profile_file.cc
+      auth/aws/credential_process.cc
+      auth/aws/sts_assume_role.cc
+      auth/aws/profile_resolver.cc
+      auth/aws/profile_resolver-t.cc)
 
     TARGET_LINK_LIBRARIES(xbcloud-t
       ${GCRYPT_LIBS}
