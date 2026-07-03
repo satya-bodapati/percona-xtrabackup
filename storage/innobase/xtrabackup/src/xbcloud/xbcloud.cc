@@ -52,6 +52,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/aws/profile_resolver.h"
 #include "xbcloud/auth/aws/roles_anywhere.h"
 #include "xbcloud/auth/aws/sts_assume_role.h"
+#include "xbcloud/auth/azure/connection_string.h"
 #include "xbcloud/auth/azure/managed_identity_provider.h"
 #include "xbcloud/auth/azure/shared_key_provider.h"
 #include "xbcloud/auth/gcp/adc_credential.h"
@@ -711,6 +712,10 @@ static void get_env_args() {
   get_env_value(opt_azure_account, "AZURE_STORAGE_ACCOUNT");
   get_env_value(opt_azure_container, "AZURE_CONTAINER_NAME");
   get_env_value(opt_azure_access_key, "AZURE_ACCESS_KEY");
+  // AZURE_STORAGE_KEY is the canonical Azure SDK env var name; keep
+  // AZURE_ACCESS_KEY as a legacy alias so existing xbcloud users
+  // aren't broken.
+  get_env_value(opt_azure_access_key, "AZURE_STORAGE_KEY");
   get_env_value(opt_azure_storage_class, "AZURE_STORAGE_CLASS");
   get_env_value(opt_azure_endpoint, "AZURE_ENDPOINT");
 
@@ -1816,6 +1821,39 @@ int main(int argc, char **argv) {
       return EXIT_FAILURE;
     }
   } else if (opt_storage == AZURE) {
+    // Azure connection string (SDK convention) is honoured before
+    // any explicit --azure-* flags — it packs account name +
+    // account key + blob endpoint into one string.  Every language's
+    // Azure SDK reads AZURE_STORAGE_CONNECTION_STRING, so operators
+    // used to `az storage blob upload` expect the same here.
+    std::string azure_endpoint_from_cs;
+    const char *conn_str_env =
+        getenv("AZURE_STORAGE_CONNECTION_STRING");
+    if (conn_str_env != nullptr && *conn_str_env != '\0') {
+      auth::azure::ConnectionString cs;
+      std::string cs_err;
+      if (!auth::azure::parse_connection_string(conn_str_env, &cs, &cs_err)) {
+        msg_ts("%s: AZURE_STORAGE_CONNECTION_STRING: %s\n", my_progname,
+               cs_err.c_str());
+        return EXIT_FAILURE;
+      }
+      if (opt_azure_account == nullptr && !cs.account_name.empty()) {
+        opt_azure_account = my_strdup(PSI_NOT_INSTRUMENTED,
+                                       cs.account_name.c_str(), MYF(MY_FAE));
+      }
+      if (opt_azure_access_key == nullptr && !cs.account_key.empty()) {
+        opt_azure_access_key = my_strdup(PSI_NOT_INSTRUMENTED,
+                                          cs.account_key.c_str(), MYF(MY_FAE));
+      }
+      if (opt_azure_endpoint == nullptr) {
+        azure_endpoint_from_cs = auth::azure::blob_endpoint_from(cs);
+      }
+      msg_ts("%s: Loaded Azure credentials from "
+             "AZURE_STORAGE_CONNECTION_STRING (account=%s)\n",
+             my_progname,
+             opt_azure_account ? opt_azure_account : "<unset>");
+    }
+
     std::string storage_account =
         opt_azure_account != nullptr ? opt_azure_account : "";
     if (storage_account.empty() && opt_azure_development_storage) {
@@ -1831,7 +1869,7 @@ int main(int argc, char **argv) {
     if (access_key.empty() && opt_azure_development_storage) {
       access_key.assign(azure_development_access_key);
     }
-    if (access_key.empty()) {
+    if (access_key.empty() && !opt_azure_managed_identity) {
       msg_ts("%s: Azure access key is not specified.\n", my_progname);
       return EXIT_FAILURE;
     }

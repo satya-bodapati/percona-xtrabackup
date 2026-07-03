@@ -66,7 +66,8 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   auth/aws/credential_process.cc
   auth/aws/profile_resolver.cc
   auth/gcp/gce_metadata_provider.cc
-  auth/azure/managed_identity_provider.cc)
+  auth/azure/managed_identity_provider.cc
+  auth/azure/connection_string.cc)
 
 SET_TARGET_PROPERTIES(xbcloud
         PROPERTIES LINKER_LANGUAGE CXX
