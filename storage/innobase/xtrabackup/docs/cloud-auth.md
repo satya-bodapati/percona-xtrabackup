@@ -77,8 +77,12 @@ Every `CredentialProvider` implementation declares its wire_mode()
 | `auth/aws/hmac_provider.{h,cc}` | Long-lived HMAC keys (`--s3-access-key/-secret-key`) | HMAC_SIGV4 |
 | `auth/aws/ec2_instance_profile.{h,cc}` | EC2 IAM instance profile via IMDS | HMAC_SIGV4 |
 | `auth/aws/profile_file.{h,cc}` | `~/.aws/credentials` INI, `--s3-profile` / `AWS_PROFILE` | (yields HmacCredentials, consumed by HmacProvider) |
-| `auth/aws/sts_assume_role.{h,cc}` | AWS STS AssumeRole — **skeleton, mint TODO** | HMAC_SIGV4 |
-| `auth/aws/roles_anywhere.{h,cc}` | AWS Roles Anywhere (X.509) — **skeleton, mint TODO** | HMAC_SIGV4 |
+| `auth/aws/sts_assume_role.{h,cc}` | AWS STS AssumeRole (real SigV4-signed mint) | HMAC_SIGV4 |
+| `auth/aws/roles_anywhere.{h,cc}` | AWS Roles Anywhere (X.509-signed mint) | HMAC_SIGV4 |
+| `auth/aws/credential_process.{h,cc}` | External helper (Roles Anywhere via aws_signing_helper, Vault, CyberArk, HSM, ...) | HMAC_SIGV4 |
+| `auth/aws/profile_resolver.{h,cc}` | Walks `~/.aws/config` chains: role_arn + source_profile / credential_source / credential_process | (dispatches) |
+| `auth/gcp/impersonation_provider.{h,cc}` | GCP impersonated_service_account (IAM Credentials API) | BEARER |
+| `auth/azure/connection_string.{h,cc}` | `AZURE_STORAGE_CONNECTION_STRING` parser | (feeds SharedKeyProvider) |
 | `auth/gcp/interop_hmac_provider.h` | GCS interop HMAC keys | HMAC_SIGV4 |
 | `auth/gcp/adc_provider.{h,cc}` | GCP ADC (service_account, authorized_user) | BEARER |
 | `auth/gcp/gce_metadata_provider.{h,cc}` | GCE VM metadata service | BEARER |
@@ -152,44 +156,49 @@ Reads `~/.aws/credentials` INI. Supports both `[default]` and
 be dispatched — probe helpers (`probe_reachable()`) available for
 IMDS-first credential source ordering.
 
+## SDK-convention env vars we honour
+
+An operator whose environment is already configured for the AWS
+CLI / gcloud / az / openstack CLI gets zero-config xbcloud for
+the common shapes:
+
+| Provider | Env var | Purpose |
+|---|---|---|
+| AWS | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | Long-lived / temporary HMAC keys. |
+| AWS | `AWS_PROFILE` | Selects a section from `~/.aws/credentials` + `~/.aws/config`, resolved through the profile chain (role_arn / source_profile / credential_process / credential_source). |
+| GCP | `GOOGLE_APPLICATION_CREDENTIALS` | Path to ADC JSON (service_account / authorized_user / impersonated_service_account). |
+| Azure | `AZURE_STORAGE_CONNECTION_STRING` | Full connection string parsed for account name + key + endpoint. |
+| Azure | `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_KEY` | Discrete equivalents. |
+| Swift | `OS_AUTH_URL` / `OS_USERNAME` / `OS_PASSWORD` / `OS_PROJECT_NAME` / `OS_TENANT_NAME` / `OS_REGION_NAME` / `OS_USER_DOMAIN_NAME` / `OS_PROJECT_DOMAIN_NAME` / `OS_IDENTITY_API_VERSION` / ... | Standard openrc file conventions. |
+
+Combined with in-cloud IMDS auto-detection (EC2 / GCE / Azure),
+an operator running xbcloud from a properly-configured VM or a
+shell that has sourced their credentials file usually needs
+`--storage=<x> --<x>-bucket=<name>` and nothing else.
+
 ## Planned follow-ups (not on this branch)
 
-- **AWS STS AssumeRole — complete the mint step.** Skeleton is
-  landed (`auth/aws/sts_assume_role.{h,cc}`). Missing: extract
-  service-agnostic SigV4 canonicalisation from `S3_signerV4` into
-  a helper, then use it to sign the POST to
-  `sts.<region>.amazonaws.com/`. Response is XML; parse
-  `<AssumeRoleResult><Credentials>` into `HmacCredentials`. The
-  same SigV4 helper also serves any future SigV4-signed service.
-- **AWS Roles Anywhere — complete the mint step.** Skeleton is
-  landed (`auth/aws/roles_anywhere.{h,cc}`). Missing:
-  AWS4-X509-RSA-SHA256 canonicalisation of the request, sign with
-  the operator's private key (OpenSSL `EVP_DigestSign` — same
-  primitive `oauth2_client.cc` uses for JWT RS256), POST to
-  `rolesanywhere.<region>.amazonaws.com/sessions`, parse the JSON
-  `credentialSet[].credentials` response. Roughly 200 LOC once
-  the canonical-request formation is understood; deliberately
-  landed as its own PR because signing X.509 requests wrong is
-  security-adjacent and deserves isolated review.
-- **CLI wiring for STS + Roles Anywhere + Managed Identity.**
-  Providers exist but nothing in `xbcloud.cc` picks them.
-  Options to add:
-    `--s3-role-arn` (+ `--s3-role-session-name` / `--s3-external-id`)
-    `--s3-rolesanywhere-cert` (+ `-private-key`, `-trust-anchor-arn`,
-        `-profile-arn`, `-role-arn`)
-    `--azure-managed-identity` (+ `--azure-managed-identity-client-id`
-        for user-assigned)
-- **IMDS-first credential ordering**: at xbcloud startup, when no
-  explicit credentials are given, probe the appropriate cloud IMDS
-  (`GceMetadataProvider::probe_reachable()`,
-  `ManagedIdentityProvider::probe_reachable()`, existing EC2 IMDS
-  probe) with a 1s timeout and auto-install the provider that
-  responds. Preserves the current fallback semantics but reorders
-  the checks so "we're inside the cloud" is the assumed default.
+- **AWS AssumeRoleWithWebIdentity** (EKS IRSA, GitHub Actions
+  federation). Detected in the profile parser via
+  `web_identity_token_file` but rejected at resolver time with a
+  workaround hint (use `credential_process` with a helper).
+- **AWS SSO / IAM Identity Center.** Same — recognised, rejected
+  with a workaround hint (`aws sso login` +
+  `credential_process` wrapping `aws configure export-credentials`).
+- **GCP external_account (Workload Identity Federation).**
+  Recognised in `AdcType::kExternalAccount` but the STS token-
+  exchange isn't yet implemented. Non-trivial: the source token
+  can be a file, URL, or AWS-signed request, and STS token
+  exchange has its own request shape.
+- **ECS container credentials** (`credential_source =
+  EcsContainer`). Same shape as EC2 IMDS but at 169.254.170.2 +
+  an env-var-supplied path. Small add.
+- **`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `_FULL_URI`** env
+  vars — ECS's canonical env-var-driven mode; currently ignored.
 - **End-to-end tests** against fake-gcs-server, Azurite, LocalStack
-  with the emulator harness in `test/inc/cloud_emu.sh`. Only the
-  smoke test for GCS OAuth2 option parsing is currently in place
-  (`test/t/xbcloud_gcs_oauth2.sh`).
+  with the emulator harness in `test/inc/cloud_emu.sh`. Three of
+  five are green today; GCS via fake-gcs-server is blocked on
+  an upstream compat gap.
 
 ## Ownership boundary
 
