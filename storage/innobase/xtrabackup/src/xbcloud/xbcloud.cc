@@ -49,6 +49,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/aws/ec2_instance_profile.h"
 #include "xbcloud/auth/aws/hmac_provider.h"
 #include "xbcloud/auth/aws/profile_file.h"
+#include "xbcloud/auth/aws/profile_resolver.h"
 #include "xbcloud/auth/aws/roles_anywhere.h"
 #include "xbcloud/auth/aws/sts_assume_role.h"
 #include "xbcloud/auth/azure/managed_identity_provider.h"
@@ -1581,33 +1582,29 @@ int main(int argc, char **argv) {
     //   1. --s3-access-key/--s3-secret-key (explicit).
     //   2. --s3-profile or AWS_PROFILE env → ~/.aws/credentials.
     //   3. EC2 IAM instance profile via IMDS.
+    // --s3-profile / AWS_PROFILE selection uses the full resolver so
+    // profile-based STS chains (role_arn + source_profile),
+    // credential_process helpers (Roles Anywhere via
+    // aws_signing_helper, Vault, CyberArk, HSM, ...), and
+    // credential_source=Ec2InstanceMetadata all work the same way
+    // they do with the `aws` CLI.
+    std::unique_ptr<auth::CredentialProvider> profile_provider;
     if (opt_s3_access_key == nullptr && opt_s3_secret_key == nullptr &&
         opt_s3_session_token == nullptr) {
       const char *profile_name = opt_s3_profile;
       if (profile_name == nullptr) profile_name = getenv("AWS_PROFILE");
       if (profile_name != nullptr) {
-        auth::HmacCredentials pf_creds;
+        auth::aws::ProfileResolverOptions po;
+        po.region = opt_s3_region != nullptr ? opt_s3_region : "";
+        po.http_client_for_ec2 = &http_client;
         std::string pf_err;
-        const std::string cred_path = auth::aws::default_credentials_path();
-        if (auth::aws::load_profile(cred_path, profile_name, &pf_creds,
-                                     &pf_err)) {
-          opt_s3_access_key = my_strdup(PSI_NOT_INSTRUMENTED,
-                                         pf_creds.access_key.c_str(),
-                                         MYF(MY_FAE));
-          opt_s3_secret_key = my_strdup(PSI_NOT_INSTRUMENTED,
-                                         pf_creds.secret_key.c_str(),
-                                         MYF(MY_FAE));
-          if (!pf_creds.session_token.empty()) {
-            opt_s3_session_token = my_strdup(
-                PSI_NOT_INSTRUMENTED, pf_creds.session_token.c_str(),
-                MYF(MY_FAE));
-          }
-          msg_ts("%s: Using AWS profile '%s' from %s\n", my_progname,
-                 profile_name, cred_path.c_str());
-        } else {
+        profile_provider = auth::aws::resolve_profile(profile_name, po, &pf_err);
+        if (!profile_provider) {
           msg_ts("%s: %s\n", my_progname, pf_err.c_str());
           return EXIT_FAILURE;
         }
+        msg_ts("%s: Using AWS profile '%s' (source: %s)\n", my_progname,
+               profile_name, profile_provider->source_description().c_str());
       }
     }
     if (opt_s3_access_key == nullptr && opt_s3_secret_key == nullptr &&
@@ -1654,15 +1651,24 @@ int main(int argc, char **argv) {
 
     // Credential provider selection.  Precedence (each mode wraps
     // the previous where it makes sense):
+    //   5. --s3-profile / AWS_PROFILE → resolve_profile walks
+    //      role_arn / source_profile / credential_process /
+    //      credential_source through the AWS config chain.
     //   4. --s3-rolesanywhere-* → X.509-signed mint against
-    //      rolesanywhere.amazonaws.com.  Independent of parent
-    //      creds (X.509 IS the credential).
+    //      rolesanywhere.amazonaws.com.
     //   3. --s3-role-arn → STS AssumeRole under whatever mode
     //      supplies HMAC keys (2, 1, or IMDS).
     //   2. EC2 instance profile → Ec2InstanceProfileProvider.
     //   1. Long-lived HMAC keys → HmacProvider.
     std::unique_ptr<auth::CredentialProvider> provider;
-    if (opt_s3_rolesanywhere_cert != nullptr &&
+    if (profile_provider) {
+      // Profile resolution already produced the final provider
+      // (potentially chained STS, credential_process, ...).  Explicit
+      // --s3-role-arn / --s3-rolesanywhere-* on the command line
+      // override the profile chain, matching aws CLI convention that
+      // per-invocation flags win over profile file contents.
+      provider = std::move(profile_provider);
+    } else if (opt_s3_rolesanywhere_cert != nullptr &&
         opt_s3_rolesanywhere_private_key != nullptr) {
       if (opt_s3_rolesanywhere_trust_anchor_arn == nullptr ||
           opt_s3_rolesanywhere_profile_arn == nullptr ||
