@@ -685,6 +685,21 @@ static void get_env_args() {
   get_env_value(opt_swift_region, "OS_REGION_NAME");
   get_env_value(opt_swift_storage_url, "OS_STORAGE_URL");
   get_env_value(opt_cacert, "OS_CACERT");
+  // Keystone v3 renames "tenant" to "project" — both env-var
+  // conventions coexist in practice.  We honour both so an operator
+  // whose openrc file uses OS_PROJECT_NAME (the v3 default) doesn't
+  // have to duplicate it as OS_TENANT_NAME.
+  get_env_value(opt_swift_project, "OS_PROJECT_NAME");
+  get_env_value(opt_swift_project_id, "OS_PROJECT_ID");
+  // Keystone API version selection.  Both OS_AUTH_VERSION (some
+  // openrc scripts) and OS_IDENTITY_API_VERSION (canonical
+  // OpenStack env var) map to xbcloud's --swift-auth-version.
+  get_env_value(opt_swift_auth_version, "OS_AUTH_VERSION");
+  get_env_value(opt_swift_auth_version, "OS_IDENTITY_API_VERSION");
+  // OS_USER_DOMAIN_NAME is the canonical v3 form.  Legacy
+  // OS_USER_DOMAIN above still works as an alias.
+  get_env_value(opt_swift_domain, "OS_USER_DOMAIN_NAME");
+  get_env_value(opt_swift_project_domain, "OS_PROJECT_DOMAIN_NAME");
 
   /* Below block should always be above AWS_* and should not be moved because
   the order of prefrence are like S3_ACCESS_KEY_ID, AWS_ACCESS_KEY_ID and
