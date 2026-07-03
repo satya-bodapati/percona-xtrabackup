@@ -77,6 +77,8 @@ Every `CredentialProvider` implementation declares its wire_mode()
 | `auth/aws/hmac_provider.{h,cc}` | Long-lived HMAC keys (`--s3-access-key/-secret-key`) | HMAC_SIGV4 |
 | `auth/aws/ec2_instance_profile.{h,cc}` | EC2 IAM instance profile via IMDS | HMAC_SIGV4 |
 | `auth/aws/profile_file.{h,cc}` | `~/.aws/credentials` INI, `--s3-profile` / `AWS_PROFILE` | (yields HmacCredentials, consumed by HmacProvider) |
+| `auth/aws/sts_assume_role.{h,cc}` | AWS STS AssumeRole — **skeleton, mint TODO** | HMAC_SIGV4 |
+| `auth/aws/roles_anywhere.{h,cc}` | AWS Roles Anywhere (X.509) — **skeleton, mint TODO** | HMAC_SIGV4 |
 | `auth/gcp/interop_hmac_provider.h` | GCS interop HMAC keys | HMAC_SIGV4 |
 | `auth/gcp/adc_provider.{h,cc}` | GCP ADC (service_account, authorized_user) | BEARER |
 | `auth/gcp/gce_metadata_provider.{h,cc}` | GCE VM metadata service | BEARER |
@@ -108,12 +110,14 @@ strings every call) or a live refresh (temp creds — the provider's
 For BEARER providers signing is skipped; the token is attached
 directly.
 
-`Azure_client` currently signs Azure Shared Key directly from its
-own string members. Extending it to consult the CredentialProvider
-(for Managed Identity Bearer mode) is a small follow-up — the
-scaffolding is in place (see `Azure_object_store::set_credential_provider`)
-and `azure/managed_identity_provider` is written; only the branch in
-`Azure_client::sign_request` is missing.
+`Azure_client::sign()` mirrors S3's shape. When the registered
+provider's `wire_mode()` is `BEARER` (`ManagedIdentityProvider` or a
+future AAD-based provider), the Shared Key signer runs first to
+populate the required `x-ms-date` and `x-ms-version` headers, then
+the `Authorization` header is replaced with
+`Bearer <provider->get_bearer()>`. When the provider is null or
+`HMAC_SHARED_KEY`, signing goes through `Azure_signer` unchanged.
+Byte-identical to pre-refactor behaviour on the Shared Key path.
 
 ## Behaviour preservation
 
@@ -150,16 +154,31 @@ IMDS-first credential source ordering.
 
 ## Planned follow-ups (not on this branch)
 
-- **AWS STS AssumeRole**: skeleton not yet added; needs SigV4-signed
-  POST to `sts.amazonaws.com`, XML response parsing. Sits naturally
-  as an HMAC_SIGV4 provider whose `get_hmac()` refreshes from STS.
-- **AWS Roles Anywhere**: X.509 cert + private key signing to
-  `rolesanywhere.amazonaws.com`. Roughly ~200 LOC; the OpenSSL API
-  surface is already available via `oauth2_client.cc`'s existing
-  usage.
-- **Azure Bearer signing wiring**: teach `Azure_client::sign_request`
-  to skip Shared Key when `wire_mode() == BEARER`. Providers are
-  in place; only the branch in the signer is missing.
+- **AWS STS AssumeRole — complete the mint step.** Skeleton is
+  landed (`auth/aws/sts_assume_role.{h,cc}`). Missing: extract
+  service-agnostic SigV4 canonicalisation from `S3_signerV4` into
+  a helper, then use it to sign the POST to
+  `sts.<region>.amazonaws.com/`. Response is XML; parse
+  `<AssumeRoleResult><Credentials>` into `HmacCredentials`. The
+  same SigV4 helper also serves any future SigV4-signed service.
+- **AWS Roles Anywhere — complete the mint step.** Skeleton is
+  landed (`auth/aws/roles_anywhere.{h,cc}`). Missing:
+  AWS4-X509-RSA-SHA256 canonicalisation of the request, sign with
+  the operator's private key (OpenSSL `EVP_DigestSign` — same
+  primitive `oauth2_client.cc` uses for JWT RS256), POST to
+  `rolesanywhere.<region>.amazonaws.com/sessions`, parse the JSON
+  `credentialSet[].credentials` response. Roughly 200 LOC once
+  the canonical-request formation is understood; deliberately
+  landed as its own PR because signing X.509 requests wrong is
+  security-adjacent and deserves isolated review.
+- **CLI wiring for STS + Roles Anywhere + Managed Identity.**
+  Providers exist but nothing in `xbcloud.cc` picks them.
+  Options to add:
+    `--s3-role-arn` (+ `--s3-role-session-name` / `--s3-external-id`)
+    `--s3-rolesanywhere-cert` (+ `-private-key`, `-trust-anchor-arn`,
+        `-profile-arn`, `-role-arn`)
+    `--azure-managed-identity` (+ `--azure-managed-identity-client-id`
+        for user-assigned)
 - **IMDS-first credential ordering**: at xbcloud startup, when no
   explicit credentials are given, probe the appropriate cloud IMDS
   (`GceMetadataProvider::probe_reachable()`,
