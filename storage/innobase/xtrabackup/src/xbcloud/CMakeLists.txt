@@ -61,6 +61,7 @@ MYSQL_ADD_EXECUTABLE(xbcloud
   auth/gcp/adc_credential.cc
   auth/gcp/adc_provider.cc
   auth/aws/profile_file.cc
+  auth/aws/sts_assume_role.cc
   auth/gcp/gce_metadata_provider.cc
   auth/azure/managed_identity_provider.cc)
 
