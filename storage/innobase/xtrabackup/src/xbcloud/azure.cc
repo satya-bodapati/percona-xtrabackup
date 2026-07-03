@@ -228,7 +228,7 @@ bool Azure_client::delete_object(const std::string &container,
                                  const std::string &name) {
   Http_request req(Http_request::DELETE, protocol, host,
                    "/" + container + "/" + name);
-  signer->sign_request(container, name, req, time(0));
+  sign(container, name, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -266,7 +266,7 @@ bool Azure_client::async_delete_object(const std::string &container,
            container.c_str(), name.c_str());
     return false;
   }
-  signer->sign_request(container, name, *req, time(0));
+  sign(container, name, *req, time(0));
 
   Http_response *resp = new Http_response();
   if (resp == nullptr) {
@@ -307,7 +307,7 @@ Http_buffer Azure_client::download_object(const std::string &container,
                                           const std::string &name,
                                           bool &success) {
   Http_request req(Http_request::GET, protocol, host, container + "/" + name);
-  signer->sign_request(container, name, req, time(0));
+  sign(container, name, req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -327,7 +327,7 @@ Http_buffer Azure_client::download_object(const std::string &container,
 bool Azure_client::create_container(const std::string &name) {
   Http_request req(Http_request::PUT, protocol, host, "/" + name);
   req.add_param("restype", "container");
-  signer->sign_request(name, "", req, time(0));
+  sign(name, "", req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -358,7 +358,7 @@ bool Azure_client::container_exists(const std::string &name, bool &exists) {
   Http_request req(Http_request::HEAD, protocol, host, "/" + name);
   req.add_param("comp", "metadata");
   req.add_param("restype", "container");
-  signer->sign_request(name, "", req, time(0));
+  sign(name, "", req, time(0));
 
   Http_response resp;
   if (!http_client->make_request(req, resp)) {
@@ -385,7 +385,7 @@ bool Azure_client::upload_object(const std::string &container,
   req.add_header("Content-Length", std::to_string(contents.size()));
   req.add_header(AZURE_BLOB_TYPE_HEADER, "BlockBlob");
   req.append_payload(contents);
-  signer->sign_request(container, name, req, time(0));
+  sign(container, name, req, time(0));
 
   Http_response resp;
 
@@ -445,7 +445,7 @@ bool Azure_client::async_upload_object(
     req->add_header(h.first, h.second);
   }
   req->append_payload(contents);
-  signer->sign_request(container, name, *req, time(0));
+  sign(container, name, *req, time(0));
 
   Http_response *resp = new Http_response();
   if (resp == nullptr) {
@@ -487,7 +487,7 @@ bool Azure_client::async_download_object(
   for (const auto &h : extra_http_headers) {
     req->add_header(h.first, h.second);
   }
-  signer->sign_request(container, name, *req, time(0));
+  sign(container, name, *req, time(0));
 
   Http_response *resp = new Http_response();
   if (resp == nullptr) {
@@ -549,7 +549,7 @@ bool Azure_client::list_objects_common(const std::string &container,
     if (truncated == true) {
       req.add_param("marker", next_marker);
     }
-    signer->sign_request(container, "", req, time(0));
+    sign(container, "", req, time(0));
 
     Http_response resp;
     if (!http_client->make_request(req, resp)) {

@@ -90,6 +90,16 @@ class Azure_client {
 
   std::string session_token;
 
+  // CredentialProvider consulted by sign(): BEARER-mode providers
+  // (Managed Identity, AAD Service Principal) attach an
+  // Authorization: Bearer <token> header and skip Shared Key
+  // signing.  HMAC_SHARED_KEY-mode providers (the existing
+  // SharedKeyProvider) let Azure_signer sign normally.  When
+  // credential_provider_ is null, signing goes through Azure_signer
+  // unchanged for backwards compatibility with call paths that
+  // don't set a provider.
+  auth::CredentialProvider *credential_provider_{nullptr};
+
   Http_request::protocol_t protocol;
   ulong max_retries;
   ulong max_backoff;
@@ -124,6 +134,35 @@ class Azure_client {
 
   void set_endpoint(const std::string &ep, bool development_storage,
                     const std::string &storage_account);
+
+  // Register a CredentialProvider that sign() consults before each
+  // request.  Non-owning; caller keeps ownership (typically
+  // Azure_object_store's credential_provider_ unique_ptr).
+  void set_credential_provider(auth::CredentialProvider *p) {
+    credential_provider_ = p;
+  }
+
+  // Sign wrapper: consults credential_provider_ (if any) and either
+  // attaches Bearer auth (BEARER wire_mode) or delegates to the
+  // Shared Key signer (default).  Every request path calls this
+  // instead of signer->sign_request() directly.
+  void sign(const std::string &container, const std::string &blob,
+            Http_request &req, time_t t) {
+    if (credential_provider_ != nullptr &&
+        credential_provider_->wire_mode() == auth::WireMode::BEARER) {
+      // Azure REST supports Authorization: Bearer <token> as an
+      // alternative to Shared Key on the same endpoints, provided
+      // the request also carries x-ms-version and x-ms-date.  The
+      // Shared Key signer already adds those, so we invoke it but
+      // then overwrite Authorization with the bearer header.
+      signer->sign_request(container, blob, req, t);
+      req.remove_header("Authorization");
+      req.add_header("Authorization",
+                     "Bearer " + credential_provider_->get_bearer());
+    } else {
+      signer->sign_request(container, blob, req, t);
+    }
+  }
 
   bool delete_object(const std::string &container, const std::string &name);
 
@@ -198,6 +237,7 @@ class Azure_object_store : public Object_store {
   void set_credential_provider(
       std::unique_ptr<auth::CredentialProvider> provider) {
     credential_provider_ = std::move(provider);
+    azure_client.set_credential_provider(credential_provider_.get());
   }
   Azure_object_store(const Http_client *client,
                      const std::string &storage_account,
