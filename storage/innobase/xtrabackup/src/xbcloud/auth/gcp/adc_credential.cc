@@ -13,6 +13,8 @@ the Free Software Foundation; version 2 of the License.
 #include "my_rapidjson_size_t.h"
 
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include <fstream>
 #include <sstream>
@@ -42,19 +44,13 @@ const char *maybe_string(const rapidjson::Document &d, const char *key) {
 
 }  // namespace
 
-bool load_adc_from_file(const std::string &path, AdcCredential *out,
-                        std::string *err) {
-  std::string raw;
-  if (!read_file(path, &raw, err)) return false;
+namespace {
 
-  rapidjson::Document d;
-  if (d.Parse(raw.c_str()).HasParseError()) {
-    *err = "malformed JSON at " + path;
-    return false;
-  }
+bool parse_adc_doc(const rapidjson::Document &d, const std::string &origin,
+                   AdcCredential *out, std::string *err) {
   const char *type = maybe_string(d, "type");
   if (type == nullptr) {
-    *err = path + ": missing \"type\" field";
+    *err = origin + ": missing \"type\" field";
     return false;
   }
   const std::string type_s(type);
@@ -64,14 +60,14 @@ bool load_adc_from_file(const std::string &path, AdcCredential *out,
     const char *private_key = maybe_string(d, "private_key");
     const char *token_uri = maybe_string(d, "token_uri");
     if (!client_email || !private_key) {
-      *err = path +
+      *err = origin +
              ": service_account credential missing client_email or private_key";
       return false;
     }
     out->client_email = client_email;
     out->private_key = private_key;
-    // token_uri is optional in some issuers; default to Google's endpoint.
-    out->token_uri = token_uri ? token_uri : "https://oauth2.googleapis.com/token";
+    out->token_uri =
+        token_uri ? token_uri : "https://oauth2.googleapis.com/token";
     return true;
   }
   if (type_s == "authorized_user") {
@@ -80,7 +76,7 @@ bool load_adc_from_file(const std::string &path, AdcCredential *out,
     const char *client_secret = maybe_string(d, "client_secret");
     const char *refresh_token = maybe_string(d, "refresh_token");
     if (!client_id || !client_secret || !refresh_token) {
-      *err = path +
+      *err = origin +
              ": authorized_user credential missing "
              "client_id / client_secret / refresh_token";
       return false;
@@ -91,12 +87,64 @@ bool load_adc_from_file(const std::string &path, AdcCredential *out,
     out->token_uri = "https://oauth2.googleapis.com/token";
     return true;
   }
-  // v1 scope of PXB-3592: only the two flows above.  Reject the rest
-  // with a clear message so the operator knows we saw their file and
-  // deliberately didn't proceed.
-  *err = path + ": unsupported credential type \"" + type_s +
-         "\" (expected service_account or authorized_user)";
+  if (type_s == "impersonated_service_account") {
+    out->type = AdcType::kImpersonatedServiceAccount;
+    const char *url = maybe_string(d, "service_account_impersonation_url");
+    if (!url) {
+      *err = origin +
+             ": impersonated_service_account missing "
+             "service_account_impersonation_url";
+      return false;
+    }
+    out->service_account_impersonation_url = url;
+    // Serialize the nested source_credentials back to JSON so callers
+    // can re-parse it as a plain AdcCredential (recursion happens in
+    // ImpersonatedServiceAccountProvider, not here).
+    if (!d.HasMember("source_credentials") ||
+        !d["source_credentials"].IsObject()) {
+      *err = origin +
+             ": impersonated_service_account missing source_credentials";
+      return false;
+    }
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buf);
+    d["source_credentials"].Accept(writer);
+    out->source_credentials_json = buf.GetString();
+    return true;
+  }
+  if (type_s == "external_account") {
+    out->type = AdcType::kExternalAccount;
+    *err = origin +
+           ": credential type \"external_account\" (Workload Identity "
+           "Federation) is recognised but not yet supported.  Workaround: "
+           "use gcloud to exchange your external token for a Google "
+           "access_token and export it via credential_process, or file a "
+           "PXB ticket for prioritisation";
+    return false;
+  }
+  *err = origin + ": unsupported credential type \"" + type_s +
+         "\" (expected service_account, authorized_user, or "
+         "impersonated_service_account)";
   return false;
+}
+
+}  // namespace
+
+bool load_adc_from_file(const std::string &path, AdcCredential *out,
+                        std::string *err) {
+  std::string raw;
+  if (!read_file(path, &raw, err)) return false;
+  return load_adc_from_string(raw, out, err);
+}
+
+bool load_adc_from_string(const std::string &json, AdcCredential *out,
+                          std::string *err) {
+  rapidjson::Document d;
+  if (d.Parse(json.c_str()).HasParseError()) {
+    *err = "malformed ADC JSON";
+    return false;
+  }
+  return parse_adc_doc(d, "<adc>", out, err);
 }
 
 }  // namespace gcp

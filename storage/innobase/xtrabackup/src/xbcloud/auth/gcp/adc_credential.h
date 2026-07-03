@@ -42,6 +42,8 @@ namespace gcp {
 enum class AdcType {
   kServiceAccount,
   kAuthorizedUser,
+  kImpersonatedServiceAccount,   // recognized; mint step in follow-up
+  kExternalAccount,              // recognized; not yet supported (WIF)
 };
 
 struct AdcCredential {
@@ -56,12 +58,26 @@ struct AdcCredential {
   std::string client_id;
   std::string client_secret;
   std::string refresh_token;
+
+  // Impersonated-service-account fields.  service_account_impersonation_url
+  // is the full IAM Credentials API endpoint (a POST-to-here yields a
+  // delegated access_token for the target SA).  source_credentials_json
+  // is the raw JSON blob of the nested source — passing it back through
+  // load_adc_from_string() gives you the parent to authenticate with.
+  std::string service_account_impersonation_url;
+  std::string source_credentials_json;
 };
 
 // Parse ADC JSON from a file path.  Returns true on success.
 // On failure fills *err.
 bool load_adc_from_file(const std::string &path, AdcCredential *out,
                         std::string *err);
+
+// Parse ADC JSON from an in-memory buffer.  Same schema recognition
+// as load_adc_from_file.  Used by ImpersonatedServiceAccountProvider
+// to parse a nested source_credentials block.
+bool load_adc_from_string(const std::string &json, AdcCredential *out,
+                          std::string *err);
 
 }  // namespace gcp
 }  // namespace auth

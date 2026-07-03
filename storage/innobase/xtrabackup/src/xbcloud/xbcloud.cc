@@ -58,6 +58,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/gcp/adc_credential.h"
 #include "xbcloud/auth/gcp/adc_provider.h"
 #include "xbcloud/auth/gcp/gce_metadata_provider.h"
+#include "xbcloud/auth/gcp/impersonation_provider.h"
 #include "xbcloud/auth/gcp/interop_hmac_provider.h"
 #include "xbcloud/auth/swift/keystone_provider.h"
 #include "xbcloud/azure.h"
@@ -1787,11 +1788,34 @@ int main(int argc, char **argv) {
         msg_ts("%s: %s\n", my_progname, adc_err.c_str());
         return EXIT_FAILURE;
       }
-      msg_ts("%s: Using GCP OAuth2 ADC credentials from %s\n", my_progname,
-             sa_path);
-      gcs_provider = std::make_unique<auth::gcp::AdcProvider>(
-          std::move(adc), "https://www.googleapis.com/auth/devstorage.read_write",
-          sa_path);
+      const std::string kGcsScope =
+          "https://www.googleapis.com/auth/devstorage.read_write";
+      if (adc.type == auth::gcp::AdcType::kImpersonatedServiceAccount) {
+        // Recursively parse the nested source_credentials and build
+        // the parent provider, then wrap in ImpersonationProvider so
+        // the IAM Credentials API is called on every mint.
+        auth::gcp::AdcCredential source_adc;
+        std::string src_err;
+        if (!auth::gcp::load_adc_from_string(adc.source_credentials_json,
+                                              &source_adc, &src_err)) {
+          msg_ts("%s: %s: nested source_credentials: %s\n", my_progname,
+                 sa_path, src_err.c_str());
+          return EXIT_FAILURE;
+        }
+        auto parent = std::make_unique<auth::gcp::AdcProvider>(
+            std::move(source_adc), kGcsScope, std::string(sa_path) + " (source)");
+        msg_ts("%s: Using GCP impersonated service account (target: %s)\n",
+               my_progname, adc.service_account_impersonation_url.c_str());
+        gcs_provider = std::make_unique<auth::gcp::ImpersonationProvider>(
+            std::move(parent), adc.service_account_impersonation_url,
+            kGcsScope, 3600,
+            std::string("gcp:impersonation:") + sa_path);
+      } else {
+        msg_ts("%s: Using GCP OAuth2 ADC credentials from %s\n", my_progname,
+               sa_path);
+        gcs_provider = std::make_unique<auth::gcp::AdcProvider>(
+            std::move(adc), kGcsScope, sa_path);
+      }
     } else if (opt_google_access_key == nullptr &&
                opt_google_secret_key == nullptr &&
                auth::gcp::GceMetadataProvider::probe_reachable()) {
