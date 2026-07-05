@@ -55,6 +55,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "xbcloud/auth/azure/connection_string.h"
 #include "xbcloud/auth/azure/managed_identity_provider.h"
 #include "xbcloud/auth/azure/shared_key_provider.h"
+#include "xbcloud/auth/cli/aws_cli_provider.h"
+#include "xbcloud/auth/cli/azure_cli_provider.h"
+#include "xbcloud/auth/cli/gcp_cli_provider.h"
+#include "xbcloud/auth/cli/swift_cli_provider.h"
 #include "xbcloud/auth/gcp/adc_credential.h"
 #include "xbcloud/auth/gcp/adc_provider.h"
 #include "xbcloud/auth/gcp/gce_metadata_provider.h"
@@ -142,6 +146,21 @@ static char *opt_google_session_token = nullptr;
 static char *opt_google_storage_class = nullptr;
 static char *opt_google_bucket = nullptr;
 static char *opt_google_service_account_file = nullptr;
+
+// --- CLI-provider opt-in ---------------------------------------------
+// When set, the corresponding cloud auth path shells out to a vendor CLI
+// (aws / gcloud / az / openstack) for credentials instead of using
+// xbcloud's native providers.  Command strings default to the vendor's
+// documented one-liner but are overridable so operators can point at a
+// custom binary path, add flags, or drop in a test shim.
+static bool  opt_s3_use_cli = false;
+static char *opt_s3_cli_command = nullptr;
+static bool  opt_google_use_cli = false;
+static char *opt_google_cli_command = nullptr;
+static bool  opt_azure_use_cli = false;
+static char *opt_azure_cli_command = nullptr;
+static bool  opt_swift_use_cli = false;
+static char *opt_swift_cli_command = nullptr;
 
 static char *opt_azure_account = nullptr;
 static char *opt_azure_container = nullptr;
@@ -239,6 +258,15 @@ enum {
   OPT_GOOGLE_STORAGE_CLASS,
   OPT_GOOGLE_SERVICE_ACCOUNT_FILE,
   OPT_GOOGLE_BUCKET,
+
+  OPT_S3_USE_CLI,
+  OPT_S3_CLI_COMMAND,
+  OPT_GOOGLE_USE_CLI,
+  OPT_GOOGLE_CLI_COMMAND,
+  OPT_AZURE_USE_CLI,
+  OPT_AZURE_CLI_COMMAND,
+  OPT_SWIFT_USE_CLI,
+  OPT_SWIFT_CLI_COMMAND,
 
   OPT_PARALLEL,
   OPT_THREADS,
@@ -546,6 +574,53 @@ static struct my_option my_long_options[] = {
      "(service_account or authorized_user).  Mutually exclusive with "
      "--google-access-key/--google-secret-key.",
      &opt_google_service_account_file, &opt_google_service_account_file, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    // --- CLI-provider opt-in options ---
+    {"s3-use-cli", OPT_S3_USE_CLI,
+     "Delegate AWS credential acquisition to the aws CLI "
+     "(`aws configure export-credentials --format process-credentials`). "
+     "Handles every AWS credential source aws CLI does — profiles, "
+     "instance profile, STS chains, RolesAnywhere, WebIdentity, SSO — "
+     "without xbcloud needing a native implementation for each.",
+     &opt_s3_use_cli, &opt_s3_use_cli, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"s3-cli-command", OPT_S3_CLI_COMMAND,
+     "Override the command used by --s3-use-cli.  Must produce the "
+     "standard AWS credential_process JSON on stdout.",
+     &opt_s3_cli_command, &opt_s3_cli_command, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"google-use-cli", OPT_GOOGLE_USE_CLI,
+     "Delegate GCP Bearer-token acquisition to the gcloud CLI "
+     "(`gcloud auth application-default print-access-token`).",
+     &opt_google_use_cli, &opt_google_use_cli, 0, GET_BOOL, NO_ARG, 0, 0, 0,
+     0, 0, 0},
+    {"google-cli-command", OPT_GOOGLE_CLI_COMMAND,
+     "Override the command used by --google-use-cli.  Must print a raw "
+     "OAuth2 access token on stdout.",
+     &opt_google_cli_command, &opt_google_cli_command, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"azure-use-cli", OPT_AZURE_USE_CLI,
+     "Delegate Azure Bearer-token acquisition to the az CLI "
+     "(`az account get-access-token --resource=https://storage.azure.com/`).",
+     &opt_azure_use_cli, &opt_azure_use_cli, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0,
+     0, 0},
+    {"azure-cli-command", OPT_AZURE_CLI_COMMAND,
+     "Override the command used by --azure-use-cli.  Must produce JSON "
+     "with accessToken + expires_on on stdout.",
+     &opt_azure_cli_command, &opt_azure_cli_command, 0,
+     GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"swift-use-cli", OPT_SWIFT_USE_CLI,
+     "Delegate Swift Keystone-token acquisition to the openstack CLI "
+     "(`openstack token issue -f json`).",
+     &opt_swift_use_cli, &opt_swift_use_cli, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0,
+     0, 0},
+    {"swift-cli-command", OPT_SWIFT_CLI_COMMAND,
+     "Override the command used by --swift-use-cli.  Must produce JSON "
+     "with id (token) + expires on stdout.",
+     &opt_swift_cli_command, &opt_swift_cli_command, 0,
      GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 
     {"cacert", OPT_CACERT, "CA certificate file.", &opt_cacert, &opt_cacert, 0,
@@ -1489,7 +1564,38 @@ int main(int argc, char **argv) {
 
   std::string container_name;
 
-  if (opt_storage == SWIFT) {
+  if (opt_storage == SWIFT && opt_swift_use_cli) {
+    // Swift CLI mode: shell out to `openstack` for the token, and
+    // require --swift-storage-url since the CLI only returns a token
+    // (no service catalog).  This bypasses the Keystone_client entirely.
+    if (opt_swift_storage_url == nullptr) {
+      msg_ts("%s: --swift-use-cli requires --swift-storage-url (the openstack "
+             "CLI issues a token only; the storage URL must be supplied).\n",
+             my_progname);
+      return EXIT_FAILURE;
+    }
+    if (opt_swift_container == nullptr) {
+      msg_ts("%s: --swift-container is required.\n", my_progname);
+      return EXIT_FAILURE;
+    }
+    const std::string cmd = opt_swift_cli_command != nullptr
+                                ? opt_swift_cli_command
+                                : "openstack token issue -f json";
+    msg_ts("%s: Delegating Swift auth to CLI: %s\n", my_progname, cmd.c_str());
+    auth::cli::SwiftCliProvider bootstrap(cmd);
+    const std::string token = bootstrap.get_bearer();
+    if (token.empty()) {
+      msg_ts("%s: openstack CLI returned no token.\n", my_progname);
+      return EXIT_FAILURE;
+    }
+    object_store = std::unique_ptr<Object_store>(
+        new Swift_object_store(&http_client, opt_swift_storage_url, token,
+                                opt_max_retries, opt_max_backoff));
+    reinterpret_cast<Swift_object_store *>(object_store.get())
+        ->set_credential_provider(
+            std::make_unique<auth::cli::SwiftCliProvider>(cmd));
+    container_name = opt_swift_container;
+  } else if (opt_storage == SWIFT) {
     std::string auth_url = opt_swift_auth_url;
     if (!ends_with(auth_url, "/")) {
       auth_url.append("/");
@@ -1629,7 +1735,7 @@ int main(int argc, char **argv) {
       }
     }
     if (opt_s3_access_key == nullptr && opt_s3_secret_key == nullptr &&
-        opt_s3_session_token == nullptr) {
+        opt_s3_session_token == nullptr && !opt_s3_use_cli) {
       if (ec2_instance->fetch_metadata() &&
           ec2_instance->get_is_ec2_instance_with_profile()) {
         opt_s3_access_key =
@@ -1645,13 +1751,17 @@ int main(int argc, char **argv) {
                my_progname);
       }
     }
-    if (opt_s3_access_key == nullptr) {
-      msg_ts("S3 access key is not specified\n");
-      return EXIT_FAILURE;
-    }
-    if (opt_s3_secret_key == nullptr) {
-      msg_ts("S3 secret key is not specified\n");
-      return EXIT_FAILURE;
+    // When --s3-use-cli is set, credentials come from the aws CLI at
+    // mint time — skip the "you forgot to pass keys" checks.
+    if (!opt_s3_use_cli) {
+      if (opt_s3_access_key == nullptr) {
+        msg_ts("S3 access key is not specified\n");
+        return EXIT_FAILURE;
+      }
+      if (opt_s3_secret_key == nullptr) {
+        msg_ts("S3 secret key is not specified\n");
+        return EXIT_FAILURE;
+      }
     }
     std::string region =
         opt_s3_region != nullptr ? opt_s3_region : default_s3_region;
@@ -1682,7 +1792,17 @@ int main(int argc, char **argv) {
     //   2. EC2 instance profile → Ec2InstanceProfileProvider.
     //   1. Long-lived HMAC keys → HmacProvider.
     std::unique_ptr<auth::CredentialProvider> provider;
-    if (profile_provider) {
+    if (opt_s3_use_cli) {
+      // Shell out to the aws CLI for every credential mint.  Handles
+      // profiles, chains, RolesAnywhere, WebIdentity, SSO, everything
+      // aws CLI understands — no matching native code path required.
+      const std::string cmd =
+          opt_s3_cli_command != nullptr
+              ? opt_s3_cli_command
+              : "aws configure export-credentials --format process-credentials";
+      msg_ts("%s: Delegating AWS auth to CLI: %s\n", my_progname, cmd.c_str());
+      provider = std::make_unique<auth::cli::AwsCliProvider>(cmd);
+    } else if (profile_provider) {
       // Profile resolution already produced the final provider
       // (potentially chained STS, credential_process, ...).  Explicit
       // --s3-role-arn / --s3-rolesanywhere-* on the command line
@@ -1791,7 +1911,14 @@ int main(int argc, char **argv) {
       sa_path = getenv("GOOGLE_APPLICATION_CREDENTIALS");
     }
     std::unique_ptr<auth::CredentialProvider> gcs_provider;
-    if (sa_path != nullptr && *sa_path != '\0') {
+    if (opt_google_use_cli) {
+      const std::string cmd =
+          opt_google_cli_command != nullptr
+              ? opt_google_cli_command
+              : "gcloud auth application-default print-access-token";
+      msg_ts("%s: Delegating GCP auth to CLI: %s\n", my_progname, cmd.c_str());
+      gcs_provider = std::make_unique<auth::cli::GcpCliProvider>(cmd);
+    } else if (sa_path != nullptr && *sa_path != '\0') {
       if (opt_google_access_key != nullptr || opt_google_secret_key != nullptr) {
         msg_ts("%s: --google-service-account-file is mutually exclusive with "
                "--google-access-key/--google-secret-key.\n", my_progname);
@@ -1939,7 +2066,18 @@ int main(int argc, char **argv) {
     //   * default → SharedKeyProvider around --azure-access-key.
     // sign() branches on wire_mode() to attach either Shared Key
     // (default) or Bearer.
-    if (opt_azure_managed_identity) {
+    if (opt_azure_use_cli) {
+      const std::string cmd =
+          opt_azure_cli_command != nullptr
+              ? opt_azure_cli_command
+              : "az account get-access-token "
+                "--resource=https://storage.azure.com/";
+      msg_ts("%s: Delegating Azure auth to CLI: %s\n", my_progname,
+             cmd.c_str());
+      reinterpret_cast<Azure_object_store *>(object_store.get())
+          ->set_credential_provider(
+              std::make_unique<auth::cli::AzureCliProvider>(cmd));
+    } else if (opt_azure_managed_identity) {
       if (opt_azure_access_key != nullptr) {
         msg_ts("%s: --azure-managed-identity is mutually exclusive with "
                "--azure-access-key.\n", my_progname);
