@@ -28,11 +28,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <map>
 #include <univ.i>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "backup_copy.h"
+#include "backup_mysql.h"             // mysql_connection
+#include "changed_page_tracking.h"    // pagetracking::init/deinit
+#include "dict0dict.h"                // dict_sys_t::s_dict_space_id
 #include "file_utils.h"
 #include "fsp0fsp.h"  // fsp_is_undo_tablespace
 #include "scope_guard.h"
@@ -382,6 +386,304 @@ static void copy_for_reduced(copy_thread_ctxt_t *ctxt) {
 
   destroy_thd(thd);
   my_thread_end();
+}
+
+/** Per-thread context of the delta recopy pass (--delta-backup). */
+struct delta_copy_ctxt_t {
+  datafiles_iter_t *it;
+  uint num;
+  uint *count;
+  ib_mutex_t *count_mutex;
+  bool *error;
+  /** spaces that must not get a delta: dropped, renamed, or fully recopied
+  later by handle_ddl_operations() */
+  const std::unordered_set<space_id_t> *skip;
+};
+
+/** Thread function of the delta recopy pass: copy the tracked pages of every
+eligible tablespace through the incremental (.delta) write filter. The page
+selection is driven by the global changed_page_tracking map via
+rf_page_tracking. */
+static void copy_for_delta(delta_copy_ctxt_t *ctxt) {
+  uint num = ctxt->num;
+  fil_node_t *node;
+
+  my_thread_init();
+
+  THD *thd = create_thd(false, false, true, 0, 0);
+  debug_sync_point("copy_for_delta");
+
+  while ((node = datafiles_iter_next(ctxt->it)) != NULL && !*(ctxt->error)) {
+    const space_id_t space_id = node->space->id;
+
+    if (ctxt->skip->find(space_id) != ctxt->skip->end()) {
+      continue;
+    }
+
+    /* mysql.ibd is always full-scanned by rf_page_tracking; every other
+    space is copied only if the tracking window touched it. */
+    if (space_id != dict_sys_t::s_dict_space_id &&
+        changed_page_tracking->count(space_id) == 0) {
+      continue;
+    }
+
+    if (xtrabackup_copy_datafile_func(node, num, nullptr)) {
+      xb::error() << "failed to write delta for datafile " << node->name;
+      *(ctxt->error) = true;
+    }
+  }
+
+  mutex_enter(ctxt->count_mutex);
+  (*ctxt->count)--;
+  mutex_exit(ctxt->count_mutex);
+
+  destroy_thd(thd);
+  my_thread_end();
+}
+
+dberr_t ddl_tracker_t::delta_recopy(lsn_t start_lsn, lsn_t end_lsn) {
+  ut_a(opt_delta_backup);
+  ut_ad(handle_ddl_ops == false);
+
+  if (start_lsn >= end_lsn) {
+    xb::info() << "delta backup: empty tracking window [" << start_lsn << ", "
+               << end_lsn << "], no pages to recopy";
+    return DB_SUCCESS;
+  }
+
+  changed_page_tracking =
+      pagetracking::init(start_lsn, end_lsn, mysql_connection);
+  if (changed_page_tracking == nullptr) {
+    xb::error() << "delta backup: could not get the tracked page set for ["
+                << start_lsn << ", " << end_lsn << "]";
+    return DB_ERROR;
+  }
+
+  std::unordered_set<space_id_t> skip;
+  for (const auto &t : new_tables) {
+    skip.insert(t.first);
+  }
+  for (const auto &t : recopy_tables) {
+    skip.insert(t);
+  }
+  for (const auto &t : drops) {
+    skip.insert(t.first);
+  }
+  /* Renamed spaces route through the full recopy path (consume_ddl_journal
+  adds them to recopy_tables); make the skip explicit for safety. */
+  for (const auto &t : renames) {
+    skip.insert(t.first);
+  }
+
+  xb::info() << "delta backup: recopying pages modified in [" << start_lsn
+             << ", " << end_lsn << "] from "
+             << changed_page_tracking->size() << " tablespaces ("
+             << skip.size() << " superseded by DDL handling)";
+
+  xb_delta_recopy_active = true;
+
+  delta_copy_ctxt_t *data_threads = (delta_copy_ctxt_t *)ut::malloc_withkey(
+      UT_NEW_THIS_FILE_PSI_KEY,
+      sizeof(delta_copy_ctxt_t) * xtrabackup_parallel);
+  uint count = xtrabackup_parallel;
+  ib_mutex_t count_mutex;
+  mutex_create(LATCH_ID_XTRA_COUNT_MUTEX, &count_mutex);
+  bool data_copying_error = false;
+  datafiles_iter_t *it = datafiles_iter_new(nullptr);
+  for (uint i = 0; i < (uint)xtrabackup_parallel; i++) {
+    data_threads[i].it = it;
+    data_threads[i].num = i + 1;
+    data_threads[i].count = &count;
+    data_threads[i].count_mutex = &count_mutex;
+    data_threads[i].error = &data_copying_error;
+    data_threads[i].skip = &skip;
+    os_thread_create(PFS_NOT_INSTRUMENTED, i, copy_for_delta, data_threads + i)
+        .start();
+  }
+
+  /* Wait for threads to exit */
+  while (1) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    mutex_enter(&count_mutex);
+    if (count == 0) {
+      mutex_exit(&count_mutex);
+      break;
+    }
+    mutex_exit(&count_mutex);
+  }
+
+  mutex_free(&count_mutex);
+  ut::free(data_threads);
+  datafiles_iter_free(it);
+
+  xb_delta_recopy_active = false;
+  pagetracking::deinit(changed_page_tracking);
+  changed_page_tracking = nullptr;
+
+  if (data_copying_error) {
+    xb::error() << "delta backup: page recopy failed";
+    return DB_ERROR;
+  }
+
+  xb::info() << "delta backup: page recopy complete";
+  return DB_SUCCESS;
+}
+
+/** One parsed backup DDL journal event. */
+struct ddl_journal_event_t {
+  uint64_t seq;
+  bool begin;
+  std::string type;
+  space_id_t space_id;
+  lsn_t lsn;
+  std::string path;
+};
+
+/** Parse one journal line (tab separated:
+seq BEGIN|END type space_id lsn path). Header/comment lines return false.
+@return true if ev was filled */
+static bool parse_journal_line(const std::string &line,
+                               ddl_journal_event_t &ev) {
+  if (line.empty() || line[0] == '#') {
+    return false;
+  }
+
+  std::istringstream is(line);
+  std::string field;
+
+  if (!std::getline(is, field, '\t')) return false;
+  ev.seq = strtoull(field.c_str(), nullptr, 10);
+
+  if (!std::getline(is, field, '\t')) return false;
+  if (field == "BEGIN") {
+    ev.begin = true;
+  } else if (field == "END") {
+    ev.begin = false;
+  } else {
+    return false;
+  }
+
+  if (!std::getline(is, ev.type, '\t')) return false;
+
+  if (!std::getline(is, field, '\t')) return false;
+  ev.space_id = static_cast<space_id_t>(strtoull(field.c_str(), nullptr, 10));
+
+  if (!std::getline(is, field, '\t')) return false;
+  ev.lsn = strtoull(field.c_str(), nullptr, 10);
+
+  /* path is the last field and may be empty */
+  if (!std::getline(is, ev.path, '\t')) {
+    ev.path.clear();
+  }
+
+  return true;
+}
+
+bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
+  ut_a(xb_ddl_journal_mode);
+
+  std::ifstream journal(journal_path);
+  if (!journal.is_open()) {
+    xb::error() << "delta backup: cannot open the server DDL journal "
+                << journal_path;
+    return false;
+  }
+
+  xb::info() << "delta backup: consuming DDL journal " << journal_path;
+
+  /* BEGIN events pending their END, keyed by (type, space_id). Clone_notify
+  is stack scoped, so per (type, space) the events pair up in order. */
+  std::map<std::pair<std::string, space_id_t>, ddl_journal_event_t> pending;
+
+  std::string line;
+  uint64_t events = 0;
+
+  while (std::getline(journal, line)) {
+    ddl_journal_event_t ev;
+    if (!parse_journal_line(line, ev)) {
+      continue;
+    }
+    events++;
+
+    if (ev.type == "SYSTEM_REDO_DISABLE") {
+      xb::error() << "delta backup: redo logging was disabled on the server"
+                  << " (ALTER INSTANCE DISABLE INNODB REDO_LOG) during the"
+                  << " backup. The backup is not consistent.";
+      return false;
+    }
+
+    if (ev.type == "SPACE_ALTER_INPLACE") {
+      /* Instance/metadata level notification; no file impact. */
+      continue;
+    }
+
+    if (ev.begin) {
+      pending[{ev.type, ev.space_id}] = ev;
+      continue;
+    }
+
+    /* END event: pair with its BEGIN (may be missing if the journal was
+    enabled mid-operation; fall back to empty begin path). */
+    ddl_journal_event_t begin_ev;
+    auto it = pending.find({ev.type, ev.space_id});
+    if (it != pending.end()) {
+      begin_ev = it->second;
+      pending.erase(it);
+    } else {
+      begin_ev.path.clear();
+    }
+
+    if (ev.type == "SPACE_CREATE") {
+      if (!ev.path.empty()) {
+        add_create_table_from_redo(ev.space_id, ev.lsn, ev.path.c_str());
+      }
+    } else if (ev.type == "SPACE_DROP") {
+      if (!begin_ev.path.empty()) {
+        add_drop_table_from_redo(ev.space_id, ev.lsn, begin_ev.path.c_str());
+      }
+    } else if (ev.type == "SPACE_RENAME") {
+      if (!begin_ev.path.empty() && !ev.path.empty()) {
+        add_rename_table_from_redo(ev.space_id, ev.lsn, begin_ev.path.c_str(),
+                                   ev.path.c_str());
+        /* The delta pass cannot read the space through its (stale) fil node
+        name after a rename; recopy it in full under the lock instead — the
+        recopy path reopens the file by its current name. */
+        add_to_recopy_tables(ev.space_id, ev.lsn, "rename");
+      }
+    } else if (ev.type == "SPACE_ALTER_ENCRYPT" ||
+               ev.type == "SPACE_ALTER_ENCRYPT_GENERAL" ||
+               ev.type == "SPACE_ALTER_ENCRYPT_GENERAL_FLAGS") {
+      add_to_recopy_tables(ev.space_id, ev.lsn, "encryption");
+    } else if (ev.type == "SPACE_ALTER_INPLACE_BULK") {
+      add_to_recopy_tables(ev.space_id, ev.lsn, "bulk index load");
+    } else if (ev.type == "SPACE_UNDO_DDL" || ev.type == "SPACE_IMPORT") {
+      /* Undo create/drop/truncate and discard/import: the file is dropped
+      and/or recreated outside the regular redo-logged path. If the space
+      existed at BEGIN treat it as dropped; if it exists at END treat it as
+      (re)created so it is recopied in full under the lock. */
+      if (!begin_ev.path.empty()) {
+        add_drop_table_from_redo(ev.space_id, begin_ev.lsn,
+                                 begin_ev.path.c_str());
+      }
+      if (!ev.path.empty()) {
+        add_create_table_from_redo(ev.space_id, ev.lsn, ev.path.c_str());
+      }
+    } else {
+      xb::warn() << "delta backup: unknown DDL journal event type '" << ev.type
+                 << "' (line: " << line << ")";
+    }
+  }
+
+  if (!pending.empty()) {
+    /* Cannot happen while the backup lock is held: every DDL finished
+    before LOCK INSTANCE FOR BACKUP returned. */
+    xb::error() << "delta backup: DDL journal has " << pending.size()
+                << " unfinished operations; the journal is incomplete";
+    return false;
+  }
+
+  xb::info() << "delta backup: consumed " << events << " DDL journal events";
+  return true;
 }
 
 /**

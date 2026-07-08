@@ -39,6 +39,10 @@ enum lock_ddl_type_t { LOCK_DDL_OFF, LOCK_DDL_ON, LOCK_DDL_REDUCED };
 extern lock_ddl_type_t opt_lock_ddl;
 
 extern ddl_tracker_t *ddl_tracker;
+/** True when DDL tracking is fed from the server backup DDL journal
+(--delta-backup): the redo-parser ddl_tracker hooks must stay inert to avoid
+double-feeding events the journal already carries. */
+extern bool xb_ddl_journal_mode;
 extern std::vector<ulint> invalid_encrypted_tablespace_ids;
 
 /** Fetch tablespace key from "xtrabackup_keys".

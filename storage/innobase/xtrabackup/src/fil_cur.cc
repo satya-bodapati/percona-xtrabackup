@@ -144,7 +144,7 @@ xb_fil_cur_result_t xb_fil_cur_open(
   tablespace or srv_close_files is true. Otherwise we open the file here.
   srv_close_files has an effect only on IBD tablespaces. */
   if (cursor->is_system || !srv_backup_mode ||
-      (srv_close_files && cursor->is_ibd)) {
+      (srv_close_files && (cursor->is_ibd || xb_delta_recopy_active))) {
     if (!fil_node_open_file(node)) {
       /* The following call prints an error message */
 

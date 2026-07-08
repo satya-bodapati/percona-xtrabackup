@@ -147,6 +147,26 @@ class ddl_tracker_t {
   @return DB_SUCCESS for success, others for errors */
   dberr_t handle_ddl_operations();
 
+  /** Feed DDL events from the server backup DDL journal (--delta-backup).
+  Replaces the redo-record parser as the source of the tracking maps. Must
+  be called under the backup lock, after the redo thread has caught up, and
+  before handle_ddl_operations().
+  @param[in] journal_path  path to <datadir>/#ib_backup_tracking/ddl_journal
+  @return true on success, false on error (including SYSTEM_REDO_DISABLE
+  observed during the backup) */
+  bool consume_ddl_journal(const std::string &journal_path);
+
+  /** Recopy pages modified in the tracking window [start_lsn, end_lsn] as
+  .delta/.meta files (--delta-backup). Skips spaces that are dropped or will
+  be fully recopied by handle_ddl_operations(); deltas of renamed spaces are
+  written under the post-rename name so the prepare-side .ren handling lines
+  up. Must run under the backup lock, before handle_ddl_operations() (which
+  reinitializes the fil system).
+  @param[in] start_lsn  page tracking start LSN (S)
+  @param[in] end_lsn    delta fence checkpoint LSN (C1)
+  @return DB_SUCCESS on success */
+  dberr_t delta_recopy(lsn_t start_lsn, lsn_t end_lsn);
+
   /** Note that a table has been deleted between disovery and file open
   @param[in]  path  missing table name with path. */
   void add_missing_after_discovery(const space_id_t space_id);

@@ -1521,6 +1521,31 @@ bool backup_start(Backup_context &context) {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(context.redo_mgr->get_copy_interval()));
     }
+    if (opt_delta_backup) {
+      /* All DDLs are finished (backup lock) and the journal is complete.
+      Feed it into the tracking maps, then recopy the tracked page window
+      [S, C1) as .delta files while the fil system still has every space
+      open — handle_ddl_operations() below reinitializes it. */
+      const std::string journal_path = MySQL_datadir_path.path() +
+                                       "/#ib_backup_tracking/ddl_journal";
+      if (!ddl_tracker->consume_ddl_journal(journal_path)) {
+        return false;
+      }
+
+      xb_mysql_query(mysql_connection,
+                     "SET GLOBAL innodb_backup_ddl_journal = OFF", false,
+                     true);
+
+      dberr_t derr = ddl_tracker->delta_recopy(
+          xb_delta_tracking_start_lsn,
+          context.redo_mgr->get_start_checkpoint_lsn());
+      if (derr != DB_SUCCESS) {
+        xb::error() << "delta_recopy failed with InnoDB DB_ error code: "
+                    << derr;
+        return false;
+      }
+    }
+
     dberr_t err = ddl_tracker->handle_ddl_operations();
     if (err != DB_SUCCESS) {
       xb::error() << "handle_ddl_operations failed with InnoDB DB_ error code: "

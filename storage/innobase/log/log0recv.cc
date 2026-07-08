@@ -1758,7 +1758,10 @@ static const byte *recv_parse_or_apply_log_rec_body(
       if (!recv_recovery_on) {
         if (redo_catchup_completed) {
           if (backup_redo_log_flushed_lsn < recv_sys->recovered_lsn) {
-            if (ddl_tracker) {
+            if (xb_ddl_journal_mode) {
+              /* --delta-backup: the server DDL journal records this bulk
+              operation (SPACE_ALTER_INPLACE_BULK); nothing to do here. */
+            } else if (ddl_tracker) {
               ddl_tracker->backup_file_op(space_id, MLOG_INDEX_LOAD, nullptr, 0,
                                           start_lsn);
             } else {
@@ -1847,7 +1850,7 @@ static const byte *recv_parse_or_apply_log_rec_body(
             full_scan_tables.insert(space_id);
           }
 
-          if (ddl_tracker && redo_catchup_completed)
+          if (ddl_tracker && redo_catchup_completed && !xb_ddl_journal_mode)
             ddl_tracker->backup_file_op(space_id, MLOG_WRITE_STRING, nullptr, 0,
                                         start_lsn);
 #endif /* XTRABACKUP */

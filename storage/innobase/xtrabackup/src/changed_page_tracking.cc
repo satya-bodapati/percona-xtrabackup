@@ -37,16 +37,17 @@ static uint64_t get_uuid_short(MYSQL *connection) {
   return (uuid_short);
 }
 
-/** Read the disk page tracking file and build the changed page tracking map for
-the LSN interval incremental_lsn to checkpoint_lsn_start.
-@param[in] checkpoint_lsn_start  start checkpoint lsn
+/** Read the disk page tracking file and build the changed page tracking map
+for the LSN interval [start_lsn, end_lsn]. See changed_page_tracking.h.
+@param[in] start_lsn             interval start LSN
+@param[in] end_lsn               interval end LSN
 @param[in] connection            MySQL connectionn
 @return the built map or nullptr if unable to build for any reason. */
-xb_space_map *init(lsn_t checkpoint_lsn_start, MYSQL *connection)
+xb_space_map *init(lsn_t start_lsn, lsn_t end_lsn, MYSQL *connection)
 {
   const ulong page_tracking_read_buffer_size = ((srv_log_buffer_size) / 2);
-  lsn_t page_start_lsn = incremental_lsn;
-  lsn_t page_end_lsn = checkpoint_lsn_start;
+  lsn_t page_start_lsn = start_lsn;
+  lsn_t page_end_lsn = end_lsn;
   xb_space_map *space_map = nullptr;
 
   if (page_start_lsn == page_end_lsn) {

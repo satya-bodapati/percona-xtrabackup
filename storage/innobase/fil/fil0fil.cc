@@ -10705,7 +10705,7 @@ const byte *fil_tablespace_redo_create(
   }
 
 #ifdef XTRABACKUP
-  if (ddl_tracker && redo_catchup_completed)
+  if (ddl_tracker && redo_catchup_completed && !xb_ddl_journal_mode)
     ddl_tracker->backup_file_op(page_id.space(), MLOG_FILE_CREATE, start_ptr,
                                 static_cast<ulint>(end - start_ptr),
                                 record_lsn);
@@ -10829,7 +10829,7 @@ const byte *fil_tablespace_redo_rename(
   }
 
 #ifdef XTRABACKUP
-  if (ddl_tracker && redo_catchup_completed)
+  if (ddl_tracker && redo_catchup_completed && !xb_ddl_journal_mode)
     ddl_tracker->backup_file_op(page_id.space(), MLOG_FILE_RENAME, start_ptr,
                                 static_cast<ulint>(end - start_ptr),
                                 record_lsn);
@@ -11096,7 +11096,7 @@ const byte *fil_tablespace_redo_delete(
   }
 
 #ifdef XTRABACKUP
-  if (ddl_tracker && redo_catchup_completed)
+  if (ddl_tracker && redo_catchup_completed && !xb_ddl_journal_mode)
     ddl_tracker->backup_file_op(page_id.space(), MLOG_FILE_DELETE, start_ptr,
                                 static_cast<ulint>(end - start_ptr),
                                 record_lsn);
