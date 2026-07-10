@@ -45,7 +45,7 @@ typedef std::map<space_id_t, xb_page_set> xb_space_map;
 /** Read the disk page tracking file and build the changed page tracking map
 for the LSN interval [start_lsn, end_lsn]. For incremental backups start_lsn
 is incremental_lsn and end_lsn is the backup start checkpoint; for
---delta-backup start_lsn is the page tracking start LSN (S) and end_lsn is
+--copy-strategy=page-tracking start_lsn is the page tracking start LSN (S) and end_lsn is
 the delta fence checkpoint (C1).
 @param[in] start_lsn                interval start LSN
 @param[in] end_lsn                  interval end LSN (must be <= server

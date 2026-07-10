@@ -455,12 +455,19 @@ static ulonglong global_max_value;
 bool opt_galera_info = false;
 bool opt_slave_info = false;
 bool opt_page_tracking = false;
-/** Delta backup: a lock-ddl=REDUCED variant. Phase 1 copies data files with
-no redo activity at all; DDL tracking comes from the server's backup DDL
-journal and modified pages from the page tracking component. After file copy
-the regular redo copy starts (its start checkpoint is the delta fence C1) and
-the tracked pages [S, C1] are recopied as .delta files under the backup
-lock. */
+/** --copy-strategy values. */
+const char *copy_strategy_names[] = {"redo", "page-tracking", NullS};
+TYPELIB copy_strategy_typelib = {array_elements(copy_strategy_names) - 1, "",
+                                 copy_strategy_names, NULL};
+/** --copy-strategy: REDO is today's behavior (copy the full redo stream for
+the whole backup). PAGE_TRACKING is the delta backup: a lock-ddl=REDUCED
+variant where phase 1 copies data files with no redo activity at all; DDL
+tracking comes from the server's backup DDL journal and modified pages from
+the page tracking component. After file copy the regular redo copy starts
+(its start checkpoint is the delta fence C1) and the tracked pages [S, C1]
+are recopied as .delta files under the backup lock. */
+ulong opt_copy_strategy = COPY_STRATEGY_REDO;
+/** True when opt_copy_strategy == PAGE_TRACKING (the delta backup). */
 bool opt_delta_backup = false;
 /** True when DDL tracking is fed from the server DDL journal instead of the
 redo record parser; parser-side ddl_tracker hooks must stay inert. */
@@ -771,7 +778,7 @@ enum options_xtrabackup {
   OPT_MOVE_BACK,
   OPT_GALERA_INFO,
   OPT_PAGE_TRACKING,
-  OPT_DELTA_BACKUP,
+  OPT_COPY_STRATEGY,
   OPT_SLAVE_INFO,
   OPT_NO_LOCK,
   OPT_LOCK_DDL,
@@ -1101,15 +1108,16 @@ struct my_option xb_client_options[] = {
      (uchar *)&opt_page_tracking, (uchar *)&opt_page_tracking, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
 
-    {"delta-backup", OPT_DELTA_BACKUP,
-     "take a full backup in delta mode (requires --lock-ddl=REDUCED, a "
-     "Percona Server with the backup DDL journal, and the mysqlbackup "
-     "component). Instead of copying redo for the whole backup duration, "
-     "xtrabackup copies the data files with no redo activity, then recopies "
-     "the pages modified during the file copy as .delta files and copies only "
-     "a short redo tail. DDL tracking is read from the server DDL journal.",
-     (uchar *)&opt_delta_backup, (uchar *)&opt_delta_backup, 0, GET_BOOL,
-     NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"copy-strategy", OPT_COPY_STRATEGY,
+     "how modified data is captured during the backup. \"redo\" (default): "
+     "copy the redo log for the whole backup duration. \"page-tracking\": "
+     "delta backup - copy the data files with no redo activity, then recopy "
+     "the pages modified during the file copy as .delta files and copy only "
+     "a short redo tail; DDL tracking is read from the server backup DDL "
+     "journal. Requires --lock-ddl=REDUCED, a Percona Server with the backup "
+     "DDL journal, and the mysqlbackup component; full backups only.",
+     &opt_copy_strategy, &opt_copy_strategy, &copy_strategy_typelib, GET_ENUM,
+     REQUIRED_ARG, COPY_STRATEGY_REDO, 0, 0, 0, 0, 0},
 
     {"no-lock", OPT_NO_LOCK,
      "Use this option to disable lock-ddl and table lock "
@@ -4325,13 +4333,17 @@ void xtrabackup_backup_func(void) {
 
   srv_backup_mode = true;
 
+  opt_delta_backup = (opt_copy_strategy == COPY_STRATEGY_PAGE_TRACKING);
+
   if (opt_delta_backup) {
     if (opt_lock_ddl != LOCK_DDL_REDUCED) {
-      xb::error() << "--delta-backup requires --lock-ddl=REDUCED";
+      xb::error() << "--copy-strategy=page-tracking requires"
+                  << " --lock-ddl=REDUCED";
       exit(EXIT_FAILURE);
     }
     if (xtrabackup_incremental) {
-      xb::error() << "--delta-backup cannot be used with incremental backups";
+      xb::error() << "--copy-strategy=page-tracking cannot be used with"
+                  << " incremental backups";
       exit(EXIT_FAILURE);
     }
     xb_ddl_journal_mode = true;
@@ -4520,7 +4532,7 @@ void xtrabackup_backup_func(void) {
                          " performance_schema.user_defined_functions"
                          " WHERE udf_name = 'innodb_backup_ddl_journal_start'",
                          false) == 0) {
-      xb::error() << "--delta-backup: the server does not provide the"
+      xb::error() << "--copy-strategy=page-tracking: the server does not provide the"
                   << " innodb_backup_ddl_journal_* UDFs. A Percona Server"
                   << " with the backup DDL journal is required.";
       exit(EXIT_FAILURE);
@@ -4532,7 +4544,7 @@ void xtrabackup_backup_func(void) {
     free(idstr);
 
     if (xb_delta_journal_id == 0) {
-      xb::error() << "--delta-backup: could not start a DDL journal session";
+      xb::error() << "--copy-strategy=page-tracking: could not start a DDL journal session";
       exit(EXIT_FAILURE);
     }
 
@@ -4560,7 +4572,7 @@ void xtrabackup_backup_func(void) {
 
   if (opt_delta_backup) {
     if (page_tracking_start_lsn == 0) {
-      xb::error() << "--delta-backup: could not start page tracking on the"
+      xb::error() << "--copy-strategy=page-tracking: could not start page tracking on the"
                   << " server. Please install the mysqlbackup component"
                   << " (INSTALL COMPONENT \"file://component_mysqlbackup\")";
       exit(EXIT_FAILURE);

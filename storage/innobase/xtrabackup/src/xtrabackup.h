@@ -180,6 +180,9 @@ extern longlong xtrabackup_use_memory;
 extern bool opt_galera_info;
 extern bool opt_slave_info;
 extern bool opt_page_tracking;
+/** --copy-strategy values. */
+enum copy_strategy_t { COPY_STRATEGY_REDO, COPY_STRATEGY_PAGE_TRACKING };
+extern ulong opt_copy_strategy;
 extern bool opt_delta_backup;
 extern bool xb_delta_recopy_active;
 extern lsn_t xb_delta_tracking_start_lsn;

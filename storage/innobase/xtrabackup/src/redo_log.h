@@ -373,7 +373,7 @@ class Redo_Log_Data_Manager {
   /** stop event. */
   os_event_t event;
 
-  /** error flag. Initialized false: with --delta-backup is_error() is polled
+  /** error flag. Initialized false: with --copy-strategy=page-tracking is_error() is polled
   during the file copy phase, before init() runs. */
   std::atomic<bool> error{false};
 

@@ -1,7 +1,7 @@
 ###############################################################################
 # PXB-XXXX: Delta backup (lock-ddl=REDUCED variant, server-tracked)
 #
-# Round trip of --delta-backup: DML + the full DDL mix (drop/create/rename/
+# Round trip of --copy-strategy=page-tracking: DML + the full DDL mix (drop/create/rename/
 # bulk index load) while the backup is paused before file copy, background
 # DML while the data files are copied, prepare (fixups -> deltas -> redo)
 # and restore, verified against a mysqldump of the source.
@@ -32,7 +32,7 @@ innodb_wait_for_flush_all
 # Pause after page tracking + DDL journal are enabled, before the file copy
 XB_ERROR_LOG=$topdir/backup_delta.log
 xtrabackup_background --backup --target-dir=$topdir/backup_delta \
-  --debug-sync-thread="before_file_copy" --lock-ddl=REDUCED --delta-backup
+  --debug-sync-thread="before_file_copy" --lock-ddl=REDUCED --copy-strategy=page-tracking
 
 job_pid=$XB_PID
 wait_for_debug_sync_thread "before_file_copy"

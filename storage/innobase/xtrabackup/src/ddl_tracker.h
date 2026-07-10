@@ -147,7 +147,7 @@ class ddl_tracker_t {
   @return DB_SUCCESS for success, others for errors */
   dberr_t handle_ddl_operations();
 
-  /** Feed DDL events from the server backup DDL journal (--delta-backup).
+  /** Feed DDL events from the server backup DDL journal (--copy-strategy=page-tracking).
   Replaces the redo-record parser as the source of the tracking maps. Must
   be called under the backup lock, after the redo thread has caught up, and
   before handle_ddl_operations().
@@ -157,7 +157,7 @@ class ddl_tracker_t {
   bool consume_ddl_journal(const std::string &journal_path);
 
   /** Recopy pages modified in the tracking window [start_lsn, end_lsn] as
-  .delta/.meta files (--delta-backup). Skips spaces that are dropped or will
+  .delta/.meta files (--copy-strategy=page-tracking). Skips spaces that are dropped or will
   be fully recopied by handle_ddl_operations(); deltas of renamed spaces are
   written under the post-rename name so the prepare-side .ren handling lines
   up. Must run under the backup lock, before handle_ddl_operations() (which

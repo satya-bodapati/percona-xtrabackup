@@ -393,7 +393,7 @@ static void copy_for_reduced(copy_thread_ctxt_t *ctxt) {
   my_thread_end();
 }
 
-/** Per-thread context of the delta recopy pass (--delta-backup). */
+/** Per-thread context of the delta recopy pass (--copy-strategy=page-tracking). */
 struct delta_copy_ctxt_t {
   datafiles_iter_t *it;
   uint num;
