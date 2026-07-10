@@ -33,6 +33,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "my_rapidjson_size_t.h"
+
+#include <rapidjson/document.h>
+
 #include "backup_copy.h"
 #include "backup_mysql.h"             // mysql_connection
 #include "changed_page_tracking.h"    // pagetracking::init/deinit
@@ -539,42 +544,48 @@ struct ddl_journal_event_t {
   std::string path;
 };
 
-/** Parse one journal line (tab separated:
-seq BEGIN|END type space_id lsn path). Header/comment lines return false.
+/** Parse one JSONL journal line, e.g.
+{"seq":9,"ev":"BEGIN","type":"SPACE_RENAME","space":2,"lsn":19408723,
+ "path":"./test/t1.ibd"}
+Header lines ({"event":"header",...}) and blank lines return false.
+@param[in]  line  one journal line
+@param[out] ev    parsed event
+@param[out] ok    set to false on a malformed line
 @return true if ev was filled */
 static bool parse_journal_line(const std::string &line,
-                               ddl_journal_event_t &ev) {
-  if (line.empty() || line[0] == '#') {
+                               ddl_journal_event_t &ev, bool &ok) {
+  ok = true;
+
+  if (line.empty()) {
     return false;
   }
 
-  std::istringstream is(line);
-  std::string field;
+  rapidjson::Document doc;
+  doc.Parse(line.c_str());
 
-  if (!std::getline(is, field, '\t')) return false;
-  ev.seq = strtoull(field.c_str(), nullptr, 10);
-
-  if (!std::getline(is, field, '\t')) return false;
-  if (field == "BEGIN") {
-    ev.begin = true;
-  } else if (field == "END") {
-    ev.begin = false;
-  } else {
+  if (doc.HasParseError() || !doc.IsObject()) {
+    ok = false;
     return false;
   }
 
-  if (!std::getline(is, ev.type, '\t')) return false;
-
-  if (!std::getline(is, field, '\t')) return false;
-  ev.space_id = static_cast<space_id_t>(strtoull(field.c_str(), nullptr, 10));
-
-  if (!std::getline(is, field, '\t')) return false;
-  ev.lsn = strtoull(field.c_str(), nullptr, 10);
-
-  /* path is the last field and may be empty */
-  if (!std::getline(is, ev.path, '\t')) {
-    ev.path.clear();
+  if (doc.HasMember("event")) {
+    /* header line */
+    return false;
   }
+
+  if (!doc.HasMember("seq") || !doc.HasMember("ev") || !doc.HasMember("type") ||
+      !doc.HasMember("space") || !doc.HasMember("lsn") ||
+      !doc.HasMember("path")) {
+    ok = false;
+    return false;
+  }
+
+  ev.seq = doc["seq"].GetUint64();
+  ev.begin = strcmp(doc["ev"].GetString(), "BEGIN") == 0;
+  ev.type = doc["type"].GetString();
+  ev.space_id = static_cast<space_id_t>(doc["space"].GetUint());
+  ev.lsn = doc["lsn"].GetUint64();
+  ev.path = doc["path"].GetString();
 
   return true;
 }
@@ -600,7 +611,12 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
 
   while (std::getline(journal, line)) {
     ddl_journal_event_t ev;
-    if (!parse_journal_line(line, ev)) {
+    bool line_ok = true;
+    if (!parse_journal_line(line, ev, line_ok)) {
+      if (!line_ok) {
+        xb::error() << "delta backup: malformed DDL journal line: " << line;
+        return false;
+      }
       continue;
     }
     events++;

@@ -1523,18 +1523,36 @@ bool backup_start(Backup_context &context) {
     }
     if (opt_delta_backup) {
       /* All DDLs are finished (backup lock) and the journal is complete.
-      Feed it into the tracking maps, then recopy the tracked page window
-      [S, C1) as .delta files while the fil system still has every space
-      open — handle_ddl_operations() below reinitializes it. */
-      const std::string journal_path = MySQL_datadir_path.path() +
-                                       "/#ib_backup_tracking/ddl_journal";
-      if (!ddl_tracker->consume_ddl_journal(journal_path)) {
+      Cut our session's slice, feed it into the tracking maps, then recopy
+      the tracked page window [S, C1) as .delta files while the fil system
+      still has every space open — handle_ddl_operations() below
+      reinitializes it. */
+      char query[128];
+      snprintf(query, sizeof(query),
+               "SELECT innodb_backup_ddl_journal_cut(%llu)",
+               xb_delta_journal_id);
+      char *slice = read_mysql_one_value(mysql_connection, query);
+      if (slice == nullptr) {
+        xb::error() << "delta backup: DDL journal cut failed for session "
+                    << xb_delta_journal_id;
         return false;
       }
+      const std::string journal_path =
+          MySQL_datadir_path.path() + "/" + slice;
+      free(slice);
 
-      xb_mysql_query(mysql_connection,
-                     "SET GLOBAL innodb_backup_ddl_journal = OFF", false,
-                     true);
+      bool consumed = ddl_tracker->consume_ddl_journal(journal_path);
+
+      /* The slice is read; end the session (this also deletes the slice
+      and, for the last session, the internal journal stream). */
+      snprintf(query, sizeof(query),
+               "SELECT innodb_backup_ddl_journal_stop(%llu)",
+               xb_delta_journal_id);
+      xb_mysql_query(mysql_connection, query, false, false);
+
+      if (!consumed) {
+        return false;
+      }
 
       dberr_t derr = ddl_tracker->delta_recopy(
           xb_delta_tracking_start_lsn,

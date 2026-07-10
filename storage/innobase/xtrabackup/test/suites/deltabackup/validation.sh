@@ -12,8 +12,8 @@ require_debug_pxb_version
 
 start_server
 
-if ! $MYSQL $MYSQL_ARGS -Ns -e "SELECT @@innodb_backup_ddl_journal" >/dev/null 2>&1; then
-  skip_test "server does not have the backup DDL journal (innodb_backup_ddl_journal)"
+if [ "$($MYSQL $MYSQL_ARGS -Ns -e "SELECT COUNT(*) FROM performance_schema.user_defined_functions WHERE udf_name = 'innodb_backup_ddl_journal_start'")" != "1" ]; then
+  skip_test "server does not have the backup DDL journal UDFs"
 fi
 
 run_cmd $MYSQL $MYSQL_ARGS -e "INSTALL COMPONENT \"file://component_mysqlbackup\""

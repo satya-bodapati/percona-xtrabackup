@@ -470,6 +470,8 @@ write filter outside of incremental backups. */
 bool xb_delta_recopy_active = false;
 /** Page tracking start LSN (S) of the delta backup. */
 lsn_t xb_delta_tracking_start_lsn = 0;
+/** DDL journal session id (backup_id) of the delta backup. */
+unsigned long long xb_delta_journal_id = 0;
 /** Value of the delta_backup flag in xtrabackup_checkpoints. */
 ulong metadata_delta_backup = 0;
 bool opt_no_lock = false;
@@ -4511,20 +4513,31 @@ void xtrabackup_backup_func(void) {
   }
 
   if (opt_delta_backup) {
-    /* Enable the server DDL journal before the tablespace scan so every DDL
+    /* Start a DDL journal session before the tablespace scan so every DDL
     that can affect files after they are listed/copied is recorded. */
-    xb_mysql_query(mysql_connection,
-                   "SET GLOBAL innodb_backup_ddl_journal = ON", false);
-    char *journal_on = read_mysql_one_value(
-        mysql_connection, "SELECT @@innodb_backup_ddl_journal");
-    bool enabled = (journal_on != nullptr && strcmp(journal_on, "1") == 0);
-    free(journal_on);
-    if (!enabled) {
-      xb::error() << "--delta-backup: could not enable the backup DDL journal"
-                  << " (innodb_backup_ddl_journal). A Percona Server with the"
-                  << " backup DDL journal is required.";
+    if (xb_mysql_numrows(mysql_connection,
+                         "SELECT udf_name FROM"
+                         " performance_schema.user_defined_functions"
+                         " WHERE udf_name = 'innodb_backup_ddl_journal_start'",
+                         false) == 0) {
+      xb::error() << "--delta-backup: the server does not provide the"
+                  << " innodb_backup_ddl_journal_* UDFs. A Percona Server"
+                  << " with the backup DDL journal is required.";
       exit(EXIT_FAILURE);
     }
+
+    char *idstr = read_mysql_one_value(
+        mysql_connection, "SELECT innodb_backup_ddl_journal_start()");
+    xb_delta_journal_id = idstr != nullptr ? strtoull(idstr, nullptr, 10) : 0;
+    free(idstr);
+
+    if (xb_delta_journal_id == 0) {
+      xb::error() << "--delta-backup: could not start a DDL journal session";
+      exit(EXIT_FAILURE);
+    }
+
+    xb::info() << "delta backup: DDL journal session " << xb_delta_journal_id
+               << " started";
   }
 
   Tablespace_map::instance().scan(mysql_connection);

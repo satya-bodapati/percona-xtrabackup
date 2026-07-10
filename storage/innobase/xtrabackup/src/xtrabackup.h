@@ -183,6 +183,7 @@ extern bool opt_page_tracking;
 extern bool opt_delta_backup;
 extern bool xb_delta_recopy_active;
 extern lsn_t xb_delta_tracking_start_lsn;
+extern unsigned long long xb_delta_journal_id;
 extern ulong metadata_delta_backup;
 extern bool opt_no_lock;
 extern bool opt_safe_slave_backup;
