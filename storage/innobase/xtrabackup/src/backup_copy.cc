@@ -1521,19 +1521,16 @@ bool backup_start(Backup_context &context) {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(context.redo_mgr->get_copy_interval()));
     }
-    if (opt_delta_backup) {
+    if (xb_ddl_journal_mode) {
       /* All DDLs are finished (backup lock) and the journal is complete.
-      Cut our session's slice, feed it into the tracking maps, then recopy
-      the tracked page window [S, C1) as .delta files while the fil system
-      still has every space open — handle_ddl_operations() below
-      reinitializes it. */
+      Cut our session's slice and feed it into the tracking maps. */
       char query[128];
       snprintf(query, sizeof(query),
                "SELECT innodb_backup_ddl_journal_cut(%llu)",
                xb_delta_journal_id);
       char *slice = read_mysql_one_value(mysql_connection, query);
       if (slice == nullptr) {
-        xb::error() << "delta backup: DDL journal cut failed for session "
+        xb::error() << "DDL journal: cut failed for session "
                     << xb_delta_journal_id;
         return false;
       }
@@ -1553,7 +1550,12 @@ bool backup_start(Backup_context &context) {
       if (!consumed) {
         return false;
       }
+    }
 
+    if (opt_delta_backup) {
+      /* Recopy the tracked page window [S, C1) as .delta files while the
+      fil system still has every space open — handle_ddl_operations()
+      below reinitializes it. */
       dberr_t derr = ddl_tracker->delta_recopy(
           xb_delta_tracking_start_lsn,
           context.redo_mgr->get_start_checkpoint_lsn());

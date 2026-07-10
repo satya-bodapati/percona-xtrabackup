@@ -632,12 +632,12 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
 
   std::ifstream journal(journal_path);
   if (!journal.is_open()) {
-    xb::error() << "delta backup: cannot open the server DDL journal "
+    xb::error() << "DDL journal: cannot open the server DDL journal "
                 << journal_path;
     return false;
   }
 
-  xb::info() << "delta backup: consuming DDL journal " << journal_path;
+  xb::info() << "DDL journal: consuming " << journal_path;
 
   /* BEGIN events pending their END, keyed by (type, space_id). Clone_notify
   is stack scoped, so per (type, space) the events pair up in order. */
@@ -651,7 +651,7 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
     bool line_ok = true;
     if (!parse_journal_line(line, ev, line_ok)) {
       if (!line_ok) {
-        xb::error() << "delta backup: malformed DDL journal line: " << line;
+        xb::error() << "DDL journal: malformed line: " << line;
         return false;
       }
       continue;
@@ -659,7 +659,7 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
     events++;
 
     if (ev.type == "SYSTEM_REDO_DISABLE") {
-      xb::error() << "delta backup: redo logging was disabled on the server"
+      xb::error() << "DDL journal: redo logging was disabled on the server"
                   << " (ALTER INSTANCE DISABLE INNODB REDO_LOG) during the"
                   << " backup. The backup is not consistent.";
       return false;
@@ -718,7 +718,7 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
         add_create_table_from_redo(ev.space_id, ev.lsn, ev.path.c_str());
       }
     } else {
-      xb::warn() << "delta backup: unknown DDL journal event type '" << ev.type
+      xb::warn() << "DDL journal: unknown event type '" << ev.type
                  << "' (line: " << line << ")";
     }
   }
@@ -726,12 +726,12 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
   if (!pending.empty()) {
     /* Cannot happen while the backup lock is held: every DDL finished
     before LOCK INSTANCE FOR BACKUP returned. */
-    xb::error() << "delta backup: DDL journal has " << pending.size()
+    xb::error() << "DDL journal: journal has " << pending.size()
                 << " unfinished operations; the journal is incomplete";
     return false;
   }
 
-  xb::info() << "delta backup: consumed " << events << " DDL journal events";
+  xb::info() << "DDL journal: consumed " << events << " events";
   return true;
 }
 

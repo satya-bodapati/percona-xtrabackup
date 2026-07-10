@@ -72,7 +72,7 @@ if ! egrep -q "delta backup: redo copy started from checkpoint LSN" $topdir/back
   die "delta backup did not defer the redo copy"
 fi
 
-if ! egrep -q "delta backup: consumed [0-9]+ DDL journal events" $topdir/backup_delta.log ; then
+if ! egrep -q "DDL journal: consumed [0-9]+ events" $topdir/backup_delta.log ; then
   die "delta backup did not consume the DDL journal"
 fi
 

@@ -363,7 +363,13 @@ Targeted tests (each maps to an invariant or wrinkle):
    stream. Concurrent backups are correct by construction — no advisory
    lock needed. The `innodb_backup_ddl_journal` sysvar is gone. Orphan
    slice cleanup: later.
-3. **Option**: `--copy-strategy=redo|page-tracking` (default `redo`).
+3. **Two explicit axes**: `--copy-strategy=redo|page-tracking` (default
+   `redo`) selects changed-DATA capture; `--ddl-tracking=auto|redo|component`
+   (default `auto`) selects DDL detection under REDUCED. `auto` uses the
+   server DDL journal whenever the server provides it (so classic REDUCED
+   on Percona Server is journal-fed too) and falls back to redo parsing on
+   upstream MySQL. `page-tracking` requires component tracking.
+   Original item: `--copy-strategy=redo|page-tracking` (default `redo`).
    page-tracking requires `--lock-ddl=REDUCED` for now; lock-ddl=ON support
    (needs neither journal nor fixups) is a planned, smaller variant;
    lock-ddl=OFF is rejected.

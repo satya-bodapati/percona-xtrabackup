@@ -35,6 +35,25 @@ run_cmd_expect_failure $XB_BIN $XB_ARGS --backup \
   2> >( tee $topdir/fail1b.log)
 rm -rf $topdir/backup_fail
 
+# 1c. --ddl-tracking=component without --lock-ddl=REDUCED must fail
+run_cmd_expect_failure $XB_BIN $XB_ARGS --backup \
+  --target-dir=$topdir/backup_fail --ddl-tracking=component \
+  2> >( tee $topdir/fail1c.log)
+if ! egrep -q "ddl-tracking=component requires --lock-ddl=REDUCED" $topdir/fail1c.log ; then
+  die "missing ddl-tracking lock-ddl validation error"
+fi
+rm -rf $topdir/backup_fail
+
+# 1d. page-tracking copy strategy with the parser explicitly forced must fail
+run_cmd_expect_failure $XB_BIN $XB_ARGS --backup \
+  --target-dir=$topdir/backup_fail --lock-ddl=REDUCED \
+  --copy-strategy=page-tracking --ddl-tracking=redo \
+  2> >( tee $topdir/fail1d.log)
+if ! egrep -q "copy-strategy=page-tracking requires the server backup DDL journal" $topdir/fail1d.log ; then
+  die "missing page-tracking/ddl-tracking cross validation error"
+fi
+rm -rf $topdir/backup_fail
+
 # 2. --copy-strategy=page-tracking with incremental must fail
 xtrabackup --backup --target-dir=$topdir/full --lock-ddl=REDUCED
 run_cmd_expect_failure $XB_BIN $XB_ARGS --backup \

@@ -469,6 +469,20 @@ are recopied as .delta files under the backup lock. */
 ulong opt_copy_strategy = COPY_STRATEGY_REDO;
 /** True when opt_copy_strategy == PAGE_TRACKING (the delta backup). */
 bool opt_delta_backup = false;
+/** --ddl-tracking values. */
+const char *ddl_tracking_names[] = {"auto", "redo", "component", NullS};
+TYPELIB ddl_tracking_typelib = {array_elements(ddl_tracking_names) - 1, "",
+                                ddl_tracking_names, NULL};
+enum ddl_tracking_t {
+  DDL_TRACKING_AUTO,
+  DDL_TRACKING_REDO,
+  DDL_TRACKING_COMPONENT
+};
+/** --ddl-tracking: how DDLs are detected under lock-ddl=REDUCED. "redo"
+parses redo log records (works on any supported server); "component" reads
+the server backup DDL journal (Percona Server); "auto" (default) uses the
+component whenever the server provides it, redo otherwise. */
+ulong opt_ddl_tracking = DDL_TRACKING_AUTO;
 /** True when DDL tracking is fed from the server DDL journal instead of the
 redo record parser; parser-side ddl_tracker hooks must stay inert. */
 bool xb_ddl_journal_mode = false;
@@ -779,6 +793,7 @@ enum options_xtrabackup {
   OPT_GALERA_INFO,
   OPT_PAGE_TRACKING,
   OPT_COPY_STRATEGY,
+  OPT_DDL_TRACKING,
   OPT_SLAVE_INFO,
   OPT_NO_LOCK,
   OPT_LOCK_DDL,
@@ -1118,6 +1133,16 @@ struct my_option xb_client_options[] = {
      "DDL journal, and the mysqlbackup component; full backups only.",
      &opt_copy_strategy, &opt_copy_strategy, &copy_strategy_typelib, GET_ENUM,
      REQUIRED_ARG, COPY_STRATEGY_REDO, 0, 0, 0, 0, 0},
+
+    {"ddl-tracking", OPT_DDL_TRACKING,
+     "how DDLs are detected during a --lock-ddl=REDUCED backup. \"redo\" "
+     "(classic): parse redo log records; works with any supported server. "
+     "\"component\": read the server backup DDL journal "
+     "(innodb_backup_ddl_journal_* UDFs, Percona Server only). \"auto\" "
+     "(default): use the component whenever the server provides it, redo "
+     "otherwise. --copy-strategy=page-tracking requires \"component\".",
+     &opt_ddl_tracking, &opt_ddl_tracking, &ddl_tracking_typelib, GET_ENUM,
+     REQUIRED_ARG, DDL_TRACKING_AUTO, 0, 0, 0, 0, 0},
 
     {"no-lock", OPT_NO_LOCK,
      "Use this option to disable lock-ddl and table lock "
@@ -4346,7 +4371,51 @@ void xtrabackup_backup_func(void) {
                   << " incremental backups";
       exit(EXIT_FAILURE);
     }
-    xb_ddl_journal_mode = true;
+  }
+
+  /* Resolve the DDL tracking source. Under lock-ddl=REDUCED the server
+  backup DDL journal (component) is preferred whenever the server provides
+  it; redo record parsing is the fallback for servers without it. */
+  if (opt_lock_ddl == LOCK_DDL_REDUCED) {
+    const bool has_journal_udfs =
+        xb_mysql_numrows(mysql_connection,
+                         "SELECT udf_name FROM"
+                         " performance_schema.user_defined_functions"
+                         " WHERE udf_name = 'innodb_backup_ddl_journal_start'",
+                         false) > 0;
+
+    switch (static_cast<ddl_tracking_t>(opt_ddl_tracking)) {
+      case DDL_TRACKING_AUTO:
+        xb_ddl_journal_mode = has_journal_udfs;
+        break;
+      case DDL_TRACKING_COMPONENT:
+        if (!has_journal_udfs) {
+          xb::error() << "--ddl-tracking=component: the server does not"
+                      << " provide the innodb_backup_ddl_journal_* UDFs. A"
+                      << " Percona Server with the backup DDL journal is"
+                      << " required.";
+          exit(EXIT_FAILURE);
+        }
+        xb_ddl_journal_mode = true;
+        break;
+      case DDL_TRACKING_REDO:
+        xb_ddl_journal_mode = false;
+        break;
+    }
+
+    xb::info() << "DDL tracking source: "
+               << (xb_ddl_journal_mode ? "server DDL journal (component)"
+                                       : "redo log parsing");
+  } else if (opt_ddl_tracking == DDL_TRACKING_COMPONENT) {
+    xb::error() << "--ddl-tracking=component requires --lock-ddl=REDUCED";
+    exit(EXIT_FAILURE);
+  }
+
+  if (opt_delta_backup && !xb_ddl_journal_mode) {
+    xb::error() << "--copy-strategy=page-tracking requires the server backup"
+                << " DDL journal (--ddl-tracking=component or a server that"
+                << " provides the innodb_backup_ddl_journal_* UDFs)";
+    exit(EXIT_FAILURE);
   }
 
   if (opt_lock_ddl == LOCK_DDL_ON) {
@@ -4524,31 +4593,20 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
 
-  if (opt_delta_backup) {
+  if (xb_ddl_journal_mode) {
     /* Start a DDL journal session before the tablespace scan so every DDL
     that can affect files after they are listed/copied is recorded. */
-    if (xb_mysql_numrows(mysql_connection,
-                         "SELECT udf_name FROM"
-                         " performance_schema.user_defined_functions"
-                         " WHERE udf_name = 'innodb_backup_ddl_journal_start'",
-                         false) == 0) {
-      xb::error() << "--copy-strategy=page-tracking: the server does not provide the"
-                  << " innodb_backup_ddl_journal_* UDFs. A Percona Server"
-                  << " with the backup DDL journal is required.";
-      exit(EXIT_FAILURE);
-    }
-
     char *idstr = read_mysql_one_value(
         mysql_connection, "SELECT innodb_backup_ddl_journal_start()");
     xb_delta_journal_id = idstr != nullptr ? strtoull(idstr, nullptr, 10) : 0;
     free(idstr);
 
     if (xb_delta_journal_id == 0) {
-      xb::error() << "--copy-strategy=page-tracking: could not start a DDL journal session";
+      xb::error() << "DDL journal: could not start a journal session";
       exit(EXIT_FAILURE);
     }
 
-    xb::info() << "delta backup: DDL journal session " << xb_delta_journal_id
+    xb::info() << "DDL journal: session " << xb_delta_journal_id
                << " started";
   }
 
