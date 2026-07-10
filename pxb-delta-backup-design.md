@@ -349,13 +349,44 @@ Targeted tests (each maps to an invariant or wrinkle):
     abort + no tracking residue.
   - Page-compressed and zip tablespaces through delta apply.
 
-## 12. Open questions
+## 12. Settled decisions (design review, July 2026)
 
-1. α default and whether auto mode should also weigh prepare-time (RTO)
-   explicitly or leave that to the tunable.
-2. Delta spool location for streamed backups (datadir tracking dir vs
-   direct hand-off) — disk headroom story for very large deltas.
-3. Journal + delta directory naming/permissions; SELinux/AppArmor notes.
-4. Exact SQL surface: UDFs (precedent: mysqlbackup component) vs admin
-   commands; privilege = BACKUP_ADMIN.
-5. Upstream contribution of the DDL-notify service — file the intent?
+1. **Page tracking is always-on and durable once started** — the SQL
+   surface funnels every external consumer through the archiver's single
+   durable system client, so per-backup stop/purge is unsafe with any
+   concurrent consumer. Known limitation; a per-session non-durable client
+   needs new server surface (Phase 2+).
+2. **DDL journal v2**: one internal JSONL stream + session registry;
+   `innodb_backup_ddl_journal_start()/cut(id)/stop(id)` UDFs (registered by
+   InnoDB, like innodb_redo_log_consumer_*). cut materializes the session's
+   slice `ddl_journal.<backup_id>`; stop deletes it; last stop deletes the
+   stream. Concurrent backups are correct by construction — no advisory
+   lock needed. The `innodb_backup_ddl_journal` sysvar is gone. Orphan
+   slice cleanup: later.
+3. **Option**: `--copy-strategy=redo|page-tracking` (default `redo`).
+   page-tracking requires `--lock-ddl=REDUCED` for now; lock-ddl=ON support
+   (needs neither journal nor fixups) is a planned, smaller variant;
+   lock-ddl=OFF is rejected.
+4. **Renamed tables**: delta is written under the OLD name; the source is
+   read via the journal's new path (PXB's fil node is repointed under the
+   lock). Prepare's `.ren` handling already renames the base file and its
+   `.delta`/`.meta` together (the incremental-only gates were widened to
+   delta backups). No full recopy.
+5. **The redo tail keeps using the existing copy/parse infra** — removing
+   record-parse from the tail is an optimization for later.
+6. Upstream contribution: revisit only after a fully working PS model.
+
+## 13. Known limitations (v1)
+
+- Page tracking stays enabled (durable) after the first delta backup;
+  disk usage of the archiver grows until manually stopped/purged.
+- A PXB crash mid-backup leaves a journal session registered (the internal
+  stream keeps growing by a few bytes per DDL until server restart);
+  orphan-cleanup logic is future work.
+- Undo tablespace truncation during the backup maps to drop+recreate and
+  is recopied in full; not specifically tested yet — treat as limitation.
+- `mysql.ibd` is effectively copied twice (base + full-file delta, because
+  the page-tracking read filter always full-scans the dict space).
+- DISCARD/IMPORT during backup maps to drop+recreate; untested.
+- Short backups against servers with large checkpoint age wait at the cut
+  for the checkpoint to pass the tracking start LSN (passive 1s polling).

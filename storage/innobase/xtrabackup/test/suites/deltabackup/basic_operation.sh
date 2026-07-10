@@ -21,7 +21,7 @@ fi
 run_cmd $MYSQL $MYSQL_ARGS -e "INSTALL COMPONENT \"file://component_mysqlbackup\""
 
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.delete_table (id INT PRIMARY KEY AUTO_INCREMENT);" test
-$MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.original_table (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.original_table VALUES(1)" test
+$MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.original_table (id INT PRIMARY KEY AUTO_INCREMENT, pad VARCHAR(200)); INSERT INTO test.original_table(pad) VALUES (REPEAT('a', 100)), (REPEAT('b', 100)), (REPEAT('c', 100));" test
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.op_ddl (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50)); INSERT INTO test.op_ddl VALUES(1, 'test')" test
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.dml_table (id INT PRIMARY KEY AUTO_INCREMENT, pad VARCHAR(200));" test
 PAD=$(printf 'x%.0s' {1..100})
@@ -41,10 +41,15 @@ wait_for_debug_sync_thread "before_file_copy"
 $MYSQL $MYSQL_ARGS -Ns -e "UPDATE test.dml_table SET pad = REPEAT('y', 150) WHERE id % 3 = 0;" test
 $MYSQL $MYSQL_ARGS -Ns -e "INSERT INTO test.dml_table(pad) SELECT pad FROM test.dml_table LIMIT 500;" test
 
+# Modify the to-be-renamed table inside the window: its changed pages must
+# land in the backup as a .delta under the OLD name (renamed tables are NOT
+# fully recopied)
+$MYSQL $MYSQL_ARGS -Ns -e "UPDATE test.original_table SET pad = REPEAT('r', 150);" test
+
 # The DDL mix, recorded by the server DDL journal (not by redo parsing)
 $MYSQL $MYSQL_ARGS -Ns -e "INSERT INTO test.delete_table VALUES (1); DROP TABLE test.delete_table;" test
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.new_table (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.new_table VALUES (), ();" test
-$MYSQL $MYSQL_ARGS -Ns -e "RENAME TABLE test.original_table TO test.renamed_table; INSERT INTO test.renamed_table VALUES (2);" test
+$MYSQL $MYSQL_ARGS -Ns -e "RENAME TABLE test.original_table TO test.renamed_table; INSERT INTO test.renamed_table(pad) VALUES (REPEAT('d', 100));" test
 $MYSQL $MYSQL_ARGS -Ns -e "ALTER TABLE test.op_ddl ADD INDEX(name); INSERT INTO test.op_ddl VALUES (2, 'test2');" test
 
 # Make the DML durable inside the window so the delta pass has pages to copy
@@ -97,6 +102,14 @@ if ! egrep -q "DDL tracking : LSN: [0-9]* bulk index load on space ID: [0-9]*" $
   die "journal-fed DDL tracking did not handle bulk index load"
 fi
 
+# The rename here happens BEFORE the file copy (the pause is pre-copy), so
+# the table is missing-after-discovery and must be fully recopied under its
+# new name; no delta under either name (rename-after-copy is covered by the
+# rename_after_copy test)
+if [ -f $topdir/backup_delta/test/original_table.ibd.delta ]; then
+  die "unexpected delta for a table renamed before its file copy"
+fi
+
 # metadata must carry the delta flag for prepare
 if ! egrep -q "delta_backup = 1" $topdir/backup_delta/xtrabackup_checkpoints ; then
   die "xtrabackup_checkpoints does not record delta_backup = 1"
@@ -108,6 +121,7 @@ xtrabackup --prepare --target-dir=$topdir/backup_delta \
 if ! egrep -q "Delta backup: applying .delta files" $topdir/prepare_delta.log ; then
   die "prepare did not apply the delta files"
 fi
+
 
 record_db_state test
 stop_server

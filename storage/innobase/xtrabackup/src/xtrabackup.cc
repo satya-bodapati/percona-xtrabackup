@@ -7122,7 +7122,9 @@ skip_check:
 
     // This should be done before handling .del files. Because we have to delete
     // the correct delta files for the corresponding .del files.
-    if (xtrabackup_incremental_dir) {
+    // Delta backups (--copy-strategy=page-tracking) carry .delta/.meta in the
+    // backup dir itself; the map drives their renaming in .ren handling.
+    if (xtrabackup_incremental_dir || metadata_delta_backup != 0) {
       // Build meta map
       if (!xb_process_datadir(
               xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
