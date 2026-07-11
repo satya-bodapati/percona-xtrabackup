@@ -381,6 +381,13 @@ Targeted tests (each maps to an invariant or wrinkle):
 5. **The redo tail keeps using the existing copy/parse infra** — removing
    record-parse from the tail is an optimization for later.
 6. Upstream contribution: revisit only after a fully working PS model.
+7. **page-tracking copy strategy is for FULL backups only — permanent.**
+   Incrementals are short (small redo window) and their cost is the page
+   copy itself, which a catch-up delta pass would not reduce; fast
+   incrementals already use --page-tracking for the page list. The
+   .delta-name collision between an incremental's main output and the
+   catch-up pass (solvable via delta segment appends) is therefore not
+   worth solving. The combination stays rejected (validation-tested).
 
 ## 13. Known limitations (v1)
 
