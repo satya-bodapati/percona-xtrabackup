@@ -1572,6 +1572,18 @@ bool backup_start(Backup_context &context) {
                   << err;
       return false;
     }
+  } else if (opt_delta_backup) {
+    /* lock-ddl=ON: the instance lock has been held since the backup start,
+    so no DDLs happened — no fixups, no renames; just recopy the tracked
+    page window [S, C1). */
+    dberr_t derr = xb_delta_recopy(
+        xb_delta_tracking_start_lsn,
+        context.redo_mgr->get_start_checkpoint_lsn(), {}, {});
+    if (derr != DB_SUCCESS) {
+      xb::error() << "xb_delta_recopy failed with InnoDB DB_ error code: "
+                  << derr;
+      return false;
+    }
   }
 
   xb::info() << "Executing FLUSH NO_WRITE_TO_BINLOG BINARY LOGS";

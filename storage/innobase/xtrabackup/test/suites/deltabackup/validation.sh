@@ -20,11 +20,13 @@ run_cmd $MYSQL $MYSQL_ARGS -e "INSTALL COMPONENT \"file://component_mysqlbackup\
 
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.t1 (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.t1 VALUES (), (), ();" test
 
-# 1. --copy-strategy=page-tracking without --lock-ddl=REDUCED must fail
+# 1. --copy-strategy=page-tracking with --lock-ddl=OFF must fail
+# (REDUCED and ON are both supported)
 run_cmd_expect_failure $XB_BIN $XB_ARGS --backup \
   --target-dir=$topdir/backup_fail --copy-strategy=page-tracking \
+  --lock-ddl=OFF \
   2> >( tee $topdir/fail1.log)
-if ! egrep -q "copy-strategy=page-tracking requires --lock-ddl=REDUCED" $topdir/fail1.log ; then
+if ! egrep -q "copy-strategy=page-tracking requires --lock-ddl=REDUCED or --lock-ddl=ON" $topdir/fail1.log ; then
   die "missing lock-ddl validation error"
 fi
 rm -rf $topdir/backup_fail

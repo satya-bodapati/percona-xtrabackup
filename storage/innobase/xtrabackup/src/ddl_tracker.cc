@@ -465,20 +465,6 @@ dberr_t ddl_tracker_t::delta_recopy(lsn_t start_lsn, lsn_t end_lsn) {
   ut_a(opt_delta_backup);
   ut_ad(handle_ddl_ops == false);
 
-  if (start_lsn >= end_lsn) {
-    xb::info() << "delta backup: empty tracking window [" << start_lsn << ", "
-               << end_lsn << "], no pages to recopy";
-    return DB_SUCCESS;
-  }
-
-  changed_page_tracking =
-      pagetracking::init(start_lsn, end_lsn, mysql_connection);
-  if (changed_page_tracking == nullptr) {
-    xb::error() << "delta backup: could not get the tracked page set for ["
-                << start_lsn << ", " << end_lsn << "]";
-    return DB_ERROR;
-  }
-
   std::unordered_set<space_id_t> skip;
   for (const auto &t : new_tables) {
     skip.insert(t.first);
@@ -502,6 +488,31 @@ dberr_t ddl_tracker_t::delta_recopy(lsn_t start_lsn, lsn_t end_lsn) {
   for (const auto &t : corrupted_tablespaces) {
     skip.insert(t.first);
   }
+
+  return xb_delta_recopy(start_lsn, end_lsn, skip, renames);
+}
+
+dberr_t xb_delta_recopy(
+    lsn_t start_lsn, lsn_t end_lsn,
+    const std::unordered_set<space_id_t> &skip,
+    const std::unordered_map<space_id_t, std::pair<std::string, std::string>>
+        &renames) {
+  ut_a(opt_delta_backup);
+
+  if (start_lsn >= end_lsn) {
+    xb::info() << "delta backup: empty tracking window [" << start_lsn << ", "
+               << end_lsn << "], no pages to recopy";
+    return DB_SUCCESS;
+  }
+
+  changed_page_tracking =
+      pagetracking::init(start_lsn, end_lsn, mysql_connection);
+  if (changed_page_tracking == nullptr) {
+    xb::error() << "delta backup: could not get the tracked page set for ["
+                << start_lsn << ", " << end_lsn << "]";
+    return DB_ERROR;
+  }
+
   /* Renamed spaces: PXB's fil node still holds the pre-rename path; point
   it at the current on-disk path so the delta pass can read the pages (we
   are under the backup lock; no fil activity is concurrent with this). The

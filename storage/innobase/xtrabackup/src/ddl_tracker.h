@@ -185,6 +185,21 @@ class ddl_tracker_t {
   bool is_tablespace_dropped(const space_id_t space_id);
 };
 
+/** Recopy pages modified in the tracking window [start_lsn, end_lsn] as
+.delta/.meta files under XB_DELTA_DIR (--copy-strategy=page-tracking core,
+shared by lock-ddl=REDUCED — via ddl_tracker_t::delta_recopy — and
+lock-ddl=ON, where there are no DDLs and both sets are empty).
+@param[in] start_lsn  page tracking start LSN (S)
+@param[in] end_lsn    delta fence checkpoint LSN (C1)
+@param[in] skip       spaces that must not get a delta
+@param[in] renames    renamed spaces (delta under the old name)
+@return DB_SUCCESS on success */
+dberr_t xb_delta_recopy(
+    lsn_t start_lsn, lsn_t end_lsn,
+    const std::unordered_set<space_id_t> &skip,
+    const std::unordered_map<space_id_t, std::pair<std::string, std::string>>
+        &renames);
+
 /** Insert into meta files map. This map is later used to delete the right
 .meta and .delta files for a given space_id.del file
 @param[in] space_id Tablespace id

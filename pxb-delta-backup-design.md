@@ -368,7 +368,10 @@ Targeted tests (each maps to an invariant or wrinkle):
    (default `auto`) selects DDL detection under REDUCED. `auto` uses the
    server DDL journal whenever the server provides it (so classic REDUCED
    on Percona Server is journal-fed too) and falls back to redo parsing on
-   upstream MySQL. `page-tracking` requires component tracking.
+   upstream MySQL. `page-tracking` requires component tracking under
+   REDUCED; under `lock-ddl=ON` it needs neither journal nor fixups (the
+   instance lock blocks every DDL) — supported since the ON variant
+   (xb_delta_recopy with empty skip/rename sets). `lock-ddl=OFF` rejected.
    Original item: `--copy-strategy=redo|page-tracking` (default `redo`).
    page-tracking requires `--lock-ddl=REDUCED` for now; lock-ddl=ON support
    (needs neither journal nor fixups) is a planned, smaller variant;

@@ -1130,8 +1130,9 @@ struct my_option xb_client_options[] = {
      "delta backup - copy the data files with no redo activity, then recopy "
      "the pages modified during the file copy as .delta files and copy only "
      "a short redo tail; DDL tracking is read from the server backup DDL "
-     "journal. Requires --lock-ddl=REDUCED, a Percona Server with the backup "
-     "DDL journal, and the mysqlbackup component; full backups only.",
+     "journal. Requires --lock-ddl=REDUCED (with the Percona Server backup "
+     "DDL journal) or --lock-ddl=ON, and the mysqlbackup component; full "
+     "backups only.",
      &opt_copy_strategy, &opt_copy_strategy, &copy_strategy_typelib, GET_ENUM,
      REQUIRED_ARG, COPY_STRATEGY_REDO, 0, 0, 0, 0, 0},
 
@@ -4370,9 +4371,9 @@ void xtrabackup_backup_func(void) {
   opt_delta_backup = (opt_copy_strategy == COPY_STRATEGY_PAGE_TRACKING);
 
   if (opt_delta_backup) {
-    if (opt_lock_ddl != LOCK_DDL_REDUCED) {
+    if (opt_lock_ddl == LOCK_DDL_OFF) {
       xb::error() << "--copy-strategy=page-tracking requires"
-                  << " --lock-ddl=REDUCED";
+                  << " --lock-ddl=REDUCED or --lock-ddl=ON";
       exit(EXIT_FAILURE);
     }
     if (xtrabackup_incremental) {
@@ -4420,7 +4421,11 @@ void xtrabackup_backup_func(void) {
     exit(EXIT_FAILURE);
   }
 
-  if (opt_delta_backup && !xb_ddl_journal_mode) {
+  /* Under REDUCED the delta mode needs the DDL journal for the fixups;
+  under lock-ddl=ON the instance lock blocks every DDL, so neither the
+  journal nor the fixup machinery is involved. */
+  if (opt_delta_backup && opt_lock_ddl == LOCK_DDL_REDUCED &&
+      !xb_ddl_journal_mode) {
     xb::error() << "--copy-strategy=page-tracking requires the server backup"
                 << " DDL journal (--ddl-tracking=component or a server that"
                 << " provides the innodb_backup_ddl_journal_* UDFs)";
