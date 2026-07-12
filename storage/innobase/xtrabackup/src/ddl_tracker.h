@@ -40,6 +40,10 @@ inline const std::string EXT_DELTA = ".delta";
 inline const std::string EXT_NEW_DELTA = ".new.delta";
 inline const std::string EXT_CRPT = ".crpt";
 
+/** Directory inside a --copy-strategy=page-tracking full backup holding the
+delta pass output (.delta/.meta). Consumed and removed at prepare. */
+#define XB_DELTA_DIR "#xb_delta"
+
 class ddl_tracker_t {
  private:
   /** List of all tables copied without lock */

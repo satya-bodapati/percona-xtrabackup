@@ -81,7 +81,7 @@ if ! egrep -q "delta backup: page recopy complete" $topdir/backup_delta.log ; th
 fi
 
 # .delta files must exist in the backup (DML window was flushed inside [S,C1])
-if ! find $topdir/backup_delta -name "*.delta" | grep -q . ; then
+if ! find $topdir/backup_delta/#xb_delta -name "*.delta" 2>/dev/null | grep -q . ; then
   die "delta backup produced no .delta files"
 fi
 
@@ -106,7 +106,7 @@ fi
 # the table is missing-after-discovery and must be fully recopied under its
 # new name; no delta under either name (rename-after-copy is covered by the
 # rename_after_copy test)
-if [ -f $topdir/backup_delta/test/original_table.ibd.delta ]; then
+if [ -f "$topdir/backup_delta/#xb_delta/test/original_table.ibd.delta" ]; then
   die "unexpected delta for a table renamed before its file copy"
 fi
 

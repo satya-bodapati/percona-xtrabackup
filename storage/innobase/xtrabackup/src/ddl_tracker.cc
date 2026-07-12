@@ -495,6 +495,13 @@ dberr_t ddl_tracker_t::delta_recopy(lsn_t start_lsn, lsn_t end_lsn) {
   for (const auto &t : missing_after_discovery) {
     skip.insert(t);
   }
+  /* Corrupted tablespaces (encryption change races): their base file is
+  removed by the .crpt handling at prepare and they are recopied in full;
+  a stray delta for them must never exist. Usually covered indirectly via
+  recopy_tables (the encryption journal event), but make it explicit. */
+  for (const auto &t : corrupted_tablespaces) {
+    skip.insert(t.first);
+  }
   /* Renamed spaces: PXB's fil node still holds the pre-rename path; point
   it at the current on-disk path so the delta pass can read the pages (we
   are under the backup lock; no fil activity is concurrent with this). The
@@ -1401,7 +1408,13 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
   if (xtrabackup_incremental || metadata_delta_backup != 0) {
     auto [exists, meta_file] = is_in_meta_map(source_space_id);
     if (exists) {
-      std::string to_path = entry.datadir;
+      /* Incremental: delta/meta live next to the .ren file (the incremental
+      dir). Delta full: the .ren is at the backup top level but delta/meta
+      live under XB_DELTA_DIR. */
+      std::string to_path =
+          xtrabackup_incremental ? entry.datadir
+                                 : entry.datadir + OS_PATH_SEPARATOR +
+                                       XB_DELTA_DIR;
       if (!to_path.empty() && to_path.back() != OS_PATH_SEPARATOR) {
         to_path += OS_PATH_SEPARATOR;
       }
