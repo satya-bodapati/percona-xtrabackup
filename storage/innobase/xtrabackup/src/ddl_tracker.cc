@@ -394,6 +394,202 @@ static void copy_for_reduced(copy_thread_ctxt_t *ctxt) {
   my_thread_end();
 }
 
+/** Per-thread context of the delta recopy pass (--copy-strategy=clone). */
+struct delta_copy_ctxt_t {
+  datafiles_iter_t *it;
+  uint num;
+  uint *count;
+  ib_mutex_t *count_mutex;
+  bool *error;
+  /** spaces that must not get a delta: dropped or fully recopied later by
+  handle_ddl_operations() */
+  const std::unordered_set<space_id_t> *skip;
+  /** renames observed during backup: source is read through the updated fil
+  node path, the delta is written under the OLD name so that prepare's .ren
+  handling renames the base file and the .delta/.meta together */
+  const std::unordered_map<space_id_t, std::pair<std::string, std::string>>
+      *renames;
+};
+
+/** Thread function of the delta recopy pass: copy the tracked pages of every
+eligible tablespace through the incremental (.delta) write filter. The page
+selection is driven by the global changed_page_tracking map via
+rf_page_tracking. */
+static void copy_for_delta(delta_copy_ctxt_t *ctxt) {
+  uint num = ctxt->num;
+  fil_node_t *node;
+
+  my_thread_init();
+
+  THD *thd = create_thd(false, false, true, 0, 0);
+  debug_sync_point("copy_for_delta");
+
+  while ((node = datafiles_iter_next(ctxt->it)) != NULL && !*(ctxt->error)) {
+    const space_id_t space_id = node->space->id;
+
+    if (ctxt->skip->find(space_id) != ctxt->skip->end()) {
+      continue;
+    }
+
+    /* mysql.ibd is always full-scanned by rf_page_tracking; every other
+    space is copied only if the tracking window touched it. */
+    if (space_id != dict_sys_t::s_dict_space_id &&
+        changed_page_tracking->count(space_id) == 0) {
+      continue;
+    }
+
+    const char *dest_name = nullptr;
+    std::string old_name;
+    auto rn = ctxt->renames->find(space_id);
+    if (rn != ctxt->renames->end()) {
+      /* write the delta under the pre-rename name, matching the base file
+      already in the backup */
+      old_name = rn->second.first;
+      dest_name = old_name.c_str();
+    }
+
+    if (xtrabackup_copy_datafile_func(node, num, dest_name)) {
+      xb::error() << "failed to write delta for datafile " << node->name;
+      *(ctxt->error) = true;
+    }
+  }
+
+  mutex_enter(ctxt->count_mutex);
+  (*ctxt->count)--;
+  mutex_exit(ctxt->count_mutex);
+
+  destroy_thd(thd);
+  my_thread_end();
+}
+
+dberr_t ddl_tracker_t::delta_recopy(lsn_t start_lsn, lsn_t end_lsn) {
+  ut_a(opt_delta_backup);
+  ut_ad(handle_ddl_ops == false);
+
+  std::unordered_set<space_id_t> skip;
+  for (const auto &t : new_tables) {
+    skip.insert(t.first);
+  }
+  for (const auto &t : recopy_tables) {
+    skip.insert(t);
+  }
+  for (const auto &t : drops) {
+    skip.insert(t.first);
+  }
+  /* Missing after discovery (e.g. renamed or dropped before their file was
+  copied): the base file is not in the backup under any name, so a delta
+  must not be written — handle_ddl_operations() recopies them in full. */
+  for (const auto &t : missing_after_discovery) {
+    skip.insert(t);
+  }
+  /* Corrupted tablespaces (encryption change races): their base file is
+  removed by the .crpt handling at prepare and they are recopied in full;
+  a stray delta for them must never exist. Usually covered indirectly via
+  recopy_tables (the encryption journal event), but make it explicit. */
+  for (const auto &t : corrupted_tablespaces) {
+    skip.insert(t.first);
+  }
+
+  return xb_delta_recopy(start_lsn, end_lsn, skip, renames);
+}
+
+dberr_t xb_delta_recopy(
+    lsn_t start_lsn, lsn_t end_lsn,
+    const std::unordered_set<space_id_t> &skip,
+    const std::unordered_map<space_id_t, std::pair<std::string, std::string>>
+        &renames) {
+  ut_a(opt_delta_backup);
+
+  if (start_lsn >= end_lsn) {
+    xb::info() << "delta backup: empty tracking window [" << start_lsn << ", "
+               << end_lsn << "], no pages to recopy";
+    return DB_SUCCESS;
+  }
+
+  changed_page_tracking =
+      pagetracking::init(start_lsn, end_lsn, mysql_connection);
+  if (changed_page_tracking == nullptr) {
+    xb::error() << "delta backup: could not get the tracked page set for ["
+                << start_lsn << ", " << end_lsn << "]";
+    return DB_ERROR;
+  }
+
+  /* Renamed spaces: PXB's fil node still holds the pre-rename path; point
+  it at the current on-disk path so the delta pass can read the pages (we
+  are under the backup lock; no fil activity is concurrent with this). The
+  delta itself is written under the OLD name. */
+  for (const auto &r : renames) {
+    if (skip.count(r.first) != 0) {
+      continue; /* dropped or fully recopied anyway */
+    }
+    fil_space_t *space = fil_space_get(r.first);
+    if (space == nullptr || space->files.empty()) {
+      continue;
+    }
+    fil_node_t *node = &space->files.front();
+    const std::string new_path = "./" + r.second.second;
+    xb::info() << "delta backup: renamed space " << r.first
+               << " will be read from " << new_path
+               << " and written as delta of " << r.second.first;
+    ut::free(node->name);
+    node->name = mem_strdup(new_path.c_str());
+  }
+
+  xb::info() << "delta backup: recopying pages modified in [" << start_lsn
+             << ", " << end_lsn << "] from "
+             << changed_page_tracking->size() << " tablespaces ("
+             << skip.size() << " superseded by DDL handling)";
+
+  xb_delta_recopy_active = true;
+
+  delta_copy_ctxt_t *data_threads = (delta_copy_ctxt_t *)ut::malloc_withkey(
+      UT_NEW_THIS_FILE_PSI_KEY,
+      sizeof(delta_copy_ctxt_t) * xtrabackup_parallel);
+  uint count = xtrabackup_parallel;
+  ib_mutex_t count_mutex;
+  mutex_create(LATCH_ID_XTRA_COUNT_MUTEX, &count_mutex);
+  bool data_copying_error = false;
+  datafiles_iter_t *it = datafiles_iter_new(nullptr);
+  for (uint i = 0; i < (uint)xtrabackup_parallel; i++) {
+    data_threads[i].it = it;
+    data_threads[i].num = i + 1;
+    data_threads[i].count = &count;
+    data_threads[i].count_mutex = &count_mutex;
+    data_threads[i].error = &data_copying_error;
+    data_threads[i].skip = &skip;
+    data_threads[i].renames = &renames;
+    os_thread_create(PFS_NOT_INSTRUMENTED, i, copy_for_delta, data_threads + i)
+        .start();
+  }
+
+  /* Wait for threads to exit */
+  while (1) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    mutex_enter(&count_mutex);
+    if (count == 0) {
+      mutex_exit(&count_mutex);
+      break;
+    }
+    mutex_exit(&count_mutex);
+  }
+
+  mutex_free(&count_mutex);
+  ut::free(data_threads);
+  datafiles_iter_free(it);
+
+  xb_delta_recopy_active = false;
+  pagetracking::deinit(changed_page_tracking);
+  changed_page_tracking = nullptr;
+
+  if (data_copying_error) {
+    xb::error() << "delta backup: page recopy failed";
+    return DB_ERROR;
+  }
+
+  xb::info() << "delta backup: page recopy complete";
+  return DB_SUCCESS;
+}
+
 /** One parsed backup DDL journal event. */
 struct ddl_journal_event_t {
   uint64_t seq;
@@ -1329,7 +1525,8 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
     // error
     // in case of incrementals, the original file might be present as .delta
     // So ignore the debug check for incrementals.
-    if (!os_file_exists(dest_path) && !xtrabackup_incremental) {
+    if (!os_file_exists(dest_path) && !xtrabackup_incremental &&
+        metadata_delta_backup == 0) {
       xb::error() << "prepare_handle_ren_files: Tablespace with space_id "
                   << source_space_id << " is not found."
                   << " Destination path " << dest_path << " is also not found ";
@@ -1341,10 +1538,20 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
   }
 
   // rename .delta .meta files as well
-  if (xtrabackup_incremental) {
+  if (xtrabackup_incremental || metadata_delta_backup != 0) {
     auto [exists, meta_file] = is_in_meta_map(source_space_id);
     if (exists) {
-      std::string to_path = entry.datadir + ren_file_content;
+      /* Incremental: delta/meta live next to the .ren file (the incremental
+      dir). Delta full: the .ren is at the backup top level but delta/meta
+      live under XB_DELTA_DIR. */
+      std::string to_path =
+          xtrabackup_incremental ? entry.datadir
+                                 : entry.datadir + OS_PATH_SEPARATOR +
+                                       XB_DELTA_DIR;
+      if (!to_path.empty() && to_path.back() != OS_PATH_SEPARATOR) {
+        to_path += OS_PATH_SEPARATOR;
+      }
+      to_path += ren_file_content;
 
       // create .delta path from .meta
       std::string delta_file = meta_file;
@@ -1529,7 +1736,7 @@ bool xtrabackup_scan_meta(const datadir_entry_t &entry, void *) {
   IORequest read_request(IORequest::READ);
   IORequest write_request(IORequest::WRITE | IORequest::PUNCH_HOLE);
 
-  ut_a(xtrabackup_incremental);
+  ut_a(xtrabackup_incremental || metadata_delta_backup != 0);
 
   // We shouldn't add .new.meta to meta_map, as they are meant to be replaced
   // with the old version of the file.

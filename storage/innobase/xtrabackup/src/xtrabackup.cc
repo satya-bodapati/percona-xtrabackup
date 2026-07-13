@@ -456,6 +456,20 @@ static ulonglong global_max_value;
 bool opt_galera_info = false;
 bool opt_slave_info = false;
 bool opt_page_tracking = false;
+/** --copy-strategy values. */
+const char *copy_strategy_names[] = {"redo", "clone", NullS};
+TYPELIB copy_strategy_typelib = {array_elements(copy_strategy_names) - 1, "",
+                                 copy_strategy_names, NULL};
+/** --copy-strategy: REDO is today's behavior (copy the full redo stream for
+the whole backup). CLONE is the delta backup: a lock-ddl=REDUCED
+variant where phase 1 copies data files with no redo activity at all; DDL
+tracking comes from the server's backup DDL journal and modified pages from
+the page tracking component. After file copy the regular redo copy starts
+(its start checkpoint is the delta fence C1) and the tracked pages [S, C1]
+are recopied as .delta files under the backup lock. */
+ulong opt_copy_strategy = COPY_STRATEGY_REDO;
+/** True when opt_copy_strategy == CLONE (the delta backup). */
+bool opt_delta_backup = false;
 /** --ddl-tracking values. */
 const char *ddl_tracking_names[] = {"auto", "redo", "server", NullS};
 TYPELIB ddl_tracking_typelib = {array_elements(ddl_tracking_names) - 1, "",
@@ -473,8 +487,15 @@ ulong opt_ddl_tracking = DDL_TRACKING_AUTO;
 /** True when DDL tracking is fed from the server DDL journal instead of the
 redo record parser; parser-side ddl_tracker hooks must stay inert. */
 bool xb_ddl_journal_mode = false;
-/** DDL journal session id (backup_id) for --ddl-tracking=server. */
+/** True while the delta recopy pass runs; selects the incremental (.delta)
+write filter outside of incremental backups. */
+bool xb_delta_recopy_active = false;
+/** Page tracking start LSN (S) of the delta backup. */
+lsn_t xb_delta_tracking_start_lsn = 0;
+/** DDL journal session id (backup_id) of the delta backup. */
 unsigned long long xb_delta_journal_id = 0;
+/** Value of the delta_backup flag in xtrabackup_checkpoints. */
+ulong metadata_delta_backup = 0;
 bool opt_no_lock = false;
 bool opt_safe_slave_backup = false;
 bool opt_rsync = false;
@@ -772,6 +793,7 @@ enum options_xtrabackup {
   OPT_MOVE_BACK,
   OPT_GALERA_INFO,
   OPT_PAGE_TRACKING,
+  OPT_COPY_STRATEGY,
   OPT_DDL_TRACKING,
   OPT_SLAVE_INFO,
   OPT_NO_LOCK,
@@ -1102,13 +1124,25 @@ struct my_option xb_client_options[] = {
      (uchar *)&opt_page_tracking, (uchar *)&opt_page_tracking, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
 
+    {"copy-strategy", OPT_COPY_STRATEGY,
+     "how modified data is captured during the backup. \"redo\" (default): "
+     "copy the redo log for the whole backup duration. \"clone\": "
+     "delta backup - copy the data files with no redo activity, then recopy "
+     "the pages modified during the file copy as .delta files and copy only "
+     "a short redo tail; DDL tracking is read from the server backup DDL "
+     "journal. Requires --lock-ddl=REDUCED (with the Percona Server backup "
+     "DDL journal) or --lock-ddl=ON, and the mysqlbackup component; full "
+     "backups only.",
+     &opt_copy_strategy, &opt_copy_strategy, &copy_strategy_typelib, GET_ENUM,
+     REQUIRED_ARG, COPY_STRATEGY_REDO, 0, 0, 0, 0, 0},
+
     {"ddl-tracking", OPT_DDL_TRACKING,
      "how DDLs are detected during a --lock-ddl=REDUCED backup. \"redo\" "
      "(classic): parse redo log records; works with any supported server. "
      "\"server\": read the server backup DDL journal "
      "(innodb_backup_ddl_journal_* UDFs, Percona Server only). \"auto\" "
      "(default): use the server journal whenever the server provides it, redo "
-     "otherwise.",
+     "otherwise. --copy-strategy=clone requires \"server\".",
      &opt_ddl_tracking, &opt_ddl_tracking, &ddl_tracking_typelib, GET_ENUM,
      REQUIRED_ARG, DDL_TRACKING_AUTO, 0, 0, 0, 0, 0},
 
@@ -2779,6 +2813,9 @@ static bool xtrabackup_read_metadata(char *filename) {
   if (fscanf(fp, "redo_frames = %lu\n", &redo_frames) != 1) {
     redo_frames = 0;
   }
+  if (fscanf(fp, "delta_backup = %lu\n", &metadata_delta_backup) != 1) {
+    metadata_delta_backup = 0;
+  }
 
 end:
   fclose(fp);
@@ -2802,11 +2839,12 @@ static void xtrabackup_print_metadata(char *buf, size_t buf_len) {
            "flushed_lsn = " LSN_PF
            "\n"
            "redo_memory = %ld\n"
-           "redo_frames = %ld\n",
+           "redo_frames = %ld\n"
+           "delta_backup = %lu\n",
            metadata_type_str, metadata_from_lsn, metadata_to_lsn,
            metadata_last_lsn,
            opt_lock_ddl == LOCK_DDL_ON ? backup_redo_log_flushed_lsn : 0,
-           redo_memory, redo_frames);
+           redo_memory, redo_frames, metadata_delta_backup);
 }
 
 /***********************************************************************
@@ -3293,12 +3331,20 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
     goto error;
   }
 
-  strncpy(dst_name, dest_name ? dest_name : cursor.rel_path,
-          sizeof dst_name - 1);
-  dst_name[sizeof(dst_name) - 1] = '\0';
+  if (xb_delta_recopy_active) {
+    /* The delta pass of --copy-strategy=clone keeps its .delta/.meta
+    under XB_DELTA_DIR so the top level of a full backup never contains
+    incremental-looking files. */
+    snprintf(dst_name, sizeof(dst_name), "%s/%s", XB_DELTA_DIR,
+             dest_name ? dest_name : cursor.rel_path);
+  } else {
+    strncpy(dst_name, dest_name ? dest_name : cursor.rel_path,
+            sizeof dst_name - 1);
+    dst_name[sizeof(dst_name) - 1] = '\0';
+  }
 
   /* Setup the page write filter */
-  if (xtrabackup_incremental) {
+  if (xtrabackup_incremental || xb_delta_recopy_active) {
     write_filter = &wf_incremental;
   } else {
     write_filter = &wf_write_through;
@@ -4322,9 +4368,24 @@ void xtrabackup_backup_func(void) {
 
   srv_backup_mode = true;
 
+  opt_delta_backup = (opt_copy_strategy == COPY_STRATEGY_CLONE);
+
+  if (opt_delta_backup) {
+    if (opt_lock_ddl == LOCK_DDL_OFF) {
+      xb::error() << "--copy-strategy=clone requires"
+                  << " --lock-ddl=REDUCED or --lock-ddl=ON";
+      exit(EXIT_FAILURE);
+    }
+    if (xtrabackup_incremental) {
+      xb::error() << "--copy-strategy=clone cannot be used with"
+                  << " incremental backups";
+      exit(EXIT_FAILURE);
+    }
+  }
+
   /* Resolve the DDL tracking source. Under lock-ddl=REDUCED the server
-  backup DDL journal is preferred whenever the server provides it; redo
-  record parsing is the fallback for servers without it. */
+  backup DDL journal is preferred whenever the server provides
+  it; redo record parsing is the fallback for servers without it. */
   if (opt_lock_ddl == LOCK_DDL_REDUCED) {
     const bool has_journal_udfs =
         xb_mysql_numrows(mysql_connection,
@@ -4357,6 +4418,17 @@ void xtrabackup_backup_func(void) {
                                        : "redo log parsing");
   } else if (opt_ddl_tracking == DDL_TRACKING_SERVER) {
     xb::error() << "--ddl-tracking=server requires --lock-ddl=REDUCED";
+    exit(EXIT_FAILURE);
+  }
+
+  /* Under REDUCED the delta mode needs the DDL journal for the fixups;
+  under lock-ddl=ON the instance lock blocks every DDL, so neither the
+  journal nor the fixup machinery is involved. */
+  if (opt_delta_backup && opt_lock_ddl == LOCK_DDL_REDUCED &&
+      !xb_ddl_journal_mode) {
+    xb::error() << "--copy-strategy=clone requires the server backup"
+                << " DDL journal (--ddl-tracking=server or a server that"
+                << " provides the innodb_backup_ddl_journal_* UDFs)";
     exit(EXIT_FAILURE);
   }
 
@@ -4476,7 +4548,7 @@ void xtrabackup_backup_func(void) {
   /* Delta backup: no redo activity during the file copy phase. The redo
   manager is initialized and started after the data files are copied; the
   start checkpoint it finds then is the delta fence C1. */
-  if (!redo_mgr.init()) {
+  if (!opt_delta_backup && !redo_mgr.init()) {
     exit(EXIT_FAILURE);
   }
 
@@ -4531,7 +4603,7 @@ void xtrabackup_backup_func(void) {
   wait_throttle = os_event_create();
   os_thread_create(PFS_NOT_INSTRUMENTED, 0, io_watching_thread).start();
 
-  if (!redo_mgr.start()) {
+  if (!opt_delta_backup && !redo_mgr.start()) {
     exit(EXIT_FAILURE);
   }
 
@@ -4564,17 +4636,28 @@ void xtrabackup_backup_func(void) {
   debug_sync_point("xtrabackup_suspend_at_start");
 
   lsn_t page_tracking_start_lsn = 0;
-  if (opt_page_tracking &&
+  if ((opt_page_tracking || opt_delta_backup) &&
       pagetracking::start(mysql_connection, &page_tracking_start_lsn)) {
     xb::info() << "pagetracking is started on the server with LSN "
                << page_tracking_start_lsn;
+  }
+
+  if (opt_delta_backup) {
+    if (page_tracking_start_lsn == 0) {
+      xb::error() << "--copy-strategy=clone: could not start page tracking on the"
+                  << " server. Please install the mysqlbackup component"
+                  << " (INSTALL COMPONENT \"file://component_mysqlbackup\")";
+      exit(EXIT_FAILURE);
+    }
+    xb_delta_tracking_start_lsn = page_tracking_start_lsn;
   }
 
   if (xtrabackup_incremental) {
     incremental_start_checkpoint_lsn = redo_mgr.get_start_checkpoint_lsn();
     if (!xtrabackup_incremental_force_scan && opt_page_tracking) {
       changed_page_tracking = pagetracking::init(
-          redo_mgr.get_start_checkpoint_lsn(), mysql_connection);
+          incremental_lsn, redo_mgr.get_start_checkpoint_lsn(),
+          mysql_connection);
     }
 
     if (changed_page_tracking) {
@@ -4644,6 +4727,44 @@ void xtrabackup_backup_func(void) {
     pagetracking::deinit(changed_page_tracking);
   }
 
+  if (opt_delta_backup) {
+    /* File copy is complete: start the regular redo copy now. Its start
+    checkpoint is the delta fence C1. Page tracking data is complete only up
+    to the server checkpoint (tracking records pages at the IO layer), so
+    wait for the checkpoint to pass the tracking start LSN S before fixing
+    C1: this also guarantees that every page modified before S was on disk
+    before the file copy read it. */
+    while (true) {
+      log_status_get(mysql_connection, false);
+      if (log_status.lsn_checkpoint >= xb_delta_tracking_start_lsn) {
+        break;
+      }
+      xb::info() << "delta backup: waiting for checkpoint LSN "
+                 << log_status.lsn_checkpoint
+                 << " to reach page tracking start LSN "
+                 << xb_delta_tracking_start_lsn;
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    /* A master-key rotation during the file-copy phase re-wraps the encrypted
+    redo log header with a key xtrabackup did not have at startup; reload the
+    keyring so the redo header can be decrypted. See PXB-XXXX. */
+    if (!xtrabackup::components::reload_keyring()) {
+      xb::error() << "delta backup: failed to reload keyring before redo copy";
+      exit(EXIT_FAILURE);
+    }
+
+    if (!redo_mgr.init() || !redo_mgr.start()) {
+      xb::error() << "delta backup: failed to start redo log copy";
+      exit(EXIT_FAILURE);
+    }
+
+    xb::info() << "delta backup: redo copy started from checkpoint LSN "
+               << redo_mgr.get_start_checkpoint_lsn()
+               << " (page tracking window " << xb_delta_tracking_start_lsn
+               << " - " << redo_mgr.get_start_checkpoint_lsn() << ")";
+  }
+
   Backup_context backup_ctxt;
   backup_ctxt.redo_mgr = &redo_mgr;
 
@@ -4703,6 +4824,7 @@ void xtrabackup_backup_func(void) {
     strcpy(metadata_type_str, "incremental");
     metadata_from_lsn = incremental_lsn;
   }
+  metadata_delta_backup = opt_delta_backup ? 1 : 0;
   metadata_to_lsn = redo_mgr.get_last_checkpoint_lsn();
   metadata_last_lsn = redo_mgr.get_stop_lsn();
 
@@ -5607,7 +5729,7 @@ bool xtrabackup_apply_delta(
   IORequest read_request(IORequest::READ);
   IORequest write_request(IORequest::WRITE | IORequest::PUNCH_HOLE);
 
-  ut_a(xtrabackup_incremental);
+  ut_a(xtrabackup_incremental || metadata_delta_backup != 0);
 
   if (!entry.db_name.empty()) {
     snprintf(src_path, sizeof(src_path), "%s/%s/%s", entry.datadir.c_str(),
@@ -7080,10 +7202,17 @@ skip_check:
 
     // This should be done before handling .del files. Because we have to delete
     // the correct delta files for the corresponding .del files.
-    if (xtrabackup_incremental_dir) {
-      // Build meta map
-      if (!xb_process_datadir(xtrabackup_incremental_dir, EXT_META.c_str(),
-                              xtrabackup_scan_meta, NULL)) {
+    // Delta backups (--copy-strategy=clone) carry .delta/.meta under
+    // XB_DELTA_DIR in the backup dir; the map drives their renaming in .ren
+    // handling.
+    if (xtrabackup_incremental_dir || metadata_delta_backup != 0) {
+      const char *meta_dir = xtrabackup_incremental_dir
+                                 ? xtrabackup_incremental_dir
+                                 : "./" XB_DELTA_DIR;
+      // Build meta map; a delta full without any delta is legitimate
+      if (os_file_exists(meta_dir) &&
+          !xb_process_datadir(meta_dir, EXT_META.c_str(), xtrabackup_scan_meta,
+                              NULL)) {
         xb_data_files_close();
         goto error_cleanup;
       }
@@ -7139,6 +7268,51 @@ skip_check:
 
     if (innodb_init_param()) {
       goto error_cleanup;
+    }
+  }
+
+  if (!xtrabackup_incremental && metadata_delta_backup != 0 &&
+      metadata_type == METADATA_FULL_BACKUP) {
+    /* Delta backup: apply the .delta files that live in the backup directory
+    itself before InnoDB recovery. The redo in this backup starts at the
+    delta fence C1; the deltas hold every page modified between the page
+    tracking start S and C1. Gating on METADATA_FULL_BACKUP makes a second
+    prepare skip this (re-applying deltas over recovered files would lose the
+    already-applied redo). */
+    xb::info() << "Delta backup: applying .delta files from the backup dir";
+    err = xb_data_files_init();
+    if (err != DB_SUCCESS) {
+      xb::error() << "xb_data_files_init() failed "
+                  << "with error code " << err;
+      goto error_cleanup;
+    }
+    inc_dir_tables_hash = ut::new_<hash_table_t>(1000);
+
+    if (os_file_exists("./" XB_DELTA_DIR) &&
+        !run_data_threads("./" XB_DELTA_DIR, EXT_DELTA.c_str(),
+                          xtrabackup_apply_deltas_parallel, xtrabackup_parallel,
+                          "apply-delta")) {
+      xb_data_files_close();
+      xb_filter_hash_free(inc_dir_tables_hash);
+      goto error_cleanup;
+    }
+
+    xb_data_files_close();
+    xb_filter_hash_free(inc_dir_tables_hash);
+
+    /* The deltas are consumed; remove them so the prepared backup is
+    indistinguishable from a classic full (incremental apply, copy-back and
+    tooling need no awareness of the delta mode). */
+    {
+      std::error_code ec;
+      std::filesystem::remove_all("./" XB_DELTA_DIR, ec);
+      if (ec) {
+        xb::warn() << "Delta backup: could not remove " << XB_DELTA_DIR << ": "
+                   << ec.message();
+      } else {
+        xb::info() << "Delta backup: removed " << XB_DELTA_DIR
+                   << " after applying the deltas";
+      }
     }
   }
 

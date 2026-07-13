@@ -1,7 +1,7 @@
 ###############################################################################
 # PXB-XXXX: DISCARD/IMPORT during a classic incremental (lock-ddl=REDUCED)
 #
-# copy-strategy=page-tracking is full-only, but a classic incremental still
+# copy-strategy=clone is full-only, but a classic incremental still
 # uses lock-ddl=REDUCED with the DDL journal, so an import can happen in the
 # incremental's no-lock window. The same machinery must apply at incremental
 # prepare: journal_create resolves the recreate, and the .reimport marker

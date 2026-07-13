@@ -42,12 +42,17 @@ struct xb_page_set {
 /** All spaces and their modified pages */
 typedef std::map<space_id_t, xb_page_set> xb_space_map;
 
-/** Read the disk page tracking file and build the changed page tracking map for
-the LSN interval incremental_lsn to checkpoint_lsn_start.
-@param[in] checkpoint_lsn_start     start checkpoint lsn
+/** Read the disk page tracking file and build the changed page tracking map
+for the LSN interval [start_lsn, end_lsn]. For incremental backups start_lsn
+is incremental_lsn and end_lsn is the backup start checkpoint; for
+--copy-strategy=page-tracking start_lsn is the page tracking start LSN (S) and end_lsn is
+the delta fence checkpoint (C1).
+@param[in] start_lsn                interval start LSN
+@param[in] end_lsn                  interval end LSN (must be <= server
+                                    checkpoint LSN for a complete result)
 @param[in] connection               MySQL connectionn
 @return the built map or nullptr if unable to build for any reason. */
-xb_space_map *init(lsn_t checkpoint_lsn_start, MYSQL *connection);
+xb_space_map *init(lsn_t start_lsn, lsn_t end_lsn, MYSQL *connection);
 
 /* Get the start page-tracking-lsn
 @param[in] connection               MySQL connectionn

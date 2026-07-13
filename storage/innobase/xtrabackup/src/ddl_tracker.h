@@ -45,6 +45,10 @@ MLOG_FILE_CREATE) after a logged DISCARD delete, so prepare must ignore that
 logged delete for this space. See consume_ddl_journal()/journal_create(). */
 inline const std::string EXT_REIMPORT = ".reimport";
 
+/** Directory inside a --copy-strategy=clone full backup holding the
+delta pass output (.delta/.meta). Consumed and removed at prepare. */
+#define XB_DELTA_DIR "#xb_delta"
+
 class ddl_tracker_t {
  private:
   /** List of all tables copied without lock */
@@ -171,14 +175,25 @@ class ddl_tracker_t {
   @return DB_SUCCESS for success, others for errors */
   dberr_t handle_ddl_operations();
 
-  /** Feed DDL events from the server backup DDL journal
-  (--ddl-tracking=server). Replaces the redo-record parser as the source
-  of the tracking maps. Must be called under the backup lock, after the redo
-  thread has caught up, and before handle_ddl_operations().
+  /** Feed DDL events from the server backup DDL journal (--copy-strategy=clone).
+  Replaces the redo-record parser as the source of the tracking maps. Must
+  be called under the backup lock, after the redo thread has caught up, and
+  before handle_ddl_operations().
   @param[in] journal_path  path to <datadir>/#ib_backup_tracking/ddl_journal
   @return true on success, false on error (including SYSTEM_REDO_DISABLE
   observed during the backup) */
   bool consume_ddl_journal(const std::string &journal_path);
+
+  /** Recopy pages modified in the tracking window [start_lsn, end_lsn] as
+  .delta/.meta files (--copy-strategy=clone). Skips spaces that are dropped or will
+  be fully recopied by handle_ddl_operations(); deltas of renamed spaces are
+  written under the post-rename name so the prepare-side .ren handling lines
+  up. Must run under the backup lock, before handle_ddl_operations() (which
+  reinitializes the fil system).
+  @param[in] start_lsn  page tracking start LSN (S)
+  @param[in] end_lsn    delta fence checkpoint LSN (C1)
+  @return DB_SUCCESS on success */
+  dberr_t delta_recopy(lsn_t start_lsn, lsn_t end_lsn);
 
   /** Note that a table has been deleted between disovery and file open
   @param[in]  path  missing table name with path. */
@@ -193,6 +208,21 @@ class ddl_tracker_t {
   @param[in]    space_id tablespace id */
   bool is_tablespace_dropped(const space_id_t space_id);
 };
+
+/** Recopy pages modified in the tracking window [start_lsn, end_lsn] as
+.delta/.meta files under XB_DELTA_DIR (--copy-strategy=clone core,
+shared by lock-ddl=REDUCED — via ddl_tracker_t::delta_recopy — and
+lock-ddl=ON, where there are no DDLs and both sets are empty).
+@param[in] start_lsn  page tracking start LSN (S)
+@param[in] end_lsn    delta fence checkpoint LSN (C1)
+@param[in] skip       spaces that must not get a delta
+@param[in] renames    renamed spaces (delta under the old name)
+@return DB_SUCCESS on success */
+dberr_t xb_delta_recopy(
+    lsn_t start_lsn, lsn_t end_lsn,
+    const std::unordered_set<space_id_t> &skip,
+    const std::unordered_map<space_id_t, std::pair<std::string, std::string>>
+        &renames);
 
 /** Insert into meta files map. This map is later used to delete the right
 .meta and .delta files for a given space_id.del file

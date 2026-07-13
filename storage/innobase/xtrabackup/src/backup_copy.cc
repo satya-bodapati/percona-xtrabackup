@@ -1552,10 +1552,36 @@ bool backup_start(Backup_context &context) {
       }
     }
 
+    if (opt_delta_backup) {
+      /* Recopy the tracked page window [S, C1) as .delta files while the
+      fil system still has every space open — handle_ddl_operations()
+      below reinitializes it. */
+      dberr_t derr = ddl_tracker->delta_recopy(
+          xb_delta_tracking_start_lsn,
+          context.redo_mgr->get_start_checkpoint_lsn());
+      if (derr != DB_SUCCESS) {
+        xb::error() << "delta_recopy failed with InnoDB DB_ error code: "
+                    << derr;
+        return false;
+      }
+    }
+
     dberr_t err = ddl_tracker->handle_ddl_operations();
     if (err != DB_SUCCESS) {
       xb::error() << "handle_ddl_operations failed with InnoDB DB_ error code: "
                   << err;
+      return false;
+    }
+  } else if (opt_delta_backup) {
+    /* lock-ddl=ON: the instance lock has been held since the backup start,
+    so no DDLs happened — no fixups, no renames; just recopy the tracked
+    page window [S, C1). */
+    dberr_t derr = xb_delta_recopy(
+        xb_delta_tracking_start_lsn,
+        context.redo_mgr->get_start_checkpoint_lsn(), {}, {});
+    if (derr != DB_SUCCESS) {
+      xb::error() << "xb_delta_recopy failed with InnoDB DB_ error code: "
+                  << derr;
       return false;
     }
   }

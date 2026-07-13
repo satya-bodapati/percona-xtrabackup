@@ -180,8 +180,14 @@ extern longlong xtrabackup_use_memory;
 extern bool opt_galera_info;
 extern bool opt_slave_info;
 extern bool opt_page_tracking;
-/** DDL journal session id (backup_id) for --ddl-tracking=server. */
+/** --copy-strategy values. */
+enum copy_strategy_t { COPY_STRATEGY_REDO, COPY_STRATEGY_CLONE };
+extern ulong opt_copy_strategy;
+extern bool opt_delta_backup;
+extern bool xb_delta_recopy_active;
+extern lsn_t xb_delta_tracking_start_lsn;
 extern unsigned long long xb_delta_journal_id;
+extern ulong metadata_delta_backup;
 extern bool opt_no_lock;
 extern bool opt_safe_slave_backup;
 extern bool opt_rsync;

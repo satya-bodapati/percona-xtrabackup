@@ -24,8 +24,8 @@ $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.op_ddl (id INT PRIMARY KEY AUTO_INC
 
 innodb_wait_for_flush_all
 
-# --ddl-tracking defaults to auto and must resolve to the server DDL journal
-# on this server
+# Default --copy-strategy (redo); --ddl-tracking defaults to auto and must
+# resolve to the server DDL journal on this server
 XB_ERROR_LOG=$topdir/backup_classic.log
 xtrabackup_background --backup --target-dir=$topdir/backup_classic \
   --debug-sync-thread="before_file_copy" --lock-ddl=REDUCED
@@ -62,9 +62,12 @@ if ! egrep -q "DDL tracking : LSN: [0-9]* bulk index load on space ID: [0-9]*" $
   die "journal-fed DDL tracking did not handle bulk index load"
 fi
 
-# component DDL tracking uses regular redo copy: no deltas produced
+# classic copy strategy: no deltas, no delta metadata flag
 if find $topdir/backup_classic -name "*.delta" | grep -q . ; then
-  die "component-tracking backup produced .delta files"
+  die "classic redo-copy backup produced .delta files"
+fi
+if ! egrep -q "delta_backup = 0" $topdir/backup_classic/xtrabackup_checkpoints ; then
+  die "xtrabackup_checkpoints does not record delta_backup = 0"
 fi
 
 xtrabackup --prepare --target-dir=$topdir/backup_classic
