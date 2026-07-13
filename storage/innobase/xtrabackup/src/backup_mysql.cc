@@ -322,7 +322,7 @@ char *read_mysql_one_value(MYSQL *connection, const char *query) {
 
   ut_ad(mysql_num_fields(mysql_result) == 1);
 
-  if ((row = mysql_fetch_row(mysql_result))) {
+  if ((row = mysql_fetch_row(mysql_result)) && row[0] != nullptr) {
     result = strdup(row[0]);
   }
 

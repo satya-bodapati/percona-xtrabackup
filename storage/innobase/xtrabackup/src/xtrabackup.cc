@@ -49,6 +49,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "log0types.h"
 #include "row0quiesce.h"
 
+#include <filesystem>
 #include <fcntl.h>
 #include <signal.h>
 #include <string.h>
@@ -455,6 +456,25 @@ static ulonglong global_max_value;
 bool opt_galera_info = false;
 bool opt_slave_info = false;
 bool opt_page_tracking = false;
+/** --ddl-tracking values. */
+const char *ddl_tracking_names[] = {"auto", "redo", "server", NullS};
+TYPELIB ddl_tracking_typelib = {array_elements(ddl_tracking_names) - 1, "",
+                                ddl_tracking_names, NULL};
+enum ddl_tracking_t {
+  DDL_TRACKING_AUTO,
+  DDL_TRACKING_REDO,
+  DDL_TRACKING_SERVER
+};
+/** --ddl-tracking: how DDLs are detected under lock-ddl=REDUCED. "redo"
+parses redo log records (works on any supported server); "server" reads
+the server backup DDL journal (Percona Server); "auto" (default) uses the
+server journal whenever the server provides it, redo otherwise. */
+ulong opt_ddl_tracking = DDL_TRACKING_AUTO;
+/** True when DDL tracking is fed from the server DDL journal instead of the
+redo record parser; parser-side ddl_tracker hooks must stay inert. */
+bool xb_ddl_journal_mode = false;
+/** DDL journal session id (backup_id) for --ddl-tracking=server. */
+unsigned long long xb_delta_journal_id = 0;
 bool opt_no_lock = false;
 bool opt_safe_slave_backup = false;
 bool opt_rsync = false;
@@ -752,6 +772,7 @@ enum options_xtrabackup {
   OPT_MOVE_BACK,
   OPT_GALERA_INFO,
   OPT_PAGE_TRACKING,
+  OPT_DDL_TRACKING,
   OPT_SLAVE_INFO,
   OPT_NO_LOCK,
   OPT_LOCK_DDL,
@@ -1080,6 +1101,16 @@ struct my_option xb_client_options[] = {
      "since the last backup.",
      (uchar *)&opt_page_tracking, (uchar *)&opt_page_tracking, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"ddl-tracking", OPT_DDL_TRACKING,
+     "how DDLs are detected during a --lock-ddl=REDUCED backup. \"redo\" "
+     "(classic): parse redo log records; works with any supported server. "
+     "\"server\": read the server backup DDL journal "
+     "(innodb_backup_ddl_journal_* UDFs, Percona Server only). \"auto\" "
+     "(default): use the server journal whenever the server provides it, redo "
+     "otherwise.",
+     &opt_ddl_tracking, &opt_ddl_tracking, &ddl_tracking_typelib, GET_ENUM,
+     REQUIRED_ARG, DDL_TRACKING_AUTO, 0, 0, 0, 0, 0},
 
     {"no-lock", OPT_NO_LOCK,
      "Use this option to disable lock-ddl and table lock "
@@ -4291,6 +4322,44 @@ void xtrabackup_backup_func(void) {
 
   srv_backup_mode = true;
 
+  /* Resolve the DDL tracking source. Under lock-ddl=REDUCED the server
+  backup DDL journal is preferred whenever the server provides it; redo
+  record parsing is the fallback for servers without it. */
+  if (opt_lock_ddl == LOCK_DDL_REDUCED) {
+    const bool has_journal_udfs =
+        xb_mysql_numrows(mysql_connection,
+                         "SELECT udf_name FROM"
+                         " performance_schema.user_defined_functions"
+                         " WHERE udf_name = 'innodb_backup_ddl_journal_start'",
+                         false) > 0;
+
+    switch (static_cast<ddl_tracking_t>(opt_ddl_tracking)) {
+      case DDL_TRACKING_AUTO:
+        xb_ddl_journal_mode = has_journal_udfs;
+        break;
+      case DDL_TRACKING_SERVER:
+        if (!has_journal_udfs) {
+          xb::error() << "--ddl-tracking=server: the server does not"
+                      << " provide the innodb_backup_ddl_journal_* UDFs. A"
+                      << " Percona Server with the backup DDL journal is"
+                      << " required.";
+          exit(EXIT_FAILURE);
+        }
+        xb_ddl_journal_mode = true;
+        break;
+      case DDL_TRACKING_REDO:
+        xb_ddl_journal_mode = false;
+        break;
+    }
+
+    xb::info() << "DDL tracking source: "
+               << (xb_ddl_journal_mode ? "server DDL journal"
+                                       : "redo log parsing");
+  } else if (opt_ddl_tracking == DDL_TRACKING_SERVER) {
+    xb::error() << "--ddl-tracking=server requires --lock-ddl=REDUCED";
+    exit(EXIT_FAILURE);
+  }
+
   if (opt_lock_ddl == LOCK_DDL_ON) {
     xb_dd_spaces = xb::backup::build_space_id_set(mysql_connection);
     ut_ad(xb_dd_spaces->size());
@@ -4404,6 +4473,9 @@ void xtrabackup_backup_func(void) {
   lock_sys_create(srv_lock_table_size);
 
   redo_mgr.set_copy_interval(xtrabackup_log_copy_interval);
+  /* Delta backup: no redo activity during the file copy phase. The redo
+  manager is initialized and started after the data files are copied; the
+  start checkpoint it finds then is the delta fence C1. */
   if (!redo_mgr.init()) {
     exit(EXIT_FAILURE);
   }
@@ -4461,6 +4533,23 @@ void xtrabackup_backup_func(void) {
 
   if (!redo_mgr.start()) {
     exit(EXIT_FAILURE);
+  }
+
+  if (xb_ddl_journal_mode) {
+    /* Start a DDL journal session before the tablespace scan so every DDL
+    that can affect files after they are listed/copied is recorded. */
+    char *idstr = read_mysql_one_value(
+        mysql_connection, "SELECT innodb_backup_ddl_journal_start()");
+    xb_delta_journal_id = idstr != nullptr ? strtoull(idstr, nullptr, 10) : 0;
+    free(idstr);
+
+    if (xb_delta_journal_id == 0) {
+      xb::error() << "DDL journal: could not start a journal session";
+      exit(EXIT_FAILURE);
+    }
+
+    xb::info() << "DDL journal: session " << xb_delta_journal_id
+               << " started";
   }
 
   Tablespace_map::instance().scan(mysql_connection);
@@ -6993,9 +7082,8 @@ skip_check:
     // the correct delta files for the corresponding .del files.
     if (xtrabackup_incremental_dir) {
       // Build meta map
-      if (!xb_process_datadir(
-              xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
-              EXT_META.c_str(), xtrabackup_scan_meta, NULL)) {
+      if (!xb_process_datadir(xtrabackup_incremental_dir, EXT_META.c_str(),
+                              xtrabackup_scan_meta, NULL)) {
         xb_data_files_close();
         goto error_cleanup;
       }
@@ -7007,6 +7095,16 @@ skip_check:
     if (!xb_process_datadir(
             xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
             EXT_DEL.c_str(), prepare_handle_del_files, NULL)) {
+      xb_data_files_close();
+      goto error_cleanup;
+    }
+
+    // Load .reimport markers before recovery so the redo apply ignores the
+    // logged DISCARD delete for tablespaces that were reimported during the
+    // backup (their contents ship as .new; see prepare_handle_reimport_files).
+    if (!xb_process_datadir(
+            xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
+            EXT_REIMPORT.c_str(), prepare_handle_reimport_files, NULL)) {
       xb_data_files_close();
       goto error_cleanup;
     }
@@ -7276,6 +7374,12 @@ skip_check:
   xb_write_galera_info(xtrabackup_incremental);
 
   if (innodb_end()) goto error_cleanup;
+
+  /* Recovery has applied the redo and innodb_end() wrote the shutdown
+  checkpoint, so a re-prepare would start past the reimport's redo. Only now
+  is it safe to remove the .reimport markers (recovery is idempotent until
+  this point). */
+  xb_cleanup_reimport_markers();
 
   innodb_free_param();
 

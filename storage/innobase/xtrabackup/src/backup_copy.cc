@@ -1521,6 +1521,37 @@ bool backup_start(Backup_context &context) {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(context.redo_mgr->get_copy_interval()));
     }
+    if (xb_ddl_journal_mode) {
+      /* All DDLs are finished (backup lock) and the journal is complete.
+      Cut our session's slice and feed it into the tracking maps. */
+      char query[128];
+      snprintf(query, sizeof(query),
+               "SELECT innodb_backup_ddl_journal_cut(%llu)",
+               xb_delta_journal_id);
+      char *slice = read_mysql_one_value(mysql_connection, query);
+      if (slice == nullptr) {
+        xb::error() << "DDL journal: cut failed for session "
+                    << xb_delta_journal_id;
+        return false;
+      }
+      const std::string journal_path =
+          MySQL_datadir_path.path() + "/" + slice;
+      free(slice);
+
+      bool consumed = ddl_tracker->consume_ddl_journal(journal_path);
+
+      /* The slice is read; end the session (this also deletes the slice
+      and, for the last session, the internal journal stream). */
+      snprintf(query, sizeof(query),
+               "SELECT innodb_backup_ddl_journal_stop(%llu)",
+               xb_delta_journal_id);
+      xb_mysql_query(mysql_connection, query, false, false);
+
+      if (!consumed) {
+        return false;
+      }
+    }
+
     dberr_t err = ddl_tracker->handle_ddl_operations();
     if (err != DB_SUCCESS) {
       xb::error() << "handle_ddl_operations failed with InnoDB DB_ error code: "

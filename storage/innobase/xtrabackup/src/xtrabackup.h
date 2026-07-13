@@ -180,6 +180,8 @@ extern longlong xtrabackup_use_memory;
 extern bool opt_galera_info;
 extern bool opt_slave_info;
 extern bool opt_page_tracking;
+/** DDL journal session id (backup_id) for --ddl-tracking=server. */
+extern unsigned long long xb_delta_journal_id;
 extern bool opt_no_lock;
 extern bool opt_safe_slave_backup;
 extern bool opt_rsync;

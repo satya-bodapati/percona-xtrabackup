@@ -39,6 +39,11 @@ inline const std::string EXT_NEW_META = ".new.meta";
 inline const std::string EXT_DELTA = ".delta";
 inline const std::string EXT_NEW_DELTA = ".new.delta";
 inline const std::string EXT_CRPT = ".crpt";
+/** Marker for a tablespace reimported (DISCARD+IMPORT) during a
+--ddl-tracking=server backup. Its content came in physically (no
+MLOG_FILE_CREATE) after a logged DISCARD delete, so prepare must ignore that
+logged delete for this space. See consume_ddl_journal()/journal_create(). */
+inline const std::string EXT_REIMPORT = ".reimport";
 
 class ddl_tracker_t {
  private:
@@ -51,6 +56,14 @@ class ddl_tracker_t {
   name_to_space_id_t after_lock_undo;
   /** Tablespaces involved in encryption or bulk index load.*/
   std::unordered_set<space_id_t> recopy_tables;
+  /** Spaces reimported (DISCARD+IMPORT) during the backup, as resolved from
+  the DDL journal order by journal_create(), mapped to their {name, flags}
+  taken authoritatively from the journal event (a new-id reimport's final id
+  may never have been file-copied, so its flags cannot be looked up locally).
+  At handle_ddl_operations() the net-still-existing ones get a .reimport
+  marker so prepare ignores the logged DISCARD delete (component mode only). */
+  std::unordered_map<space_id_t, std::pair<std::string, ulint>>
+      reimported_tables;
   /** Drop operations found in redo log. */
   space_id_to_name_t drops;
   /* For DDL operation found in redo log,  */
@@ -73,6 +86,17 @@ class ddl_tracker_t {
   std::mutex m_ddl_tracker_mutex;
 
   std::tuple<filevec, filevec> handle_undo_ddls();
+
+  /** Apply a create/import event from the DDL journal with ordered
+  resolution: if the space was dropped earlier in the same journal it is a
+  recreate/import and is recopied in full (drops the stale drop); otherwise a
+  normal new table. See consume_ddl_journal().
+  @param[in] space_id    tablespace identifier
+  @param[in] record_lsn  bracketed LSN of the create/import event
+  @param[in] name        tablespace name
+  @param[in] flags       tablespace flags from the journal event */
+  void journal_create(space_id_t space_id, lsn_t record_lsn, const char *name,
+                      ulint flags);
 
 #ifdef UNIV_DEBUG
   /** Set to true when we do handle_ddl_operations. Used to assert that no
@@ -146,6 +170,15 @@ class ddl_tracker_t {
   /** Handle DDL operations that happenned in reduced lock mode
   @return DB_SUCCESS for success, others for errors */
   dberr_t handle_ddl_operations();
+
+  /** Feed DDL events from the server backup DDL journal
+  (--ddl-tracking=server). Replaces the redo-record parser as the source
+  of the tracking maps. Must be called under the backup lock, after the redo
+  thread has caught up, and before handle_ddl_operations().
+  @param[in] journal_path  path to <datadir>/#ib_backup_tracking/ddl_journal
+  @return true on success, false on error (including SYSTEM_REDO_DISABLE
+  observed during the backup) */
+  bool consume_ddl_journal(const std::string &journal_path);
 
   /** Note that a table has been deleted between disovery and file open
   @param[in]  path  missing table name with path. */
@@ -221,5 +254,25 @@ result: file `schema/filename.ibd.new` will be renamed to `schema/filename.ibd`
 bool prepare_handle_new_files(
     const datadir_entry_t &entry, /*!<in: datadir entry */
     void *arg __attribute__((unused)));
+
+/**
+ * Load a .reimport marker (written for a space reimported via DISCARD+IMPORT
+ * during a --ddl-tracking=server backup) into the reimported-space set, so
+ * recovery ignores the logged DISCARD delete for it. Removes the marker.
+ * @return true on success
+ */
+bool prepare_handle_reimport_files(
+    const datadir_entry_t &entry, /*!<in: datadir entry */
+    void *arg __attribute__((unused)));
+
+/** @return true if the space was reimported during the backup (its logged
+DISCARD delete must be ignored during recovery). */
+bool xb_is_reimported_space(space_id_t space_id);
+
+/** Remove .reimport markers after prepare's recovery has applied the redo and
+checkpointed. Must NOT be called earlier: recovery is idempotent and a
+re-prepare after a crash must re-read the markers to ignore the logged delete
+again. */
+void xb_cleanup_reimport_markers();
 
 #endif  // DDL_TRACKER_H
