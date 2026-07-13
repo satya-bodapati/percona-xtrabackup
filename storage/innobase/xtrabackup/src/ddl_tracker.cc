@@ -595,6 +595,7 @@ struct ddl_journal_event_t {
   bool begin;
   std::string type;
   space_id_t space_id;
+  ulint flags;
   lsn_t lsn;
   std::string path;
 };
@@ -639,10 +640,53 @@ static bool parse_journal_line(const std::string &line,
   ev.begin = strcmp(doc["ev"].GetString(), "BEGIN") == 0;
   ev.type = doc["type"].GetString();
   ev.space_id = static_cast<space_id_t>(doc["space"].GetUint());
+  /* flags added in journal v2.1; default 0 if absent for forward compat. */
+  ev.flags = doc.HasMember("flags") ? doc["flags"].GetUint() : 0;
   ev.lsn = doc["lsn"].GetUint64();
   ev.path = doc["path"].GetString();
 
   return true;
+}
+
+void ddl_tracker_t::journal_create(space_id_t space_id, lsn_t record_lsn,
+                                   const char *name, ulint flags) {
+  /* The DDL journal is an ordered log, but handle_ddl_operations() merges it
+  into unordered maps. Resolve the one ordering fact those maps cannot express
+  right here, where the order is still known: if this space was dropped
+  earlier in the same journal, this create/import is a RECREATE (DISCARD then
+  IMPORT of the same space id, or DROP+CREATE reusing an id). The earlier drop
+  is stale, and the space's content came in outside the redo-logged path, so
+  it must be physically recopied under the lock. Route it to recopy_tables
+  (like a bulk load) and erase the stale drop so the drops loop cannot turn it
+  into a .del. A plain create (no prior drop) stays a normal new table. */
+  bool recreated;
+  {
+    std::lock_guard<std::mutex> lock(m_ddl_tracker_mutex);
+    recreated = drops.erase(space_id) > 0;
+  }
+
+  if (recreated) {
+    xb::info() << "DDL journal: LSN: " << record_lsn << " recreate/import of"
+               << " space ID: " << space_id << " Name: " << name
+               << " supersedes an earlier drop; recopying in full";
+    {
+      std::string clean_name{name};
+      Fil_path::normalize(clean_name);
+      if (Fil_path::has_prefix(clean_name, Fil_path::DOT_SLASH)) {
+        clean_name.erase(0, strlen(Fil_path::DOT_SLASH));
+      }
+      std::lock_guard<std::mutex> lock(m_ddl_tracker_mutex);
+      reimported_tables[space_id] = {clean_name, flags};
+    }
+    add_to_recopy_tables(space_id, record_lsn, "recreate/import");
+  } else {
+    /* A plain create with no prior drop is not a reimport; if a space was
+    reimported earlier and is now being created fresh again that is unusual,
+    but be safe and clear the reimport flag (a normal create is redo-logged
+    and does not need the delete-suppression). */
+    reimported_tables.erase(space_id);
+    add_create_table_from_redo(space_id, record_lsn, name);
+  }
 }
 
 bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
@@ -706,7 +750,7 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
 
     if (ev.type == "SPACE_CREATE") {
       if (!ev.path.empty()) {
-        add_create_table_from_redo(ev.space_id, ev.lsn, ev.path.c_str());
+        journal_create(ev.space_id, ev.lsn, ev.path.c_str(), ev.flags);
       }
     } else if (ev.type == "SPACE_DROP") {
       if (!begin_ev.path.empty()) {
@@ -733,7 +777,7 @@ bool ddl_tracker_t::consume_ddl_journal(const std::string &journal_path) {
                                  begin_ev.path.c_str());
       }
       if (!ev.path.empty()) {
-        add_create_table_from_redo(ev.space_id, ev.lsn, ev.path.c_str());
+        journal_create(ev.space_id, ev.lsn, ev.path.c_str(), ev.flags);
       }
     } else {
       xb::warn() << "DDL journal: unknown event type '" << ev.type
@@ -976,6 +1020,26 @@ dberr_t ddl_tracker_t::handle_ddl_operations() {
     }
   }
 
+  /* Write .reimport markers for spaces reimported (DISCARD+IMPORT) during the
+  backup that still exist at the end (not finally dropped). Import brings the
+  space in physically after a logged DISCARD delete and emits no
+  MLOG_FILE_CREATE, so prepare must ignore that logged delete for these spaces
+  (otherwise recovery skips post-import redo). The current file ships as .new;
+  this marker tells prepare's recovery to keep applying redo to the space. */
+  for (auto &r : reimported_tables) {
+    space_id_t space_id = r.first;
+    const std::string &name = r.second.first;
+    const ulint flags = r.second.second;
+    if (drops.find(space_id) != drops.end()) {
+      continue; /* net-final state is dropped; honor the delete */
+    }
+    backup_file_printf(
+        convert_file_name(space_id, name, flags, EXT_REIMPORT).c_str(), "%s",
+        "");
+    xb::info() << "DDL tracking : reimport marker for space ID: " << space_id
+               << " Name: " << name;
+  }
+
   for (auto &table : drops) {
     space_id_t space_id = table.first;
     std::string table_name = table.second;
@@ -1198,6 +1262,53 @@ we have t2.ibd.delta and t2.ibd.meta.
 
 This map helps us to get the right meta and delta files for a given space id */
 meta_map_t meta_map;
+
+/** Space ids reimported (DISCARD+IMPORT) during a --ddl-tracking=component
+backup, loaded at prepare from .reimport markers. Recovery ignores the logged
+DISCARD delete for these spaces so post-import redo applies to the .new file.
+*/
+static std::unordered_set<space_id_t> xb_reimported_spaces;
+
+bool xb_is_reimported_space(space_id_t space_id) {
+  return xb_reimported_spaces.find(space_id) != xb_reimported_spaces.end();
+}
+
+bool prepare_handle_reimport_files(const datadir_entry_t &entry,
+                                   void * /*data*/) {
+  if (entry.is_empty_dir) return true;
+
+  /* file_name is "<space_id>.reimport"; atoi stops at the dot. */
+  space_id_t space_id = atoi(entry.file_name.c_str());
+  xb_reimported_spaces.insert(space_id);
+
+  xb::info() << "Reimported tablespace marker: space ID " << space_id
+             << " - the logged DISCARD delete will be ignored during recovery";
+
+  /* Do NOT delete the marker here. Recovery must be idempotent: if prepare
+  crashes mid-recovery, a re-prepare replays the same redo range from the same
+  checkpoint and must again ignore the logged DISCARD delete. The markers are
+  removed only after recovery has applied the redo and checkpointed
+  (xb_cleanup_reimport_markers()). */
+  return true;
+}
+
+void xb_cleanup_reimport_markers() {
+  /* Called after prepare's recovery has applied the redo tail and written a
+  fresh checkpoint. From here a re-prepare starts past the reimport's redo, so
+  the markers are no longer needed and are removed to leave a clean backup. */
+  if (xb_reimported_spaces.empty()) {
+    return;
+  }
+  xb_process_datadir(".", EXT_REIMPORT.c_str(),
+                     [](const datadir_entry_t &entry, void *) -> bool {
+                       if (!entry.is_empty_dir) {
+                         os_file_delete(0, entry.path.c_str());
+                       }
+                       return true;
+                     },
+                     nullptr);
+  xb_reimported_spaces.clear();
+}
 
 void insert_into_meta_map(space_id_t space_id, const std::string &meta_path) {
   meta_map.insert({space_id, meta_path});

@@ -7220,6 +7220,16 @@ skip_check:
       goto error_cleanup;
     }
 
+    // Load .reimport markers before recovery so the redo apply ignores the
+    // logged DISCARD delete for tablespaces that were reimported during the
+    // backup (their contents ship as .new; see prepare_handle_reimport_files).
+    if (!xb_process_datadir(
+            xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
+            EXT_REIMPORT.c_str(), prepare_handle_reimport_files, NULL)) {
+      xb_data_files_close();
+      goto error_cleanup;
+    }
+
     // This should be done after processing .meta and .del
     if (!xb_process_datadir(
             xtrabackup_incremental_dir ? xtrabackup_incremental_dir : ".",
@@ -7530,6 +7540,12 @@ skip_check:
   xb_write_galera_info(xtrabackup_incremental);
 
   if (innodb_end()) goto error_cleanup;
+
+  /* Recovery has applied the redo and innodb_end() wrote the shutdown
+  checkpoint, so a re-prepare would start past the reimport's redo. Only now
+  is it safe to remove the .reimport markers (recovery is idempotent until
+  this point). */
+  xb_cleanup_reimport_markers();
 
   innodb_free_param();
 

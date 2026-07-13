@@ -11108,8 +11108,18 @@ const byte *fil_tablespace_redo_delete(
     from redo log records because they are tracked during backup. We just update
     the maps here to not complain later about missing tablespaces */
     if (opt_lock_ddl == LOCK_DDL_REDUCED && recv_recovery_is_on()) {
-      recv_sys->deleted.insert(page_id.space());
-      recv_sys->missing_ids.erase(page_id.space());
+      if (xb_is_reimported_space(page_id.space())) {
+        /* This space was reimported (DISCARD+IMPORT) during the backup. Its
+        current contents were brought in physically (no MLOG_FILE_CREATE) and
+        are supplied out-of-band as .new; the logged DISCARD delete must be
+        ignored so post-import redo keeps applying to the space instead of
+        being dropped as "space deleted". */
+        ib::info() << "Ignoring logged delete for reimported tablespace "
+                   << page_id.space();
+      } else {
+        recv_sys->deleted.insert(page_id.space());
+        recv_sys->missing_ids.erase(page_id.space());
+      }
     }
 #endif /* XTRABACKUP */
 
