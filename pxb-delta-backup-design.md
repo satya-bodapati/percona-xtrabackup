@@ -392,6 +392,30 @@ Targeted tests (each maps to an invariant or wrinkle):
    catch-up pass (solvable via delta segment appends) is therefore not
    worth solving. The combination stays rejected (validation-tested).
 
+## 12b. DISCARD/IMPORT during the backup (component mode)
+
+IMPORT is a physical, non-redo-logged bring-in, always preceded by a DISCARD
+on the destination space id (same id for `DISCARD;IMPORT`; a fresh id for
+`DROP;CREATE;DISCARD;IMPORT`). Handled entirely in the component path:
+
+- **Server** journals a `SPACE_CREATE` with the imported tablespace's final
+  space id at import completion (IMPORT emits no usable notify otherwise), and
+  records authoritative `flags` on every journal event.
+- **journal_create()** uses the journal's order: a create for a space dropped
+  earlier in the same journal is a RECREATE → recopy in full, erase the stale
+  drop (else the unordered maps let the drop win and keep the pre-import file).
+- **.reimport marker** (net-final guarded — skipped if the space is finally
+  dropped) carries the reimported spaces + flags to prepare.
+- **Prepare** loads the markers before recovery and skips the DISCARD's
+  logged `MLOG_FILE_DELETE` for those spaces, so post-import DML redo applies
+  to the `.new`-materialized file. Root cause of that hole: the redo tail
+  replays a file-delete a live server would have checkpointed past (IMPORT
+  forces a checkpoint in `row_import_cleanup`, row0import.cc). Markers are
+  removed only after `innodb_end()` checkpoints, so recovery is idempotent
+  across a crash. Works for full and classic-incremental REDUCED.
+- **redo-parse reduced lock** cannot see the import (no `MLOG_FILE_CREATE`,
+  no journal) → remains a documented gap (below).
+
 ## 13. Known limitations (v1)
 
 - Page tracking stays enabled (durable) after the first delta backup;
@@ -403,6 +427,8 @@ Targeted tests (each maps to an invariant or wrinkle):
   is recopied in full; not specifically tested yet — treat as limitation.
 - `mysql.ibd` is effectively copied twice (base + full-file delta, because
   the page-tracking read filter always full-scans the dict space).
-- DISCARD/IMPORT during backup maps to drop+recreate; untested.
+- DISCARD/IMPORT during backup: handled in component mode (see 12b); on the
+  redo-parse reduced-lock path the import is invisible (no MLOG_FILE_CREATE)
+  and the reimported table would be lost - documented gap, not fixed.
 - Short backups against servers with large checkpoint age wait at the cut
   for the checkpoint to pass the tracking start LSN (passive 1s polling).
