@@ -54,6 +54,16 @@ bool keyring_init_online(MYSQL *connection);
 */
 bool keyring_init_offline();
 
+/**
+  Reload the keyring backend so keys added by the server after xtrabackup
+  initialized its keyring become visible (e.g. a master key created by
+  ALTER INSTANCE ROTATE INNODB MASTER KEY during the backup). Safe no-op when
+  no keyring component is in use.
+
+  @return true on success (including the no-component case), false on error
+*/
+bool reload_keyring();
+
 /** Initialize component service handles */
 bool inititialize_service_handles();
 

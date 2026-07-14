@@ -16,6 +16,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
 *******************************************************/
 #include <dict0dict.h>
+#include <mysql/components/my_service.h>
+#include <mysql/components/services/keyring_load.h>
 #include <mysqld.h>
 #include <rapidjson/istreamwrapper.h>
 #include <sql/server_component/mysql_server_keyring_lockable_imp.h>
@@ -275,6 +277,41 @@ init_components:
   if (initialize_manifest_file_components(component_urn)) return false;
   set_srv_keyring_implementation_as_default();
   keyring_component_initialized = true;
+  return true;
+}
+
+bool reload_keyring() {
+  /* Nothing to reload if no keyring component is in use (e.g. unencrypted
+  instance, or the keyring-plugin path). */
+  if (!keyring_component_initialized || reg_srv == nullptr) {
+    return true;
+  }
+
+  my_service<SERVICE_TYPE(keyring_load)> keyring_load("keyring_load", reg_srv);
+  if (!keyring_load.is_valid()) {
+    xb::error() << "keyring reload: could not acquire the keyring_load service";
+    return false;
+  }
+
+  /* instance_path is the directory holding the component config; component_path
+  is the plugin directory where the keyring component library lives. These
+  mirror what the component was initialized with. */
+  std::string instance_path = component_config_path;
+  const size_t sep = instance_path.find_last_of(OS_PATH_SEPARATOR);
+  instance_path = (sep == std::string::npos) ? std::string(".")
+                                             : instance_path.substr(0, sep);
+
+  /* Re-read the keyring backend so keys added by the server after xtrabackup
+  initialized its keyring (e.g. ALTER INSTANCE ROTATE INNODB MASTER KEY during
+  the backup) become visible. */
+  if (keyring_load->load(server_plugin_dir, instance_path.c_str())) {
+    xb::error() << "keyring reload: keyring_load->load() failed"
+                << " (component_path=" << server_plugin_dir
+                << ", instance_path=" << instance_path << ")";
+    return false;
+  }
+
+  xb::info() << "Reloaded keyring to pick up keys rotated during the backup";
   return true;
 }
 

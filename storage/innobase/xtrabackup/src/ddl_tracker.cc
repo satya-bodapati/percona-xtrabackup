@@ -43,6 +43,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "changed_page_tracking.h"    // pagetracking::init/deinit
 #include "dict0dict.h"                // dict_sys_t::s_dict_space_id
 #include "file_utils.h"
+#include "keyring_components.h"       // xtrabackup::components::reload_keyring
 #include "fsp0fsp.h"  // fsp_is_undo_tablespace
 #include "scope_guard.h"
 #include "sql_thd_internal_api.h"  // create_thd, destroy_thd
@@ -913,6 +914,16 @@ dberr_t ddl_tracker_t::handle_ddl_operations() {
     backup_file_printf(
         convert_file_name(space_id, old_table_name, flags, EXT_REN).c_str(),
         "%d\n%s", REN_FILE_VERSION, new_table_name.c_str());
+  }
+
+  /* A master-key rotation during the backup re-wraps encrypted tablespace
+  headers with a key xtrabackup did not have at startup. We are under the
+  backup lock here (rotation is frozen), so reload the keyring before reopening
+  tablespaces so their encryption headers can be decrypted. See PXB-XXXX. */
+  if (!xtrabackup::components::reload_keyring()) {
+    xb::error() << "DDL tracking: failed to reload keyring before reopening"
+                << " tablespaces under the lock";
+    return DB_ERROR;
   }
 
   for (auto table = new_tables.begin(); table != new_tables.end();) {
