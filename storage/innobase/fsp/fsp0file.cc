@@ -46,6 +46,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <scope_guard.h>
 
+#include <algorithm>
+#include <mutex>
+
 #ifdef UNIV_HOTBACKUP
 #include "my_sys.h"
 #endif /* UNIV_HOTBACKUP */
@@ -696,6 +699,7 @@ dberr_t Datafile::validate_first_page(space_id_t space_id, lsn_t *flush_lsn,
                      << " id " << m_space_id
                      << ". Will check if encrytion key has been"
                      << " parsed at the end of backup.";
+          std::lock_guard<std::mutex> g(invalid_encrypted_tablespace_ids_mutex);
           invalid_encrypted_tablespace_ids.push_back(m_space_id);
         }
         return (DB_INVALID_ENCRYPTION_META);
@@ -707,6 +711,23 @@ dberr_t Datafile::validate_first_page(space_id_t space_id, lsn_t *flush_lsn,
                               << " of this tablespace enabled.";
 #endif
       m_encryption_master_key_id = e_key.m_master_key_id;
+    }
+
+    /* The tablespace now has valid encryption info -- either read from page 0
+    (e.g. re-read under the reduced-lock/clone recopy once page 0 has been
+    flushed with the key) or resolved from parsed redo. If an earlier open saw
+    page 0 carrying the encryption flag but not yet the key and deferred this
+    space into invalid_encrypted_tablespace_ids, it is resolved now; drop it
+    from the deferred set so validate_missing_encryption_tablespaces() does not
+    falsely abort the backup. This makes the deferral self-healing for
+    --copy-strategy=clone, whose short redo tail need not contain the key's
+    MLOG_WRITE_STRING. */
+    if (srv_backup_mode) {
+      std::lock_guard<std::mutex> g(invalid_encrypted_tablespace_ids_mutex);
+      invalid_encrypted_tablespace_ids.erase(
+          std::remove(invalid_encrypted_tablespace_ids.begin(),
+                      invalid_encrypted_tablespace_ids.end(), m_space_id),
+          invalid_encrypted_tablespace_ids.end());
     }
 
     if (recv_recovery_is_on() &&

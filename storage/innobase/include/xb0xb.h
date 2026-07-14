@@ -22,6 +22,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define xb0xb_h
 #include "storage/innobase/xtrabackup/src/ddl_tracker.h"
 
+#include <mutex>
+
 extern bool innodb_log_checksums_specified;
 extern bool innodb_checksum_algorithm_specified;
 
@@ -44,6 +46,10 @@ extern ddl_tracker_t *ddl_tracker;
 double-feeding events the journal already carries. */
 extern bool xb_ddl_journal_mode;
 extern std::vector<ulint> invalid_encrypted_tablespace_ids;
+/** Protects invalid_encrypted_tablespace_ids: it is appended to from
+Datafile::validate_first_page (possibly from parallel copy threads) and both
+appended-to and erased-from as tablespaces are (re)opened during the backup. */
+extern std::mutex invalid_encrypted_tablespace_ids_mutex;
 
 /** Fetch tablespace key from "xtrabackup_keys".
 @param[in]	space_id	tablespace id

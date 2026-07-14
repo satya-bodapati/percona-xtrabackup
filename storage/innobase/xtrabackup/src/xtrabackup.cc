@@ -576,6 +576,7 @@ extern const char *innodb_flush_method_names[];
 /** List of tablespaces missing encryption data when we validated its first
 page. We test again in the end of backup. */
 std::vector<ulint> invalid_encrypted_tablespace_ids;
+std::mutex invalid_encrypted_tablespace_ids_mutex;
 
 /** Enumeration of innodb_flush_method */
 extern TYPELIB innodb_flush_method_typelib;
@@ -3559,6 +3560,7 @@ for tablespaces that had an empty page0 */
 bool validate_missing_encryption_tablespaces() {
   bool ret = true;
   bool found = false;
+  std::lock_guard<std::mutex> g(invalid_encrypted_tablespace_ids_mutex);
   if (invalid_encrypted_tablespace_ids.size() > 0) {
     for (auto m_space_id : invalid_encrypted_tablespace_ids) {
       found = false;
