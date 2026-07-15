@@ -3334,9 +3334,9 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
 
   if (xb_delta_recopy_active) {
     /* The delta pass of --copy-strategy=clone keeps its .delta/.meta
-    under XB_DELTA_DIR so the top level of a full backup never contains
+    under XB_PAGE_DELTA_DIR so the top level of a full backup never contains
     incremental-looking files. */
-    snprintf(dst_name, sizeof(dst_name), "%s/%s", XB_DELTA_DIR,
+    snprintf(dst_name, sizeof(dst_name), "%s/%s", XB_PAGE_DELTA_DIR,
              dest_name ? dest_name : cursor.rel_path);
   } else {
     strncpy(dst_name, dest_name ? dest_name : cursor.rel_path,
@@ -7205,12 +7205,12 @@ skip_check:
     // This should be done before handling .del files. Because we have to delete
     // the correct delta files for the corresponding .del files.
     // Delta backups (--copy-strategy=clone) carry .delta/.meta under
-    // XB_DELTA_DIR in the backup dir; the map drives their renaming in .ren
+    // XB_PAGE_DELTA_DIR in the backup dir; the map drives their renaming in .ren
     // handling.
     if (xtrabackup_incremental_dir || metadata_delta_backup != 0) {
       const char *meta_dir = xtrabackup_incremental_dir
                                  ? xtrabackup_incremental_dir
-                                 : "./" XB_DELTA_DIR;
+                                 : "./" XB_PAGE_DELTA_DIR;
       // Build meta map; a delta full without any delta is legitimate
       if (os_file_exists(meta_dir) &&
           !xb_process_datadir(meta_dir, EXT_META.c_str(), xtrabackup_scan_meta,
@@ -7290,8 +7290,8 @@ skip_check:
     }
     inc_dir_tables_hash = ut::new_<hash_table_t>(1000);
 
-    if (os_file_exists("./" XB_DELTA_DIR) &&
-        !run_data_threads("./" XB_DELTA_DIR, EXT_DELTA.c_str(),
+    if (os_file_exists("./" XB_PAGE_DELTA_DIR) &&
+        !run_data_threads("./" XB_PAGE_DELTA_DIR, EXT_DELTA.c_str(),
                           xtrabackup_apply_deltas_parallel, xtrabackup_parallel,
                           "apply-delta")) {
       xb_data_files_close();
@@ -7307,12 +7307,12 @@ skip_check:
     tooling need no awareness of the delta mode). */
     {
       std::error_code ec;
-      std::filesystem::remove_all("./" XB_DELTA_DIR, ec);
+      std::filesystem::remove_all("./" XB_PAGE_DELTA_DIR, ec);
       if (ec) {
-        xb::warn() << "Delta backup: could not remove " << XB_DELTA_DIR << ": "
+        xb::warn() << "Delta backup: could not remove " << XB_PAGE_DELTA_DIR << ": "
                    << ec.message();
       } else {
-        xb::info() << "Delta backup: removed " << XB_DELTA_DIR
+        xb::info() << "Delta backup: removed " << XB_PAGE_DELTA_DIR
                    << " after applying the deltas";
       }
     }

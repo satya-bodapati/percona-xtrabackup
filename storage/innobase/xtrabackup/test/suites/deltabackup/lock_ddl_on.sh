@@ -4,7 +4,7 @@
 # Under lock-ddl=ON the instance lock blocks every DDL for the whole backup,
 # so the delta mode needs neither the DDL journal nor the fixup machinery:
 # file copy with no redo activity, then recopy of the tracked page window
-# as #xb_delta, then the short redo tail. Restore verified against a
+# as #xb_page_delta, then the short redo tail. Restore verified against a
 # mysqldump of the source. DML only while paused (a DDL would block on the
 # instance lock).
 ###############################################################################
@@ -53,7 +53,7 @@ if egrep -q "DDL journal:" $topdir/backup_on.log ; then
   die "lock-ddl=ON backup used the DDL journal"
 fi
 
-if ! find "$topdir/backup_on/#xb_delta" -name "*.delta" 2>/dev/null | grep -q . ; then
+if ! find "$topdir/backup_on/#xb_page_delta" -name "*.delta" 2>/dev/null | grep -q . ; then
   die "delta backup produced no .delta files"
 fi
 
@@ -67,8 +67,8 @@ xtrabackup --prepare --target-dir=$topdir/backup_on \
 if ! egrep -q "Delta backup: applying .delta files" $topdir/prepare_on.log ; then
   die "prepare did not apply the delta files"
 fi
-if [ -d "$topdir/backup_on/#xb_delta" ]; then
-  die "prepare did not remove #xb_delta"
+if [ -d "$topdir/backup_on/#xb_page_delta" ]; then
+  die "prepare did not remove #xb_page_delta"
 fi
 
 record_db_state test

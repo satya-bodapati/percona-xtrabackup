@@ -83,7 +83,7 @@ if ! egrep -q "New undo file: ./undo_3.ibu" $topdir/backup_undo.log ; then
 fi
 
 # undo spaces must never carry deltas
-if find "$topdir/backup_undo/#xb_delta" -name "undo*" 2>/dev/null | grep -q . ; then
+if find "$topdir/backup_undo/#xb_page_delta" -name "undo*" 2>/dev/null | grep -q . ; then
   die "found a delta for an undo tablespace"
 fi
 

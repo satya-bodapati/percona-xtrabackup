@@ -47,7 +47,7 @@ inline const std::string EXT_REIMPORT = ".reimport";
 
 /** Directory inside a --copy-strategy=clone full backup holding the
 delta pass output (.delta/.meta). Consumed and removed at prepare. */
-#define XB_DELTA_DIR "#xb_delta"
+#define XB_PAGE_DELTA_DIR "#xb_page_delta"
 
 class ddl_tracker_t {
  private:
@@ -210,7 +210,7 @@ class ddl_tracker_t {
 };
 
 /** Recopy pages modified in the tracking window [start_lsn, end_lsn] as
-.delta/.meta files under XB_DELTA_DIR (--copy-strategy=clone core,
+.delta/.meta files under XB_PAGE_DELTA_DIR (--copy-strategy=clone core,
 shared by lock-ddl=REDUCED — via ddl_tracker_t::delta_recopy — and
 lock-ddl=ON, where there are no DDLs and both sets are empty).
 @param[in] start_lsn  page tracking start LSN (S)

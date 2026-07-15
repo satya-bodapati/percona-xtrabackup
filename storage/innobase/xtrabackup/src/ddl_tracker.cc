@@ -1543,11 +1543,11 @@ bool prepare_handle_ren_files(const datadir_entry_t &entry, void *) {
     if (exists) {
       /* Incremental: delta/meta live next to the .ren file (the incremental
       dir). Delta full: the .ren is at the backup top level but delta/meta
-      live under XB_DELTA_DIR. */
+      live under XB_PAGE_DELTA_DIR. */
       std::string to_path =
           xtrabackup_incremental ? entry.datadir
                                  : entry.datadir + OS_PATH_SEPARATOR +
-                                       XB_DELTA_DIR;
+                                       XB_PAGE_DELTA_DIR;
       if (!to_path.empty() && to_path.back() != OS_PATH_SEPARATOR) {
         to_path += OS_PATH_SEPARATOR;
       }

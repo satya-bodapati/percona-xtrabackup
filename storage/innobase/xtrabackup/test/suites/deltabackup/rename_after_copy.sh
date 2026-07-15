@@ -59,16 +59,16 @@ if ! egrep -q "delta backup: renamed space [0-9]+ will be read from ./test/renam
   die "delta pass did not repoint the renamed space"
 fi
 
-if [ ! -f $topdir/backup_ren/#xb_delta/test/original_table.ibd.delta ]; then
+if [ ! -f $topdir/backup_ren/#xb_page_delta/test/original_table.ibd.delta ]; then
   die "renamed table has no .delta under its old name"
 fi
-if [ ! -f $topdir/backup_ren/#xb_delta/test/original_table.ibd.meta ]; then
+if [ ! -f $topdir/backup_ren/#xb_page_delta/test/original_table.ibd.meta ]; then
   die "renamed table has no .meta under its old name"
 fi
 
 # top level of the backup must contain no .delta at all
-if find $topdir/backup_ren -name "*.delta" -not -path "*#xb_delta*" | grep -q . ; then
-  die "found .delta outside #xb_delta"
+if find $topdir/backup_ren -name "*.delta" -not -path "*#xb_page_delta*" | grep -q . ; then
+  die "found .delta outside #xb_page_delta"
 fi
 
 # base file must be present under the OLD name (copied before the rename),
@@ -89,8 +89,8 @@ if ! egrep -q "Renaming incremental delta file from: .*original_table.ibd.delta 
 fi
 
 # deltas are consumed and removed by prepare
-if [ -d "$topdir/backup_ren/#xb_delta" ]; then
-  die "prepare did not remove #xb_delta"
+if [ -d "$topdir/backup_ren/#xb_page_delta" ]; then
+  die "prepare did not remove #xb_page_delta"
 fi
 
 record_db_state test

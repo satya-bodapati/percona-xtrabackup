@@ -75,7 +75,7 @@ SQL
 
   egrep -q "recreate/import.* space ID: [0-9]*" $BK.log \
     || die "reimport not resolved as a recreate ($MODE)"
-  [ ! -f "$BK/#xb_delta/test/t_imp.ibd.delta" ] \
+  [ ! -f "$BK/#xb_page_delta/test/t_imp.ibd.delta" ] \
     || die "unexpected delta for the reimported tablespace ($MODE)"
 
   xtrabackup --prepare --target-dir=$BK 2> >( tee $BK.prepare.log)

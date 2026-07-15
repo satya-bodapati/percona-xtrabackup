@@ -58,7 +58,7 @@ if ! egrep -q "DDL journal: consumed [0-9]+ events" $topdir/backup_enc.log ; the
 fi
 
 # encrypted file-per-table table with only DML must have an (encrypted) delta
-if [ ! -f "$topdir/backup_enc/#xb_delta/test/enc_keep.ibd.delta" ]; then
+if [ ! -f "$topdir/backup_enc/#xb_page_delta/test/enc_keep.ibd.delta" ]; then
   die "encrypted table has no delta"
 fi
 

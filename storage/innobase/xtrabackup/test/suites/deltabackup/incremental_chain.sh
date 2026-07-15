@@ -2,7 +2,7 @@
 # PXB-XXXX: Classic incremental on top of a clone (delta) full
 #
 # Invariant under test: after --prepare --apply-log-only, a delta full is
-# indistinguishable from a classic prepared full (deltas consumed, #xb_delta
+# indistinguishable from a classic prepared full (deltas consumed, #xb_page_delta
 # removed), so the incremental prepare pipeline — including the deletion of
 # .ibd files dropped between the backups (rm_if_not_found) — needs zero
 # awareness of the delta mode.
@@ -27,7 +27,7 @@ multi_row_insert test.keep_table \({1..500},\'${PAD}\'\)
 
 innodb_wait_for_flush_all
 
-# Delta full with in-window DML so #xb_delta is non-empty
+# Delta full with in-window DML so #xb_page_delta is non-empty
 XB_ERROR_LOG=$topdir/full.log
 xtrabackup_background --backup --target-dir=$topdir/full \
   --debug-sync-thread="before_file_copy" --lock-ddl=REDUCED \
@@ -40,7 +40,7 @@ innodb_wait_for_flush_all
 resume_debug_sync_thread "before_file_copy" $topdir/full
 run_cmd wait $job_pid
 
-if ! find "$topdir/full/#xb_delta" -name "*.delta" 2>/dev/null | grep -q . ; then
+if ! find "$topdir/full/#xb_page_delta" -name "*.delta" 2>/dev/null | grep -q . ; then
   die "delta full produced no deltas"
 fi
 
@@ -62,8 +62,8 @@ if ! egrep -q "Delta backup: applying .delta files" $topdir/prepare_full.log ; t
 fi
 
 # After the first prepare pass the delta full must look like a classic full
-if [ -d "$topdir/full/#xb_delta" ]; then
-  die "apply-log-only did not remove #xb_delta"
+if [ -d "$topdir/full/#xb_page_delta" ]; then
+  die "apply-log-only did not remove #xb_page_delta"
 fi
 
 # Apply the incremental (the LAST incremental is applied without
