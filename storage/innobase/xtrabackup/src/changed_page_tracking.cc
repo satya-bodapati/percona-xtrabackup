@@ -268,10 +268,40 @@ bool is_component_installed(MYSQL *connection) {
   return mysql_component == 0 ? (false) : (true);
 }
 
-void range_get_next_page(xb_page_set *page_set) {
+/* Move current_page_it from the first changed page of the current read
+range to its last: the caller then issues one pread covering the whole
+range (sliced into --read-buffer-size pieces when larger). A gap is
+the count of unchanged pages strictly BETWEEN two changed pages, not
+their id difference: between changed pages 1 and 4 the gap is 2
+(pages 2 and 3). Gaps <= max_gap are combined across, so nearby
+changed pages form one larger sequential read instead of one read
+request each; the gap pages become filler - read, then dropped by the
+incremental write filter's LSN check: extra read volume, never backup
+content. A gap > max_gap ends the range; runs of consecutive changed
+pages (gap 0) always stay whole.
+
+  changed pages [1,3,6,9]  (gaps 1,2,2):
+    max_gap=0:  4 reads: [1] [3] [6] [9]
+    max_gap=2:  1 read:  [1-9]   (filler 2,4,5,7,8 read, dropped)
+
+Counting: the loop inspects one neighbouring pair per iteration and
+refuses (breaks) BEFORE the counting code, so reaching that code means
+the pair's gap was just combined: its pages are added to filler_pages
+right there. A refused gap becomes the space between two ranges and is
+counted as skipped pages by the caller (rf_page_tracking_get_next_batch)
+instead - each gap lands in exactly one of the two. Worked trace on the
+shared example in read_filt.h (changed pages 1,2,3,4,7,20,21,
+max_gap=4): (4,7) gap 2 -> filler_pages += 2, combined_gaps = 1;
+(7,20) gap 12 -> park on 7, range [1-7] ends; the caller then counts
+20 - 8 = 12 skipped when the next call builds [20-21].
+
+max_gap is --page-tracking-combine-distance - by default ("auto") the
+storage's measured read request cost (see xb_io_probe.h) - converted to
+pages of this tablespace's physical page size. */
+void range_get_next_page(xb_page_set *page_set, ulint max_gap,
+                         ulint *filler_pages, ulint *combined_gaps) {
   ut_ad(page_set->current_page_it != page_set->pages.end());
 
-  /* loop to find the non continuous page id or end of block */
   while (true) {
     auto current_page = *page_set->current_page_it;
     page_set->current_page_it++;
@@ -280,17 +310,18 @@ void range_get_next_page(xb_page_set *page_set) {
       break;
     }
     auto next_page = *page_set->current_page_it;
-    if (next_page != current_page + 1) {
-      /* The next changed page is not adjacent to the current block. Step
-      back so that the iterator points to the last page of the current
-      contiguous block, as documented in the function comment. Leaving the
-      iterator on the next (non-adjacent) changed page makes the caller
-      extend the read batch up to that page, silently reading all the
-      unmodified pages in between. For large tablespaces with sparsely
-      distributed changed pages this degenerates into reading almost the
-      entire data file, defeating the purpose of page tracking. (PXB-3853) */
+    ut_ad(next_page > current_page);
+    if (next_page > current_page + 1 + max_gap) {
+      /* gap too large to combine across: park the iterator on the last
+      page of the current range so the read batch ends there */
       --page_set->current_page_it;
       break;
+    }
+    if (next_page > current_page + 1) {
+      /* past the refusal check, so this gap of >= 1 unchanged pages was
+      just combined into the range: its pages are filler */
+      *filler_pages += next_page - current_page - 1;
+      ++*combined_gaps;
     }
   }
 }

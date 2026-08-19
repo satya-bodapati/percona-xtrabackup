@@ -63,9 +63,20 @@ void deinit(xb_space_map *space_map);
 return true if installed */
 bool is_component_installed(MYSQL *connection);
 
-/** Move the current_page_it iterator to poin the last page id in current block
-@param[in/out] page_set       page_set */
-void range_get_next_page(xb_page_set *page_set);
+/** Move the current_page_it iterator to point to the last page id of the
+current block. Changed pages separated by gaps of at most max_gap
+unchanged pages belong to the same block, so that they are read with one
+sequential read.
+@param[in/out] page_set       page_set
+@param[in]     max_gap        largest gap that may be combined across,
+                              in pages of the tablespace's physical
+                              page size
+@param[in/out] filler_pages   incremented by the unchanged pages inside
+                              every gap combined into this block
+@param[in/out] combined_gaps  incremented by the number of gaps combined
+                              into this block */
+void range_get_next_page(xb_page_set *page_set, ulint max_gap,
+                         ulint *filler_pages, ulint *combined_gaps);
 
 /** Set the backupid
 @param[in] connection  MySQL connection handler

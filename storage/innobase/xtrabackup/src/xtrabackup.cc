@@ -120,6 +120,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "write_filt.h"
 #include "wsrep.h"
 #include "xb0xb.h"
+#include "xb_io_probe.h"
 #include "xb_regex.h"
 #include "xbcrypt_common.h"
 #include "xbstream.h"
@@ -457,6 +458,18 @@ static ulonglong global_max_value;
 bool opt_galera_info = false;
 bool opt_slave_info = false;
 bool opt_page_tracking = false;
+/* --page-tracking-combine-distance: changed pages within this many bytes
+of each other are read with one request. "auto" (default) uses the
+storage's measured read request cost; a byte count pins the distance. */
+bool opt_page_tracking_combine_distance_auto = true;
+uint64_t opt_page_tracking_combine_distance = 0;
+static char *opt_page_tracking_combine_distance_str = nullptr;
+/* Read request cost for combine-distance=auto: what one read request costs in
+bytes of sequential transfer, i.e. the most bytes worth reading across
+one gap to save one request. Set once, single-threaded, before the
+copy threads start (see xb_probe_read_request_cost()); read-only
+after. */
+uint64_t xb_read_request_cost = pagetracking::READ_REQUEST_COST_FALLBACK_BYTES;
 bool opt_no_lock = false;
 bool opt_safe_slave_backup = false;
 bool opt_rsync = false;
@@ -754,6 +767,7 @@ enum options_xtrabackup {
   OPT_MOVE_BACK,
   OPT_GALERA_INFO,
   OPT_PAGE_TRACKING,
+  OPT_PAGE_TRACKING_COMBINE_DISTANCE,
   OPT_SLAVE_INFO,
   OPT_NO_LOCK,
   OPT_LOCK_DDL,
@@ -1082,6 +1096,20 @@ struct my_option xb_client_options[] = {
      "since the last backup.",
      (uchar *)&opt_page_tracking, (uchar *)&opt_page_tracking, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"page-tracking-combine-distance", OPT_PAGE_TRACKING_COMBINE_DISTANCE,
+     "with --page-tracking, changed pages that are within this many bytes "
+     "of each other are read with one request instead of one request each "
+     "(K and M suffixes accepted; at most 1M). The unchanged pages in "
+     "between are "
+     "read and discarded by the incremental filter, so this affects read "
+     "volume only, never backup content or size. \"auto\" (default) "
+     "measures the storage once per backup and uses what one read request "
+     "costs in bytes of sequential transfer - the distance worth reading "
+     "across to save one request.",
+     (uchar *)&opt_page_tracking_combine_distance_str,
+     (uchar *)&opt_page_tracking_combine_distance_str, 0, GET_STR, REQUIRED_ARG,
+     0, 0, 0, 0, 0, 0},
 
     {"no-lock", OPT_NO_LOCK,
      "Use this option to disable lock-ddl and table lock "
@@ -1946,6 +1974,45 @@ bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
 
       ADD_PRINT_PARAM_OPT(opt_mysql_tmpdir);
       break;
+
+    case OPT_PAGE_TRACKING_COMBINE_DISTANCE: {
+      if (strcasecmp(argument, "auto") == 0) {
+        opt_page_tracking_combine_distance_auto = true;
+        break;
+      }
+      /* a byte count with an optional K or M suffix, at most 1M: the
+      read request cost clamp ceiling, beyond which no storage makes
+      combining worthwhile */
+      constexpr ulonglong MAX_DISTANCE =
+          pagetracking::READ_REQUEST_COST_MAX_BYTES;
+      char *endp = nullptr;
+      ulonglong val = strtoull(argument, &endp, 10);
+      ulonglong mult = 1;
+      if (endp != argument && *endp != '\0') {
+        switch (toupper(static_cast<unsigned char>(*endp))) {
+          case 'K':
+            mult = 1024ULL;
+            break;
+          case 'M':
+            mult = 1024ULL * 1024;
+            break;
+          default:
+            mult = 0;
+        }
+        ++endp;
+      }
+      if (endp == argument || *endp != '\0' || mult == 0 ||
+          val > MAX_DISTANCE / mult) {
+        xb::error() << "invalid --page-tracking-combine-distance value "
+                    << SQUOTE(argument)
+                    << ". Expected \"auto\" or a byte count up to 1M, "
+                       "optionally with a K or M suffix";
+        return 1;
+      }
+      opt_page_tracking_combine_distance_auto = false;
+      opt_page_tracking_combine_distance = val * mult;
+      break;
+    }
 
     case OPT_INNODB_DATA_HOME_DIR:
 
@@ -4254,6 +4321,74 @@ static void cleanup_mysql_environment() {
   mysql_mutex_destroy(&LOCK_replica_list);
 }
 
+/** With --page-tracking-combine-distance=auto, measure the storage once to set
+the read request cost (see xb_io_probe.h). Probes the
+largest changed data file of at least PROBE_MIN_FILE_BYTES - the most
+representative of the reads the cost will govern. Must run
+single-threaded, before the data copy threads start: xb_read_request_cost
+is written once here and only read afterwards. Iterates all tablespaces
+unfiltered (datafiles_iter_new(nullptr)): the changed-page map is the
+only filter that matters for picking a probe candidate, and the
+dd-validation pass would log its orphan warnings a second time. */
+static void xb_probe_read_request_cost() {
+  if (!opt_page_tracking_combine_distance_auto ||
+      changed_page_tracking == nullptr || changed_page_tracking->empty()) {
+    return;
+  }
+
+  char probe_path[FN_REFLEN] = "";
+  uint64_t probe_size = 0;
+
+  datafiles_iter_t *it = datafiles_iter_new(nullptr);
+  if (it == nullptr) {
+    return;
+  }
+  while (fil_node_t *node = datafiles_iter_next(it)) {
+    if (changed_page_tracking->count(node->space->id) == 0) {
+      continue;
+    }
+    /* node->size is in pages of the space's physical page size, set when
+    the node was opened during tablespace discovery; no syscall needed.
+    probe_storage() re-checks the real size after open, so a stale value
+    can only lead to the fallback cost, never to a wrong measurement.
+    (When PR#1774 lands and the iterator is sorted largest-first, this
+    scan still works: it does not depend on iteration order.) */
+    const page_size_t node_page_size(node->space->flags);
+    const uint64_t node_bytes =
+        uint64_t{node->size} * node_page_size.physical();
+    if (node_bytes > probe_size) {
+      probe_size = node_bytes;
+      snprintf(probe_path, sizeof(probe_path), "%s", node->name);
+    }
+  }
+  datafiles_iter_free(it);
+
+  if (probe_size < pagetracking::PROBE_MIN_FILE_BYTES) {
+    return; /* nothing measurable; the fallback cost stays */
+  }
+
+  const bool use_o_direct =
+      srv_unix_file_flush_method == SRV_UNIX_O_DIRECT ||
+      srv_unix_file_flush_method == SRV_UNIX_O_DIRECT_NO_FSYNC;
+
+  const auto probe = pagetracking::probe_storage(probe_path, use_o_direct);
+  if (!probe.valid) {
+    return;
+  }
+
+  xb_read_request_cost = pagetracking::read_request_cost_bytes(
+      probe.rtt_us, probe.bw_bytes_per_sec);
+
+  xb::info() << "pagetracking: calibrated storage (" << probe_path
+             << "): request round trip " << probe.rtt_us
+             << " us, sequential read "
+             << probe.bw_bytes_per_sec / (1024 * 1024)
+             << " MB/s -> one read request costs ~"
+             << xb_read_request_cost / 1024
+             << "KB of sequential transfer; gaps cheaper than this are "
+                "combined";
+}
+
 void xtrabackup_backup_func(void) {
   MY_STAT stat_info;
   uint i;
@@ -4503,6 +4638,8 @@ void xtrabackup_backup_func(void) {
     xb::info() << "Starting " << xtrabackup_parallel
                << " threads for parallel data files transfer";
   }
+
+  xb_probe_read_request_cost();
 
   auto it = datafiles_iter_new(xb_dd_spaces);
   if (it == NULL) {
