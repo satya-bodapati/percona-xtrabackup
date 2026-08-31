@@ -1125,22 +1125,14 @@ struct my_option xb_client_options[] = {
      NO_ARG, 0, 0, 0, 0, 0, 0},
 
     {"page-tracking-merge-gap", OPT_PAGE_TRACKING_MERGE_GAP,
-     "with --page-tracking, the maximum gap of unchanged pages, between two "
-     "changed pages, that is ignored so that the pages are treated as one "
-     "continuous group and read together (the gap between changed pages 1 "
-     "and 4 is 2: the unchanged pages 2 and 3). Grouping avoids many small "
-     "individual reads when changed pages are scattered. The gap pages are "
-     "read but never written to the backup, so this affects read volume "
-     "only, not backup size. The default \"auto\" chooses the gap for each "
-     "table from the distribution of its changed pages, never combining "
-     "across a gap that costs more than one read request on the storage "
-     "(probed once per backup; 512KB when it cannot be measured). A number "
-     "(in "
-     "innodb_page_size pages; applied "
-     "as an equivalent byte limit for compressed tablespaces) pins the "
-     "gap for all tables; 0 groups only strictly consecutive changed "
-     "pages. Has no effect on full backups or on incremental backups that "
-     "fall back to the full scan.",
+     "with --page-tracking, the maximum gap of unchanged pages, between "
+     "two changed pages, across which the reads are merged into one "
+     "continuous read. Merging avoids many small individual reads when "
+     "changed pages are scattered; the gap pages are read but never "
+     "written to the backup, so this affects read volume only, not backup "
+     "size. The default \"auto\" sizes the gap to the backup storage; a "
+     "number (in innodb_page_size pages) sets the largest merged gap for "
+     "all tables; 0 disables merging.",
      (uchar *)&opt_page_tracking_merge_gap_str,
      (uchar *)&opt_page_tracking_merge_gap_str, 0, GET_STR, REQUIRED_ARG, 0, 0,
      0, 0, 0, 0},
@@ -2015,8 +2007,9 @@ bool xb_get_one_option(int optid, const struct my_option *opt, char *argument) {
         break;
       }
       char *endp = nullptr;
+      errno = 0;
       ulonglong val = strtoull(argument, &endp, 10);
-      if (endp == argument || *endp != '\0' || val > 65536) {
+      if (endp == argument || *endp != '\0' || errno == ERANGE || val > 65536) {
         xb::error() << "invalid --page-tracking-merge-gap value "
                     << SQUOTE(argument)
                     << ". Expected \"auto\" or a page count 0..65536";
@@ -4347,7 +4340,11 @@ single-threaded, before the data copy threads start: xb_read_request_cost
 is written once here and only read afterwards. Iterates all tablespaces
 unfiltered (datafiles_iter_new(nullptr)): the changed-page map is the
 only filter that matters for picking a probe candidate, and the
-dd-validation pass would log its orphan warnings a second time. */
+dd-validation pass would log its orphan warnings a second time. Every
+candidate is an InnoDB tablespace by construction: the iterator walks
+the InnoDB fil system only (files of other engines, MyRocks included,
+never appear in it) and the changed-page map is keyed by InnoDB space
+id. */
 static void xb_probe_read_request_cost() {
   if (!opt_page_tracking_merge_gap_auto || changed_page_tracking == nullptr ||
       changed_page_tracking->empty()) {
@@ -4369,8 +4366,8 @@ static void xb_probe_read_request_cost() {
     the node was opened during tablespace discovery; no syscall needed.
     probe_storage() re-checks the real size after open, so a stale value
     can only lead to the fallback cost, never to a wrong measurement.
-    (When PR#1774 lands and the iterator is sorted largest-first, this
-    scan still works: it does not depend on iteration order.) */
+    (The iterator is sorted largest-first since PXB-3502; this running
+    max does not depend on that, or any, iteration order.) */
     const page_size_t node_page_size(node->space->flags);
     const uint64_t node_bytes =
         uint64_t{node->size} * node_page_size.physical();
@@ -4390,20 +4387,20 @@ static void xb_probe_read_request_cost() {
       srv_unix_file_flush_method == SRV_UNIX_O_DIRECT_NO_FSYNC;
 
   const auto probe = pagetracking::probe_storage(probe_path, use_o_direct);
-  if (!probe.valid) {
+  if (!probe.has_value()) {
     return;
   }
 
   xb_read_request_cost = pagetracking::read_request_cost_bytes(
-      probe.rtt_us, probe.bw_bytes_per_sec);
+      probe->rtt_us, probe->bw_bytes_per_sec);
 
   xb::info() << "pagetracking: calibrated storage (" << probe_path
-             << "): request round trip " << probe.rtt_us
+             << "): request round trip " << probe->rtt_us
              << " us, sequential read "
-             << probe.bw_bytes_per_sec / (1024 * 1024)
-             << " MB/s -> one read request costs ~"
-             << xb_read_request_cost / 1024
-             << "KB of sequential transfer; gaps cheaper than this are "
+             << xtrabackup::utils::human_readable(probe->bw_bytes_per_sec)
+             << "/s -> one read request costs ~"
+             << xtrabackup::utils::human_readable(xb_read_request_cost)
+             << " of sequential transfer; gaps cheaper than this are "
                 "combined";
 }
 

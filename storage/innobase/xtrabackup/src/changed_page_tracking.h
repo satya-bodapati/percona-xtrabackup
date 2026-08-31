@@ -26,6 +26,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "mysql.h"
 
+/* the read-filter context (read_filt.h includes this header, so only a
+declaration is possible here) */
+struct xb_read_filt_ctxt_t;
+
 namespace pagetracking {
 typedef std::set<page_no_t>::iterator page_iterator;
 
@@ -64,19 +68,18 @@ return true if installed */
 bool is_component_installed(MYSQL *connection);
 
 /** Move the current_page_it iterator to point to the last page id of the
-current block. Changed pages separated by gaps of at most max_gap
+current block. Changed pages separated by gaps of at most merge_gap
 unchanged pages belong to the same block, so that they are read with one
 sequential read.
 @param[in/out] page_set       page_set
-@param[in]     max_gap        largest gap that may be combined across,
-                              in pages of the tablespace's physical
-                              page size
-@param[in/out] filler_pages   incremented by the unchanged pages inside
-                              every gap combined into this block
-@param[in/out] combined_gaps  incremented by the number of gaps combined
-                              into this block */
-void range_get_next_page(xb_page_set *page_set, ulint max_gap,
-                         ulint *filler_pages, ulint *combined_gaps);
+@param[in/out] ctxt           read-filter context: ctxt->merge_gap bounds
+                              the gaps merged into this block (in pages
+                              of the tablespace's physical page size);
+                              ctxt->stat_filler_pages and
+                              ctxt->stat_combined_gaps accumulate the
+                              unchanged pages inside merged gaps and the
+                              number of gaps merged */
+void range_get_next_page(xb_page_set *page_set, xb_read_filt_ctxt_t *ctxt);
 
 /** Set the backupid
 @param[in] connection  MySQL connection handler

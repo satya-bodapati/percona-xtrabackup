@@ -31,7 +31,7 @@ See storage/innobase/xtrabackup/src/xb_page_group.h. */
 /* Tests for the PXB-3862 read request cost model and storage probe.
 The grouping itself is one comparison applied by the read path
 (range_get_next_page) and is covered by the framework testcase
-suites/pagetracking/xb_pagetracking_max_gap.sh. */
+suites/pagetracking/xb_pagetracking_merge_gap.sh. */
 
 namespace xb_page_group_test {
 
@@ -70,7 +70,7 @@ TEST(XbReadRequestCost, DeviceContract) {
 TEST(XbIoProbe, MissingFileIsRejected) {
   const auto result =
       pagetracking::probe_storage("/nonexistent/xb_io_probe_test", false);
-  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.has_value());
 }
 
 TEST(XbIoProbe, SmallFileIsRejected) {
@@ -85,7 +85,7 @@ TEST(XbIoProbe, SmallFileIsRejected) {
   close(fd);
 
   const auto result = pagetracking::probe_storage(path, false);
-  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.has_value());
   unlink(path);
 }
 
@@ -104,16 +104,16 @@ TEST(XbIoProbe, MeasuresProvidedDatadirFile) {
   const bool use_o_direct = getenv("XB_PROBE_O_DIRECT") != nullptr;
 
   const auto result = pagetracking::probe_storage(path, use_o_direct);
-  ASSERT_TRUE(result.valid) << "could not probe " << path;
-  EXPECT_GT(result.rtt_us, 0u);
-  EXPECT_GT(result.bw_bytes_per_sec, 0u);
+  ASSERT_TRUE(result.has_value()) << "could not probe " << path;
+  EXPECT_GT(result->rtt_us, 0u);
+  EXPECT_GT(result->bw_bytes_per_sec, 0u);
 
   const auto cost =
-      read_request_cost_bytes(result.rtt_us, result.bw_bytes_per_sec);
+      read_request_cost_bytes(result->rtt_us, result->bw_bytes_per_sec);
   std::cout << "probe of " << path << (use_o_direct ? " (O_DIRECT)" : "")
-            << ": request round trip " << result.rtt_us
+            << ": request round trip " << result->rtt_us
             << " us, sequential read "
-            << result.bw_bytes_per_sec / (1024 * 1024)
+            << result->bw_bytes_per_sec / (1024 * 1024)
             << " MB/s -> one read request costs ~" << cost / 1024
             << "KB of sequential transfer\n";
 }

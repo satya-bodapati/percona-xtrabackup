@@ -39,12 +39,12 @@ struct xb_read_filt_ctxt_t {
   ulint filter_batch_end;             /*!< the ending page id of the
                                       current changed page block in
                                       the page tracking */
-  ulint max_gap;                      /*!< largest changed-page gap to
-                                      combine into one read, in pages of
-                                      page_size (--page-tracking-merge-gap
-                                      scaled for compressed tablespaces,
-                                      or the read request cost in
-                                      pages) */
+  ulint merge_gap;                    /*!< largest changed-page gap to
+                                    combine into one read, in pages of
+                                    page_size (--page-tracking-merge-gap
+                                    scaled for compressed tablespaces,
+                                    or the read request cost in
+                                    pages) */
   /* Statistics accumulated while the file is read, reported by the
   filter's deinit in one log line; they never influence any decision.
 
@@ -52,7 +52,7 @@ struct xb_read_filt_ctxt_t {
 
       1,2,3,4   7   20,21          (3 runs of consecutive pages)
 
-  with max_gap = 4. A gap counts the unchanged pages BETWEEN two
+  with merge_gap = 4. A gap counts the unchanged pages BETWEEN two
   changed pages (between 4 and 7 it is 2: pages 5,6 - not the id
   difference 3). The gap of 2 (pages 5,6) is combined across, so
   [1-7] becomes one read group; the gap of 12 (pages 8..19) is not,
@@ -79,7 +79,7 @@ struct xb_read_filt_ctxt_t {
                                   would have read: here 3, so combining
                                   saved one request */
   ulint stat_combined_gaps;       /*!< gaps of unchanged pages combined
-                                  across (gap <= max_gap), each joining
+                                  across (gap <= merge_gap), each joining
                                   two ranges into one read. Example: 1
                                   (the 2-page gap between 4 and 7) */
   ulint stat_filler_pages;        /*!< unchanged pages read only as
@@ -91,7 +91,7 @@ struct xb_read_filt_ctxt_t {
                                   amplification = (total_changed +
                                   filler) / total_changed */
   ulint stat_skipped_pages;       /*!< unchanged pages in refused gaps
-                                  (gap > max_gap): never read, seeked
+                                  (gap > merge_gap): never read, seeked
                                   past. Example: 12 (pages 8..19).
                                   avg gap = (filler + skipped) /
                                   (ranges - 1) describes how scattered

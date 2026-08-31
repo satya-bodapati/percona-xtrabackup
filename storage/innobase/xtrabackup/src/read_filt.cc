@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "dict0dict.h"
 #include "fil_cur.h"
+#include "utils.h"
 #include "xb0xb.h"
 #include "xb_io_probe.h"
 #include "xtrabackup.h"
@@ -46,7 +47,7 @@ static void common_init(
   ctxt->buffer_capacity = cursor->buf_size;
   ctxt->page_size = cursor->page_size;
   ctxt->space_id = cursor->space_id;
-  ctxt->max_gap = 0;
+  ctxt->merge_gap = 0;
   ctxt->stat_batches = 0;
   ctxt->stat_total_changed_pages = 0;
   ctxt->stat_groups = 0;
@@ -125,7 +126,7 @@ static void rf_page_tracking_init(xb_read_filt_ctxt_t *ctxt,
   common_init(ctxt, cursor);
   ctxt->filter_batch_end = 0;
 
-  /* Full-scan spaces never consult max_gap; spaces without changed pages
+  /* Full-scan spaces never consult merge_gap; spaces without changed pages
   are not read at all. */
   if (space_id == dict_sys_t::s_dict_space_id ||
       full_scan_tables.find(space_id) != full_scan_tables.end() ||
@@ -140,9 +141,19 @@ static void rf_page_tracking_init(xb_read_filt_ctxt_t *ctxt,
   proportionally smaller one. In auto mode (the default) the limit is
   the read request cost - measured single-threaded at backup start, or
   the conservative fallback - converted to pages of this tablespace's
-  physical page size: combine every gap cheaper than one saved read. */
+  physical page size: combine every gap cheaper than one saved read.
+
+  The divisibility below holds for every InnoDB tablespace this filter
+  can see: the page-tracking filter is only selected for spaces in the
+  server's changed-page map (InnoDB by construction), and every valid
+  physical page size - 1K-16K compressed, up to the 64K server page
+  size uncompressed - is a power of two not larger than UNIV_PAGE_SIZE.
+  Were it ever violated in a release build, the integer arithmetic
+  degrades toward merge_gap = 0, i.e. the old strictly-consecutive reads:
+  a performance fallback, never a correctness risk (the incremental
+  write filter still gates every page by its LSN). */
   ut_ad(UNIV_PAGE_SIZE % ctxt->page_size == 0);
-  ctxt->max_gap =
+  ctxt->merge_gap =
       static_cast<ulint>(opt_page_tracking_merge_gap_auto
                              ? xb_read_request_cost / ctxt->page_size
                              : uint64_t{opt_page_tracking_merge_gap} *
@@ -266,14 +277,9 @@ static void rf_page_tracking_get_next_batch(xb_fil_cur_t *cursor,
       }
 
       ctxt->offset = next_page_id * ctxt->page_size;
-      /* Find the end of the current page tracking block */
-      {
-        ulint filler = 0, combined = 0;
-        pagetracking::range_get_next_page(space, ctxt->max_gap, &filler,
-                                          &combined);
-        ctxt->stat_filler_pages += filler;
-        ctxt->stat_combined_gaps += combined;
-      }
+      /* Find the end of the current page tracking block; the walker
+      adds the pages it merges across into ctxt's stat counters */
+      pagetracking::range_get_next_page(space, ctxt);
       ut_ad(space->current_page_it != space->pages.end());
 
       ctxt->filter_batch_end = (*space->current_page_it) + 1;
@@ -335,7 +341,7 @@ static void rf_page_tracking_deinit(xb_fil_cur_t *cursor) {
   xb::info() << std::fixed << "pagetracking: " << cursor->rel_path << ": "
              << ctxt->stat_total_changed_pages << " changed pages in " << ranges
              << " ranges (avg gap " << std::setprecision(1) << avg_gap
-             << " pages); merge-gap=" << ctxt->max_gap
+             << " pages); merge-gap=" << ctxt->merge_gap
              << (opt_page_tracking_merge_gap_auto ? " (auto)" : "")
              << " combined them into " << ctxt->stat_groups
              << " reads: request reduction " << reduction
@@ -355,10 +361,11 @@ static void rf_page_tracking_deinit(xb_fil_cur_t *cursor) {
       avg_gap_bytes <= pagetracking::READ_REQUEST_COST_MAX_BYTES) {
     xb::info() << std::fixed << std::setprecision(1)
                << "pagetracking: " << cursor->rel_path << ": typical gap "
-               << avg_gap << " pages (" << avg_gap_bytes / 1024
-               << "KB) costs more than one read request ("
-               << xb_read_request_cost / 1024
-               << "KB); reads stay individual - if sequential read "
+               << avg_gap << " pages ("
+               << xtrabackup::utils::human_readable(avg_gap_bytes)
+               << ") costs more than one read request ("
+               << xtrabackup::utils::human_readable(xb_read_request_cost)
+               << "); reads stay individual - if sequential read "
                   "throughput is high, --page-tracking-merge-gap="
                << static_cast<uint64_t>(avg_gap + 1.0) << " may be faster";
   }
