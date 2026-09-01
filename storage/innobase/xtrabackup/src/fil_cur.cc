@@ -30,7 +30,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <trx0sys.h>
 #include <univ.i>
 
+#include <fcntl.h>
 #include "common.h"
+
 #include "fil_cur.h"
 #include "read_filt.h"
 #include "xb0xb.h"
@@ -311,6 +313,23 @@ read_retry:
   err = os_file_read_no_error_handling(read_request, cursor->rel_path,
                                        cursor->file, cursor->buf, offset,
                                        to_read, &n_read);
+
+#ifdef POSIX_FADV_WILLNEED
+  /* Ask the kernel to start reading the NEXT chunk of this file while
+  the one just read is checksummed and written: the copy loop stays a
+  simple synchronous reader, but its read I/O overlaps its CPU work
+  beyond the kernel's small default readahead window. Buffered reads
+  only - under O_DIRECT the page cache is not in the read path - and
+  purely advisory, so the result is ignored. */
+  if (opt_backup_prefetch && err == DB_SUCCESS &&
+      srv_unix_file_flush_method != SRV_UNIX_O_DIRECT &&
+      srv_unix_file_flush_method != SRV_UNIX_O_DIRECT_NO_FSYNC &&
+      offset + to_read < (uint64_t)cursor->statinfo.st_size) {
+    ::posix_fadvise(cursor->file.m_file, offset + to_read, cursor->buf_size,
+                    POSIX_FADV_WILLNEED);
+  }
+#endif
+
   if (err != DB_SUCCESS) {
     if (err == DB_IO_ERROR) {
       /* If the file is truncated by MySQL, os_file_read will

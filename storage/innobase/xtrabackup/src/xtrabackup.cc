@@ -462,6 +462,10 @@ bool opt_slave_info = false;
 bool opt_page_tracking = false;
 /* --page-tracking-merge-gap: "auto" (default) chooses the gap per table
 from the changed-page distribution; a number pins it for all tables. */
+/* --backup-prefetch: hint the kernel to read the next chunk of the
+file being copied while the current one is processed (buffered reads
+only; the page cache is not in the O_DIRECT read path). */
+bool opt_backup_prefetch = true;
 bool opt_page_tracking_merge_gap_auto = true;
 ulong opt_page_tracking_merge_gap = 0;
 static char *opt_page_tracking_merge_gap_str = nullptr;
@@ -795,6 +799,7 @@ enum options_xtrabackup {
   OPT_GALERA_INFO,
   OPT_PAGE_TRACKING,
   OPT_PAGE_TRACKING_MERGE_GAP,
+  OPT_BACKUP_PREFETCH,
   OPT_SLAVE_INFO,
   OPT_NO_LOCK,
   OPT_LOCK_DDL,
@@ -1123,6 +1128,14 @@ struct my_option xb_client_options[] = {
      "since the last backup.",
      (uchar *)&opt_page_tracking, (uchar *)&opt_page_tracking, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
+
+    {"backup-prefetch", OPT_BACKUP_PREFETCH,
+     "ask the kernel to prefetch the next chunk of each data file while "
+     "the current one is processed, overlapping read I/O with "
+     "checksumming and writing. Takes effect for buffered reads only; it "
+     "is a no-op when the data files are read with O_DIRECT.",
+     (uchar *)&opt_backup_prefetch, (uchar *)&opt_backup_prefetch, 0, GET_BOOL,
+     NO_ARG, 1, 0, 0, 0, 0, 0},
 
     {"page-tracking-merge-gap", OPT_PAGE_TRACKING_MERGE_GAP,
      "with --page-tracking, the maximum gap of unchanged pages, between "
