@@ -24,11 +24,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 #include "read_filt.h"
 
+#include <fcntl.h>
+
 #include <algorithm>
 #include <iomanip>
+#include <iterator>
 #include "common.h"
 #include "dict0dict.h"
 #include "fil_cur.h"
+#include "srv0srv.h"
 #include "utils.h"
 #include "xb0xb.h"
 #include "xb_io_probe.h"
@@ -284,6 +288,45 @@ static void rf_page_tracking_get_next_batch(xb_fil_cur_t *cursor,
 
       ctxt->filter_batch_end = (*space->current_page_it) + 1;
       ut_ad(next_page_id <= ctxt->filter_batch_end);
+
+#ifdef POSIX_FADV_WILLNEED
+      /* Ask the kernel to start reading the NEXT merged range while
+      this one is checksummed and written: the copy loop stays a
+      simple synchronous reader, but its read I/O overlaps its CPU
+      work. The look-ahead walks the changed-page set with the same
+      merge rule as range_get_next_page (without moving the shared
+      iterator), so exactly the bytes the next pread will fetch are
+      hinted - never more, so the hint cannot add read volume - capped
+      at the read buffer, which is all one pread can consume. Only
+      meaningful for buffered reads - under O_DIRECT the page cache is
+      not in the read path - and purely advisory, so failures are
+      ignored. */
+      if (opt_page_tracking_prefetch &&
+          srv_unix_file_flush_method != SRV_UNIX_O_DIRECT &&
+          srv_unix_file_flush_method != SRV_UNIX_O_DIRECT_NO_FSYNC) {
+        const auto next_it = std::next(space->current_page_it);
+        if (next_it != space->pages.end()) {
+          /* Dry-run the unmodified walker on the next range: stand the
+          shared iterator on that range's head, let range_get_next_page
+          find its last page against a scratch ctxt (so the statistics
+          it accumulates are thrown away, not double-counted), then put
+          the iterator back. The walker itself needs no second mode for
+          this. */
+          const auto saved_it = space->current_page_it;
+          space->current_page_it = next_it;
+          xb_read_filt_ctxt_t scratch = *ctxt;
+          pagetracking::range_get_next_page(space, &scratch);
+          const uint64_t head = *next_it;
+          const uint64_t tail = *space->current_page_it;
+          space->current_page_it = saved_it;
+
+          const uint64_t bytes = std::min<uint64_t>(
+              (tail - head + 1) * ctxt->page_size, ctxt->buffer_capacity);
+          ::posix_fadvise(cursor->file.m_file, head * ctxt->page_size, bytes,
+                          POSIX_FADV_WILLNEED);
+        }
+      }
+#endif
     }
 
     *read_batch_start = ctxt->offset;

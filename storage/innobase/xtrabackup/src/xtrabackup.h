@@ -180,6 +180,7 @@ extern longlong xtrabackup_use_memory;
 extern bool opt_galera_info;
 extern bool opt_slave_info;
 extern bool opt_page_tracking;
+extern bool opt_page_tracking_prefetch;
 extern bool opt_page_tracking_merge_gap_auto;
 extern ulong opt_page_tracking_merge_gap;
 extern uint64_t xb_read_request_cost;
