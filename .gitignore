@@ -31,3 +31,7 @@ scalability_jobs_*
 
 # Cache directory used by e.g. clangd.
 .cache/
+
+# Claude Code local state (agent scratch, per-user settings)
+/.claude/settings.local.json
+/.claude/worktrees/
