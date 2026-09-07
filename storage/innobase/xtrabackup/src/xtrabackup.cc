@@ -701,8 +701,10 @@ enum options_xtrabackup {
   OPT_XTRA_LOG_COPY_INTERVAL,
   OPT_XTRA_INCREMENTAL,
   OPT_XTRA_INCREMENTAL_BASEDIR,
+  OPT_XTRA_BACKUP_INCREMENTAL_BASE,
   OPT_XTRA_EXTRA_LSNDIR,
   OPT_XTRA_INCREMENTAL_DIR,
+  OPT_XTRA_PREPARE_INCREMENTAL_FROM_DIR,
   OPT_XTRA_ARCHIVED_TO_LSN,
   OPT_XTRA_TABLES,
   OPT_XTRA_TABLES_FILE,
@@ -942,9 +944,15 @@ struct my_option xb_client_options[] = {
      "careful!",
      (G_PTR *)&xtrabackup_incremental, (G_PTR *)&xtrabackup_incremental, 0,
      GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"backup-incremental-base", OPT_XTRA_BACKUP_INCREMENTAL_BASE,
+     "(for --backup): copy only .ibd pages newer than the backup at the "
+     "specified location.",
+     (G_PTR *)&xtrabackup_incremental_basedir,
+     (G_PTR *)&xtrabackup_incremental_basedir, 0, GET_STR, REQUIRED_ARG, 0, 0,
+     0, 0, 0, 0},
     {"incremental-basedir", OPT_XTRA_INCREMENTAL_BASEDIR,
-     "(for --backup): copy only .ibd pages newer than backup at specified "
-     "directory.",
+     "(deprecated) Synonym for --backup-incremental-base. Will be removed in "
+     "a future release; use --backup-incremental-base instead.",
      (G_PTR *)&xtrabackup_incremental_basedir,
      (G_PTR *)&xtrabackup_incremental_basedir, 0, GET_STR, REQUIRED_ARG, 0, 0,
      0, 0, 0, 0},
@@ -954,9 +962,15 @@ struct my_option xb_client_options[] = {
      (G_PTR *)&xtrabackup_redo_log_arch_dir,
      (G_PTR *)&xtrabackup_redo_log_arch_dir, 0, GET_STR, REQUIRED_ARG, 0, 0, 0,
      0, 0, 0},
-    {"incremental-dir", OPT_XTRA_INCREMENTAL_DIR,
+    {"prepare-incremental-from-dir", OPT_XTRA_PREPARE_INCREMENTAL_FROM_DIR,
      "(for --prepare): apply .delta files and logfile in the specified "
      "directory.",
+     (G_PTR *)&xtrabackup_incremental_dir, (G_PTR *)&xtrabackup_incremental_dir,
+     0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"incremental-dir", OPT_XTRA_INCREMENTAL_DIR,
+     "(deprecated) Synonym for --prepare-incremental-from-dir. Will be "
+     "removed in a future release; use --prepare-incremental-from-dir "
+     "instead.",
      (G_PTR *)&xtrabackup_incremental_dir, (G_PTR *)&xtrabackup_incremental_dir,
      0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
     {"to-archived-lsn", OPT_XTRA_ARCHIVED_TO_LSN,
@@ -7678,6 +7692,42 @@ static void append_defaults_group(const char *group,
   ut_a(appended);
 }
 
+/** Handle the renamed incremental options. Each old name drives the same
+variable as its new one, so a command line carrying both is operator
+confusion rather than intent: reject it instead of silently picking one.
+Called straight after the option parser, because main() acts on
+--incremental-basedir before xb_init() would run.
+@return false if the caller should stop. */
+static bool check_renamed_incremental_options() {
+  static const struct {
+    const char *old_name;
+    const char *new_name;
+  } renamed_options[] = {
+      {"incremental-basedir", "backup-incremental-base"},
+      {"incremental-dir", "prepare-incremental-from-dir"},
+  };
+
+  for (const auto &renamed : renamed_options) {
+    const bool old_set = check_if_param_set(renamed.old_name);
+    const bool new_set = check_if_param_set(renamed.new_name);
+
+    if (old_set && new_set) {
+      xb::error() << "--" << renamed.old_name << " and --" << renamed.new_name
+                  << " are the same option; pass only one.";
+      return (false);
+    }
+
+    if (old_set) {
+      xb::warn() << "--" << renamed.old_name
+                 << " is deprecated and will be removed in a future release. "
+                    "Please use --"
+                 << renamed.new_name << " instead.";
+    }
+  }
+
+  return (true);
+}
+
 bool xb_init() {
   const char *mixed_options[4] = {NULL, NULL, NULL, NULL};
   int n_mixed_options;
@@ -8305,6 +8355,10 @@ int main(int argc, char **argv) {
   print_version();
 
   atexit(destroy_error_log);
+
+  if (!check_renamed_incremental_options()) {
+    exit(EXIT_FAILURE);
+  }
 
   if (xtrabackup_encrypt) {
     xb_libgcrypt_init();
