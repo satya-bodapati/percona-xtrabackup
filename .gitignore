@@ -29,3 +29,7 @@ scalability_jobs_*
 .project
 .settings/
 
+
+# Claude Code local state (per-user settings, agent scratch worktrees)
+/.claude/settings.local.json
+/.claude/worktrees/
