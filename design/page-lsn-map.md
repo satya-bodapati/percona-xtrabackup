@@ -39,10 +39,37 @@ recorded LSN is authoritative for the file prepare will operate on.
 
 > Drop the record when `record_lsn < copy_lsn(page)`.
 
-A page whose records are all dropped never enters the recovery hash, so
-`recv_read_in_area()` never submits it and the read never happens.
-
 The whole feature is one comparison moved earlier in time.
+
+### 2.1 Two effects, and they multiply
+
+Dropping a record before it reaches the hash saves work twice over.
+
+**Directly: the page is never read.** A page whose records are all dropped never
+enters the recovery hash, so `recv_read_in_area()` never submits it and the read
+never happens.
+
+**Indirectly: the heap holds only useful records.** The recovery heap is bounded
+by `--use-memory`, and a batch fires when it fills. Records that are dropped
+never occupy it, so the same budget now covers more of the log — more redo is
+read and applied per batch, and there are fewer batches. Since each batch ends in
+`buf_pool_invalidate()`, a page named in several batches is read once per batch,
+so collapsing batches also removes repeated reads of the pages that *do* survive.
+
+Measured, the batch counts fall alongside the reads: 40 to 29, 163 to 116, 64 to
+16, 9 to 2.
+
+The second effect is why the measured reduction can exceed what page-skipping
+alone allows. For a page touched `k` times during the backup window, the chance
+that every change landed before the copy thread reached it is `1/(k+1)`, so the
+skippable fraction is `E[1/(K+1)]` — capped at 50%, since a page touched once is
+skippable only half the time. The measured records-per-page histogram gives 0.41
+for that expression, and the measured wasted-read fraction at 8 GB was 41.1%:
+prediction and measurement agree.
+
+Yet observed read reductions run to 65%. There is no contradiction: the cap
+applies to *distinct pages skipped*, while the counter measures *read
+operations*. Fewer batches removes the repeats.
 
 ## 3. Backup side
 
