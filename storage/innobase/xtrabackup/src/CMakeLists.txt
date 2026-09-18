@@ -94,6 +94,7 @@ MYSQL_ADD_EXECUTABLE(xtrabackup
   quicklz/quicklz.c
   read_filt.cc
   write_filt.cc
+  page_lsn_map.cc
   wsrep.cc
   xbcrypt_common.cc
   xbcrypt_write.cc

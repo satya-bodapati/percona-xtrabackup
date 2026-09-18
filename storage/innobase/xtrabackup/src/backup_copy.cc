@@ -76,6 +76,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "file_utils.h"
 #include "keyring_components.h"
 #include "keyring_plugins.h"
+#include "page_lsn_map.h"
 #include "sql_thd_internal_api.h"
 #include "xtrabackup.h"
 #include "xtrabackup_config.h"
@@ -1747,6 +1748,12 @@ bool backup_finish(Backup_context &context) {
     }
     context.myrocks_checkpoint.remove();
   }
+
+  /* Emit the page LSN map. Everything it needs is final here: every copy
+  thread has joined, handle_ddl_operations() has run, and the redo thread
+  has stopped. It must land before report_backup_size() below, which
+  samples bytes_written. */
+  page_lsn_map::backup_finish_emit(ds_data);
 
   xb::info() << "Backup created in directory " << SQUOTE(xtrabackup_target_dir);
 
