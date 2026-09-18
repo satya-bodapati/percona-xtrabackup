@@ -853,7 +853,8 @@ bool recv_find_max_checkpoint(log_t &log, Log_checkpoint_location &checkpoint);
 @param[in]  start_lsn read area start
 @param[in]  end_lsn   read area end */
 lsn_t recv_read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
-                        const lsn_t end_lsn);
+                        const lsn_t end_lsn,
+                        bool validate_threads = true);
 
 /** Adds data from a new log block to the parsing buffer of recv_sys if
 recv_sys->parse_start_lsn is non-zero.

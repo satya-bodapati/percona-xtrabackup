@@ -3051,7 +3051,17 @@ static void recv_lazy_read_body(byte *out_buf, const recv_t *recv,
   (block_header + block_trailer) * (number of block boundaries the body
   crosses).  For a 16 KB body that typically crosses ~33 blocks, raw_len
   is ~16 KB + ~33 * 16 B ≈ 16.5 KB. */
-  const ulint raw_len = static_cast<ulint>(body_end_lsn - body_start_lsn);
+  /* Read whole log blocks. log_data_blocks_read() asserts that the file
+  offset it is given is a multiple of OS_FILE_LOG_BLOCK_SIZE, and
+  body_start_lsn points into the middle of a block almost every time, so the
+  range has to be widened to block boundaries on both ends and the body
+  picked out of the result. Handing it the bare body range instead aborts
+  recovery on the first fetch. */
+  const lsn_t aligned_start =
+      ut_uint64_align_down(body_start_lsn, OS_FILE_LOG_BLOCK_SIZE);
+  const lsn_t aligned_end =
+      ut_uint64_align_up(body_end_lsn, OS_FILE_LOG_BLOCK_SIZE);
+  const ulint raw_len = static_cast<ulint>(aligned_end - aligned_start);
 
   byte *raw_buf = static_cast<byte *>(
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, raw_len));
@@ -3059,12 +3069,12 @@ static void recv_lazy_read_body(byte *out_buf, const recv_t *recv,
   /* Read raw blocks from the redo log file.  InnoDB's log-block I/O API
   handles redo log encryption (if enabled) transparently; raw_buf will
   contain decrypted-but-still-block-framed bytes. */
-  recv_read_log_seg(*log_sys, raw_buf, body_start_lsn, body_end_lsn);
+  recv_read_log_seg(*log_sys, raw_buf, aligned_start, aligned_end, false);
 
   /* Strip log-block framing: walk through raw_buf, copying data bytes into
   out_buf and skipping the 4-byte trailer + 12-byte next-block header at
   each block boundary.  See the layout diagram in the function header. */
-  const byte *src = raw_buf;
+  const byte *src = raw_buf + (body_start_lsn - aligned_start);
   byte *dst = out_buf;
   ulint copied = 0;
   lsn_t cur_lsn = body_start_lsn;
@@ -4310,8 +4320,15 @@ static
 #endif
     lsn_t
     recv_read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
-                      const lsn_t end_lsn) {
-  log_background_threads_inactive_validate();
+                      const lsn_t end_lsn, bool validate_threads) {
+  /* The scan phase runs before the log background threads exist, and asserts
+  that. The lazy body fetch runs during apply, by which point srv_start() has
+  started them, so it passes false: this function opens its own read-only
+  handle and preads, and the log files are not being recycled while recovery
+  is still reading them. */
+  if (validate_threads) {
+    log_background_threads_inactive_validate();
+  }
 
   ut_a(start_lsn < end_lsn);
 
