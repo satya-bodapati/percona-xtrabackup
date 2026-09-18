@@ -94,6 +94,15 @@ extern bool estimate_memory;
 
 /** Parameter to enable estimate memory. Used at --backup */
 extern bool xtrabackup_estimate_memory;
+
+/** Page LSN map lookups used by recv_add_to_hash_table(). Defined in
+storage/innobase/xtrabackup/src/page_lsn_map.cc; declared here rather than
+including that header so the innobase library does not depend on the
+xtrabackup source directory. */
+namespace page_lsn_map {
+bool is_loaded();
+lsn_t lookup(uint32_t space_id, uint32_t page_no);
+}  // namespace page_lsn_map
 #define SQUOTE(str) "'" << str << "'"
 
 const std::string KEYRING_NOT_LOADED =

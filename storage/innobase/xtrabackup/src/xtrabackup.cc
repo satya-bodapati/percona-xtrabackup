@@ -53,6 +53,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <signal.h>
 #include <string.h>
 #include "os0event.h"
+#include "page_lsn_map.h"
 #include "xb_dict.h"
 
 #ifdef __linux__
@@ -174,6 +175,12 @@ bool estimate_memory = false;
 bool xtrabackup_estimate_memory = false;
 
 bool xtrabackup_create_ib_logfile = false;
+
+/** --page-lsn-map: record every copied page's FIL_PAGE_LSN during --backup
+and ship it as xtrabackup_page_lsn. */
+bool opt_page_lsn_map = false;
+/** --use-page-lsn-map: consult that map during --prepare. */
+bool opt_use_page_lsn_map = false;
 
 long xtrabackup_throttle = 0; /* 0:unlimited */
 lint io_ticket;
@@ -862,6 +869,8 @@ enum options_xtrabackup {
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_CHECK_TABLES,
+  OPT_XTRA_PAGE_LSN_MAP,
+  OPT_XTRA_USE_PAGE_LSN_MAP,
 };
 
 struct my_option xb_client_options[] = {
@@ -913,6 +922,21 @@ struct my_option xb_client_options[] = {
      "the backup. The estimation happens during backup. (Default OFF)",
      (G_PTR *)&xtrabackup_estimate_memory, (G_PTR *)&xtrabackup_estimate_memory,
      0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"page-lsn-map", OPT_XTRA_PAGE_LSN_MAP,
+     "During --backup, record the FIL_PAGE_LSN of every copied page and write "
+     "it into the backup as xtrabackup_page_lsn. --prepare can then tell "
+     "whether a redo record is already contained in a page without reading "
+     "the page. Experimental, off by default. Ignored for --incremental and "
+     "for --lock-ddl=reduced.",
+     (G_PTR *)&opt_page_lsn_map, (G_PTR *)&opt_page_lsn_map, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"use-page-lsn-map", OPT_XTRA_USE_PAGE_LSN_MAP,
+     "During --prepare, use xtrabackup_page_lsn (if the backup carries one) "
+     "to skip redo records that the page already contains, so those pages are "
+     "never read. Experimental, off by default. If the map is absent or "
+     "unusable, prepare behaves exactly as it does without this option.",
+     (G_PTR *)&opt_use_page_lsn_map, (G_PTR *)&opt_use_page_lsn_map, 0,
+     GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"throttle", OPT_XTRA_THROTTLE,
      "limit count of IO operations (pairs of read&write) per second to IOS "
      "values (for '--backup')",
@@ -3388,6 +3412,16 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
 
   /* The main copy loop */
   while ((res = xb_fil_cur_read(&cursor)) == XB_FIL_CUR_SUCCESS) {
+    /* Record each page's FIL_PAGE_LSN. This is the only point that sees
+    every page, after xb_fil_cur_read_from_offset() has converged its
+    checksum-retry loop, and holding exactly the bytes the write filter is
+    about to put into the backup. */
+    if (page_lsn_map::capture_enabled()) {
+      page_lsn_map::capture_buffer(node->space->id, cursor.is_system,
+                                   cursor.buf, (uint32_t)cursor.buf_page_no,
+                                   (uint32_t)cursor.buf_npages,
+                                   (uint32_t)cursor.page_size, thread_n);
+    }
     if (!write_filter->process(&write_filt_ctxt, dstfile)) {
       goto error;
     }
@@ -4644,6 +4678,28 @@ void xtrabackup_backup_func(void) {
       xb::info() << "Using pagetracking feature for incremental backup";
     } else {
       xb::info() << "using the full scan for incremental backup";
+    }
+  }
+
+  /* Page LSN map capture. Two cases are deliberately excluded in v1, both
+  in the safe direction (no map means prepare reads pages as it does today):
+
+   - --incremental: a page skipped by wf_incremental_process() comes from the
+     BASE backup, not from this copy, so the LSN we measured here is not the
+     LSN of the page prepare will operate on.
+   - --lock-ddl=reduced: a tablespace can be re-copied after DDL, so a space
+     carries two generations of blocks and the abandoned one must be
+     discarded. Rather than resolve that, drop the map. */
+  if (opt_page_lsn_map) {
+    if (xtrabackup_incremental) {
+      xb::warn() << "--page-lsn-map is not supported with --incremental yet; "
+                    "no map will be written.";
+    } else if (opt_lock_ddl == LOCK_DDL_REDUCED) {
+      xb::warn() << "--page-lsn-map is not supported with --lock-ddl=reduced "
+                    "yet; no map will be written.";
+    } else {
+      page_lsn_map::backup_init(redo_mgr.get_start_checkpoint_lsn(),
+                                (uint32_t)xtrabackup_parallel);
     }
   }
 
@@ -7122,7 +7178,66 @@ static void check_tables_thread_func(data_thread_ctxt_t *ctxt) {
   my_thread_end();
 }
 
+/** Wall-clock of the prepare phases, filled in by xtrabackup_prepare_func()
+and reported together with the recovery counters. */
+static uint64_t xb_delta_merge_ms = 0;
+static uint64_t xb_recovery_ms = 0;
+
+/** Emit every prepare counter as ONE machine-parseable line.
+
+One line rather than several: the benchmark harness then needs a single
+regex and no timestamp arithmetic, and the output cannot interleave with
+the multi-threaded log writes going on around it. */
+static void xb_print_prepare_stats(uint64_t total_ms) {
+  const auto &st = xb_recv_stats;
+
+  /* Batches fire from inside the scan loop, so scan_ns contains apply_ns.
+  Report pure scan time. */
+  const uint64_t apply_ms = st.apply_ns.load() / 1000000;
+  const uint64_t scan_raw_ms = st.scan_ns.load() / 1000000;
+  const uint64_t scan_ms = scan_raw_ms > apply_ms ? scan_raw_ms - apply_ms : 0;
+
+  std::ostringstream hist;
+  for (int i = 0; i < 16; i++) {
+    if (i) hist << ",";
+    hist << st.recs_per_page_hist[i].load();
+  }
+
+  std::ostringstream bhist;
+  for (int i = 0; i < 16; i++) {
+    if (i) bhist << ",";
+    bhist << st.body_size_hist[i].load();
+  }
+
+  struct rusage ru;
+  getrusage(RUSAGE_SELF, &ru);
+
+  xb::info() << "XB-PREPARE-STATS v=1"
+             << " batches=" << st.batches.load()
+             << " batches_inval=" << st.batches_invalidating.load()
+             << " pages_read=" << st.pages_read.load()
+             << " page_applies=" << st.page_applies.load()
+             << " pages_wasted=" << st.pages_wasted.load()
+             << " recs_applied=" << st.recs_applied.load()
+             << " recs_superseded=" << st.recs_superseded.load()
+             << " recs_dropped_by_map=" << st.recs_dropped_by_map.load()
+             << " pages_skipped_by_map=" << st.pages_skipped_by_map.load()
+             << " redo_scan_bytes=" << st.redo_scan_bytes.load()
+             << " heap_max=" << st.heap_max_bytes.load()
+             << " scan_ms=" << scan_ms << " apply_ms=" << apply_ms
+             << " recovery_ms=" << xb_recovery_ms
+             << " delta_merge_ms=" << xb_delta_merge_ms
+             << " total_ms=" << total_ms << " use_memory=" << srv_buf_pool_size
+             << " buf_pool_pages=" << buf_pool_get_n_pages()
+             << " maxrss_kb=" << (uint64_t)ru.ru_maxrss
+             << " recs_filed=" << st.recs_filed.load()
+             << " body_bytes_filed=" << st.body_bytes_filed.load()
+             << " recs_per_page_hist=" << hist.str()
+             << " body_size_hist=" << bhist.str();
+}
+
 static void xtrabackup_prepare_func(int argc, char **argv) {
+  const auto xb_prepare_start = std::chrono::steady_clock::now();
   ulint err;
   datafiles_iter_t *it;
   fil_node_t *node;
@@ -7326,10 +7441,17 @@ skip_check:
     }
     inc_dir_tables_hash = ut::new_<hash_table_t>(1000);
 
-    if (!xtrabackup_apply_deltas()) {
-      xb_data_files_close();
-      xb_filter_hash_free(inc_dir_tables_hash);
-      goto error_cleanup;
+    {
+      const auto t0 = std::chrono::steady_clock::now();
+      const bool ok = xtrabackup_apply_deltas();
+      xb_delta_merge_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+      if (!ok) {
+        xb_data_files_close();
+        xb_filter_hash_free(inc_dir_tables_hash);
+        goto error_cleanup;
+      }
     }
 
     xb_data_files_close();
@@ -7368,8 +7490,32 @@ skip_check:
              << ((estimate_memory) ? "--use-free-memory-pct" : "--use-memory")
              << " parameter)";
 
-  if (innodb_init(true, true)) {
-    goto error_cleanup;
+  /* Load the page LSN map before recovery starts. It must come after the
+  incremental delta merge and after the reduced-lock .crpt/.del/.ren/.new
+  resolution above, so the files it describes are the files recovery will
+  touch. */
+  if (opt_use_page_lsn_map) {
+    if (xtrabackup_incremental_dir != nullptr) {
+      xb::warn() << "--use-page-lsn-map is ignored for an incremental prepare.";
+    } else if (page_lsn_map::load(xtrabackup_target_dir)) {
+      xb::info() << "Using the page LSN map to skip redo records that the "
+                    "pages already contain.";
+    } else {
+      xb::info() << "No usable page LSN map; preparing the usual way.";
+    }
+  }
+
+  {
+    /* Redo apply in its entirety -- scan, page reads and apply -- happens
+    inside this call, via srv_start(). */
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool failed = innodb_init(true, true);
+    xb_recovery_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - t0)
+                         .count();
+    if (failed) {
+      goto error_cleanup;
+    }
   }
 
   it = datafiles_iter_new(nullptr);
@@ -7572,6 +7718,11 @@ skip_check:
   }
 
   xb_write_galera_info(xtrabackup_incremental);
+
+  xb_print_prepare_stats(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - xb_prepare_start)
+          .count());
 
   if (innodb_end()) goto error_cleanup;
 

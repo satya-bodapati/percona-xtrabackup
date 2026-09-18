@@ -165,10 +165,10 @@ void meb_print_page_header(const page_t *page) {
 }
 #endif /* UNIV_HOTBACKUP */
 
-//#ifndef UNIV_HOTBACKUP
+// #ifndef UNIV_HOTBACKUP
 PSI_memory_key mem_log_recv_page_hash_key;
 PSI_memory_key mem_log_recv_space_hash_key;
-//#endif /* !UNIV_HOTBACKUP */
+// #endif /* !UNIV_HOTBACKUP */
 
 /** true when recv_init_crash_recovery() has been called. */
 bool recv_needed_recovery;
@@ -194,6 +194,34 @@ bool recv_is_making_a_backup = false;
 
 /** true when recovering from a backed up redo log file */
 bool recv_is_from_backup = false;
+
+#ifdef XTRABACKUP
+/** When true, skip copying redo record body bytes to heap during parse.
+Fetch body bytes from the redo log file on demand at apply time instead.
+Set before innodb_init() by xtrabackup_prepare_func(). */
+/** Counters for one --prepare run. See log0recv.h. */
+xb_recv_stats_t xb_recv_stats;
+
+void xb_recv_stats_note_body(uint64_t len) {
+  xb_recv_stats.recs_filed.fetch_add(1, std::memory_order_relaxed);
+  xb_recv_stats.body_bytes_filed.fetch_add(len, std::memory_order_relaxed);
+  unsigned b = 0;
+  uint64_t v = len;
+  while (v >>= 1) {
+    if (++b == 15) break;
+  }
+  xb_recv_stats.body_size_hist[b].fetch_add(1, std::memory_order_relaxed);
+}
+
+void xb_recv_stats_note_page(uint64_t n_recs) {
+  /* log2 bucket, saturating at 15 (32768+ records on one page). */
+  unsigned b = 0;
+  while (n_recs >>= 1) {
+    if (++b == 15) break;
+  }
+  xb_recv_stats.recs_per_page_hist[b].fetch_add(1, std::memory_order_relaxed);
+}
+#endif /* XTRABACKUP */
 
 /** The following counter is used to decide when to print info on
 log scan */
@@ -1115,6 +1143,9 @@ static ulint recv_read_in_area(const page_id_t &page_id) {
   if (n > 0) {
     /* There are pages that need to be read. Go ahead and read them
     for recovery. */
+#ifdef XTRABACKUP
+    xb_recv_stats.pages_read.fetch_add(n, std::memory_order_relaxed);
+#endif /* XTRABACKUP */
     buf_read_recv_pages(page_id.space(), &page_nos[0], n);
   }
 
@@ -1205,6 +1236,17 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
   auto batch_size = recv_sys->n_addrs;
 
   ib::info(ER_IB_MSG_707, ulonglong{batch_size});
+
+#ifdef XTRABACKUP
+  xb_recv_stats.batches.fetch_add(1, std::memory_order_relaxed);
+  if (!allow_ibuf) {
+    /* These are the batches that end in buf_pool_invalidate() below, i.e.
+    the ones that throw the whole buffer pool away and make every page of
+    the next batch a fresh read. */
+    xb_recv_stats.batches_invalidating.fetch_add(1, std::memory_order_relaxed);
+  }
+  const auto xb_batch_start = std::chrono::steady_clock::now();
+#endif /* XTRABACKUP */
 
   static const size_t PCT = 10;
 
@@ -1326,6 +1368,14 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
   recv_sys_empty_hash();
 
   mutex_exit(&recv_sys->mutex);
+
+#ifdef XTRABACKUP
+  xb_recv_stats.apply_ns.fetch_add(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - xb_batch_start)
+          .count(),
+      std::memory_order_relaxed);
+#endif /* XTRABACKUP */
 
   ib::info(ER_IB_MSG_710);
 }
@@ -2742,6 +2792,40 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
   ut_ad(type != MLOG_DUMMY_RECORD);
   ut_ad(type != MLOG_INDEX_LOAD);
 
+#ifdef XTRABACKUP
+  /* Page LSN map: if we know the LSN this page had when it was copied into
+  the backup, and this record is already contained in it, the record need
+  never enter the hash -- and if no record for the page ever does, the page
+  is never read. That is the entire point of the map.
+
+  Three things make this safe:
+   - xb_redo_record_applies() is the SAME predicate recv_recover_page_func()
+     uses after reading the page, so the two cannot drift. Keep on equality.
+   - MLOG_INIT_FILE_PAGE/_PAGE2 are never dropped whatever their LSN.
+     recv_recover_page_func() reassigns page_lsn and zeroes FIL_PAGE_LSN
+     when it sees one, and recv_page_is_brand_new() inspects the first
+     record's type on behalf of buf_page_io_complete(). Removing the
+     leading init record changes the meaning of every later record for that
+     page and can turn a tolerated torn-extend into a hard corruption
+     report. They are rare, so keeping them costs nothing.
+   - The check runs BEFORE recv_get_page_map(space_id, true), which would
+     otherwise allocate an empty Space as a side effect.
+
+  A missing entry returns 0 and nothing is dropped. */
+  if (page_lsn_map::is_loaded() && type != MLOG_INIT_FILE_PAGE &&
+      type != MLOG_INIT_FILE_PAGE2) {
+    const lsn_t copy_lsn = page_lsn_map::lookup(space_id, page_no);
+    if (copy_lsn != 0 && !xb_redo_record_applies(start_lsn, copy_lsn)) {
+      xb_recv_stats.recs_dropped_by_map.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+#endif /* XTRABACKUP */
+
+#ifdef XTRABACKUP
+  xb_recv_stats_note_body((uint64_t)(rec_end - body));
+#endif /* XTRABACKUP */
+
   recv_sys_t::Space *space;
 
   space = recv_get_page_map(space_id, true);
@@ -2852,6 +2936,9 @@ static void recv_data_copy_to_buf(byte *buf, recv_t *recv) {
     recv_data = recv_data->next;
   }
 }
+
+#ifdef XTRABACKUP
+#endif /* XTRABACKUP */
 
 bool recv_page_is_brand_new(buf_block_t *block) {
   mutex_enter(&recv_sys->mutex);
@@ -3019,7 +3106,18 @@ void recv_recover_page_func(
   lsn_t start_lsn = 0;
   bool modification_to_page = false;
 
+#ifdef XTRABACKUP
+  /* Per-page tallies. A page for which xb_applied stays 0 was read purely to
+  discover that every record it held was already contained in it -- that read
+  is exactly the cost the page LSN map removes. */
+  uint64_t xb_total = 0;
+  uint64_t xb_applied = 0;
+#endif /* XTRABACKUP */
+
   for (auto recv : recv_addr->rec_list) {
+#ifdef XTRABACKUP
+    ++xb_total;
+#endif /* XTRABACKUP */
     end_lsn = recv->end_lsn;
 #ifndef UNIV_HOTBACKUP
     ut_ad(end_lsn <= log_sys->m_scanned_lsn);
@@ -3028,12 +3126,9 @@ void recv_recover_page_func(
     byte *buf = nullptr;
 
     if (recv->len > RECV_DATA_BLOCK_SIZE) {
-      /* We have to copy the record body to a separate
-      buffer */
-
+      /* We have to copy the record body to a separate buffer */
       buf = static_cast<byte *>(
           ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, recv->len));
-
       recv_data_copy_to_buf(buf, recv);
     } else if (recv->data != nullptr) {
       buf = ((byte *)(recv->data)) + sizeof(recv_data_t);
@@ -3065,7 +3160,7 @@ void recv_recover_page_func(
     redo will have action recorded on page before tablespace
     was re-inited and that would lead to a problem later. */
 
-    if (recv->start_lsn >= page_lsn
+    if (xb_redo_record_applies(recv->start_lsn, page_lsn)
 #ifndef UNIV_HOTBACKUP
         && undo::is_active(recv_addr->space)
 #endif /* !UNIV_HOTBACKUP */
@@ -3095,6 +3190,9 @@ void recv_recover_page_func(
                                        recv_addr->space, recv_addr->page_no,
                                        block, &mtr, ULINT_UNDEFINED, LSN_MAX);
 
+#ifdef XTRABACKUP
+      ++xb_applied;
+#endif /* XTRABACKUP */
 #ifdef UNIV_HOTBACKUP
       ++applied_recs;
     } else {
@@ -3106,6 +3204,17 @@ void recv_recover_page_func(
       ut::free(buf);
     }
   }
+
+#ifdef XTRABACKUP
+  xb_recv_stats.page_applies.fetch_add(1, std::memory_order_relaxed);
+  xb_recv_stats.recs_applied.fetch_add(xb_applied, std::memory_order_relaxed);
+  xb_recv_stats.recs_superseded.fetch_add(xb_total - xb_applied,
+                                          std::memory_order_relaxed);
+  if (xb_total > 0 && xb_applied == 0) {
+    xb_recv_stats.pages_wasted.fetch_add(1, std::memory_order_relaxed);
+  }
+  xb_recv_stats_note_page(xb_total);
+#endif /* XTRABACKUP */
 
 #ifdef UNIV_ZIP_DEBUG
   if (fil_page_index_page_check(page)) {
@@ -3977,6 +4086,17 @@ bool meb_scan_log_recs(
     recv_parse_log_recs();
 
 #ifndef UNIV_HOTBACKUP
+#ifdef XTRABACKUP
+    {
+      /* Why the batches fire: the heap holding record bodies hit the budget. */
+      const uint64_t used = recv_heap_used();
+      uint64_t prev =
+          xb_recv_stats.heap_max_bytes.load(std::memory_order_relaxed);
+      while (used > prev && !xb_recv_stats.heap_max_bytes.compare_exchange_weak(
+                                prev, used, std::memory_order_relaxed)) {
+      }
+    }
+#endif /* XTRABACKUP */
     if (recv_heap_used() > *max_memory) {
       recv_apply_hashed_log_recs(log, false);
     }
@@ -4038,6 +4158,11 @@ static
     ++log.n_log_ios;
 
     dberr_t err = log_data_blocks_read(file_handle, source_offset, len, buf);
+#ifdef XTRABACKUP
+    if (err == DB_SUCCESS) {
+      xb_recv_stats.redo_scan_bytes.fetch_add(len, std::memory_order_relaxed);
+    }
+#endif /* XTRABACKUP */
 
     if (err == DB_UNSUPPORTED) {
       /* The log block may be encrypted, read and update the log_sys */
@@ -4048,6 +4173,11 @@ static
 
       /* Try again */
       err = log_data_blocks_read(file_handle, source_offset, len, buf);
+#ifdef XTRABACKUP
+      if (err == DB_SUCCESS) {
+        xb_recv_stats.redo_scan_bytes.fetch_add(len, std::memory_order_relaxed);
+      }
+#endif /* XTRABACKUP */
       switch (err) {
         case DB_SUCCESS:
           break;
@@ -4175,6 +4305,10 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
 
   bool finished = false;
 
+#ifdef XTRABACKUP
+  const auto xb_scan_start = std::chrono::steady_clock::now();
+#endif /* XTRABACKUP */
+
   while (!finished) {
     const lsn_t end_lsn =
         recv_read_log_seg(log, log.buf, start_lsn, start_lsn + RECV_SCAN_SIZE);
@@ -4189,11 +4323,20 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
       break;
     }
 
-    finished = recv_scan_log_recs(log, &delta_hashmap_max_mem, log.buf, end_lsn - start_lsn,
-                                  start_lsn, &log.m_scanned_lsn, to_lsn);
+    finished = recv_scan_log_recs(log, &delta_hashmap_max_mem, log.buf,
+                                  end_lsn - start_lsn, start_lsn,
+                                  &log.m_scanned_lsn, to_lsn);
 
     start_lsn = end_lsn;
   }
+
+#ifdef XTRABACKUP
+  xb_recv_stats.scan_ns.fetch_add(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - xb_scan_start)
+          .count(),
+      std::memory_order_relaxed);
+#endif /* XTRABACKUP */
 
   DBUG_PRINT("ib_log", ("scan " LSN_PF " completed", log.m_scanned_lsn));
   return DB_SUCCESS;

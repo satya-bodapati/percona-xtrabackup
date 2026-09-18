@@ -46,6 +46,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0byte.h"
 #include "ut0new.h"
 
+#include <atomic>
 #include <list>
 #include <set>
 #include <unordered_map>
@@ -723,6 +724,87 @@ extern bool recv_needed_recovery;
 number (FIL_PAGE_LSN) is in the future.  Initially false, and set by
 recv_recovery_from_checkpoint_start(). */
 extern bool recv_lsn_checks_on;
+
+/** Does this redo record still need to be applied to a page whose current
+LSN is page_lsn?
+
+This is THE comparison that decides whether a redo record is already contained
+in a page. It is deliberately a single shared function: recv_recover_page_func()
+makes this test after reading the page, and the page LSN map makes the same test
+before the page is read, using the LSN recorded at backup copy time. If the two
+sites ever disagreed, the map would drop records that apply -- a stale page that
+still passes its own checksum, i.e. silent corruption.
+
+Note the inequality is NOT strict. A record whose start_lsn exactly equals the
+page LSN belongs to the mtr that begins where the page's last modification
+ended, so its changes are NOT yet in the page and it must be applied.
+@param[in]      record_lsn      start_lsn of the redo record
+@param[in]      page_lsn        FIL_PAGE_LSN of the page
+@return true if the record must be applied */
+[[nodiscard]] static inline bool xb_redo_record_applies(lsn_t record_lsn,
+                                                        lsn_t page_lsn) {
+  return record_lsn >= page_lsn;
+}
+
+#ifdef XTRABACKUP
+/** Counters and timers for a single xtrabackup --prepare run. Bumped from
+log0recv.cc (which never prints) and reported as one machine-parseable
+XB-PREPARE-STATS line by xtrabackup.cc at the end of prepare.
+
+recv_recover_page_func() runs on the I/O completion threads, so the counters it
+touches are atomic; relaxed ordering is enough because nothing branches on them
+and they are only read after recovery has quiesced. */
+struct xb_recv_stats_t {
+  /** apply batches run, and how many of those invalidated the buffer pool
+  (the allow_ibuf == false ones, which are the expensive kind) */
+  std::atomic<uint64_t> batches{0};
+  std::atomic<uint64_t> batches_invalidating{0};
+  /** tablespace pages submitted for read by recv_read_in_area() */
+  std::atomic<uint64_t> pages_read{0};
+  /** calls into recv_recover_page_func(), i.e. pages actually visited */
+  std::atomic<uint64_t> page_applies{0};
+  /** pages visited for which NOT ONE held record still applied -- the read was
+  pure cost and is exactly what the page LSN map removes */
+  std::atomic<uint64_t> pages_wasted{0};
+  /** individual records applied vs already contained in the page */
+  std::atomic<uint64_t> recs_applied{0};
+  std::atomic<uint64_t> recs_superseded{0};
+  /** records dropped before entering the hash because the map said so */
+  std::atomic<uint64_t> recs_dropped_by_map{0};
+  /** pages never entered into the hash at all because the map dropped every
+  record for them -- these are the reads that never happened */
+  std::atomic<uint64_t> pages_skipped_by_map{0};
+  /** redo bytes read from the log file by the scan */
+  std::atomic<uint64_t> redo_scan_bytes{0};
+  /** high water mark of recv_heap_used(), i.e. why the batches fired */
+  std::atomic<uint64_t> heap_max_bytes{0};
+  /** records actually filed into the hash, and the total size of their
+  bodies. Their ratio bounds what any scheme that moves bodies out of the
+  heap could ever buy: the cost per record is a fixed ~56 byte recv_t plus
+  the body, so removing the body only helps in proportion to b/(r+b). */
+  std::atomic<uint64_t> recs_filed{0};
+  std::atomic<uint64_t> body_bytes_filed{0};
+  /** log2 histogram of filed record body sizes. The mean hides the shape:
+  a small tail of large records can hold most of the bytes. */
+  std::atomic<uint64_t> body_size_hist[16]{};
+  /** histogram of records-per-page, log2 buckets 0..15, sampled at apply.
+  The page LSN map's payoff is E[1/(K+1)] over this distribution and is
+  capped at 50%, so this is the number that decides whether the map is
+  worth its maintenance cost. */
+  std::atomic<uint64_t> recs_per_page_hist[16]{};
+  /** nanoseconds in the scan loop and inside apply batches */
+  std::atomic<uint64_t> scan_ns{0};
+  std::atomic<uint64_t> apply_ns{0};
+};
+
+extern xb_recv_stats_t xb_recv_stats;
+
+/** Record one page's records-per-page count into the histogram. */
+void xb_recv_stats_note_page(uint64_t n_recs);
+
+/** Record one filed record's body length. */
+void xb_recv_stats_note_body(uint64_t len);
+#endif /* XTRABACKUP */
 
 /** Size of the parsing buffer; it must accommodate RECV_SCAN_SIZE many
 times! */
