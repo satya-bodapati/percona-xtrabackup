@@ -7219,6 +7219,12 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
     hist << st.recs_per_page_hist[i].load();
   }
 
+  std::ostringstream bhist;
+  for (int i = 0; i < 16; i++) {
+    if (i) bhist << ",";
+    bhist << st.body_size_hist[i].load();
+  }
+
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);
 
@@ -7243,7 +7249,10 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
              << " buf_pool_pages=" << buf_pool_get_n_pages()
              << " lazy_active=" << (recv_lazy_fetch ? 1 : 0)
              << " maxrss_kb=" << (uint64_t)ru.ru_maxrss
-             << " recs_per_page_hist=" << hist.str();
+             << " recs_filed=" << st.recs_filed.load()
+             << " body_bytes_filed=" << st.body_bytes_filed.load()
+             << " recs_per_page_hist=" << hist.str()
+             << " body_size_hist=" << bhist.str();
 }
 
 static void xtrabackup_prepare_func(int argc, char **argv) {

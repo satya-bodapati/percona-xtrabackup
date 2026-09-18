@@ -204,6 +204,17 @@ bool recv_lazy_fetch = false;
 /** Counters for one --prepare run. See log0recv.h. */
 xb_recv_stats_t xb_recv_stats;
 
+void xb_recv_stats_note_body(uint64_t len) {
+  xb_recv_stats.recs_filed.fetch_add(1, std::memory_order_relaxed);
+  xb_recv_stats.body_bytes_filed.fetch_add(len, std::memory_order_relaxed);
+  unsigned b = 0;
+  uint64_t v = len;
+  while (v >>= 1) {
+    if (++b == 15) break;
+  }
+  xb_recv_stats.body_size_hist[b].fetch_add(1, std::memory_order_relaxed);
+}
+
 void xb_recv_stats_note_page(uint64_t n_recs) {
   /* log2 bucket, saturating at 15 (32768+ records on one page). */
   unsigned b = 0;
@@ -2813,6 +2824,10 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
   }
 #endif /* XTRABACKUP */
 
+#ifdef XTRABACKUP
+  xb_recv_stats_note_body((uint64_t)(rec_end - body));
+#endif /* XTRABACKUP */
+
   recv_sys_t::Space *space;
 
   space = recv_get_page_map(space_id, true);
@@ -3043,9 +3058,15 @@ static void recv_lazy_read_body(byte *out_buf, const recv_t *recv,
   result is the LSN of the first body byte in the raw file stream. */
   const lsn_t body_start_lsn =
       recv_calc_lsn_on_data_add(recv->start_lsn, hdr_len);
-  const lsn_t body_end_lsn = recv->end_lsn;
+  /* NOT recv->end_lsn. That is the end of the whole mini-transaction and is
+  shared by every record the mtr produced, so for a 20-record mtr the first
+  record would read to the end of all twenty. The body ends exactly recv->len
+  logical bytes after it starts, with block framing accounted for. */
+  const lsn_t body_end_lsn =
+      recv_calc_lsn_on_data_add(body_start_lsn, recv->len);
 
   ut_a(body_end_lsn > body_start_lsn);
+  ut_ad(body_end_lsn <= recv->end_lsn);
 
   /* Number of raw file bytes to read — this is larger than recv->len by
   (block_header + block_trailer) * (number of block boundaries the body

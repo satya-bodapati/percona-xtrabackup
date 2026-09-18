@@ -787,6 +787,16 @@ struct xb_recv_stats_t {
   std::atomic<uint64_t> lazy_fetch_bytes{0};
   /** high water mark of recv_heap_used(), i.e. why the batches fired */
   std::atomic<uint64_t> heap_max_bytes{0};
+  /** records actually filed into the hash, and the total size of their
+  bodies. Their ratio is the number that decides whether lazy body fetch can
+  ever pay: the heap cost per record is a fixed ~56 byte recv_t plus the
+  body, so removing the body only helps in proportion to b/(r+b). */
+  std::atomic<uint64_t> recs_filed{0};
+  std::atomic<uint64_t> body_bytes_filed{0};
+  /** log2 histogram of filed record body sizes. The mean hides the shape,
+  and whether a size-thresholded hybrid is worth building depends entirely
+  on whether a small tail of large records holds most of the bytes. */
+  std::atomic<uint64_t> body_size_hist[16]{};
   /** histogram of records-per-page, log2 buckets 0..15, sampled at apply.
   The page LSN map's payoff is E[1/(K+1)] over this distribution and is
   capped at 50%, so this is the number that decides whether the map is
@@ -801,6 +811,9 @@ extern xb_recv_stats_t xb_recv_stats;
 
 /** Record one page's records-per-page count into the histogram. */
 void xb_recv_stats_note_page(uint64_t n_recs);
+
+/** Record one filed record's body length. */
+void xb_recv_stats_note_body(uint64_t len);
 #endif /* XTRABACKUP */
 
 /** Size of the parsing buffer; it must accommodate RECV_SCAN_SIZE many
