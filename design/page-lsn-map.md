@@ -419,12 +419,26 @@ script or wrapper; failing a backup because it happens to be incremental would
 make the feature awkward to adopt and buys no safety. The map is simply not
 produced, or not consulted, and the run behaves exactly as it does today.
 
-- **`--incremental`.** A page skipped by the incremental write filter comes from
-  the base backup, so the LSN measured here is not the LSN of the page prepare
-  will operate on. Supporting it means moving the capture inside
-  `wf_incremental_process()`, after its `continue` guards, so an entry exists
-  only for pages actually written into the `.delta`. Worth doing only if
-  measurement shows incremental prepares spending meaningful time in redo apply.
+- **`--incremental`.** Low value rather than a hard barrier, and the value
+  argument is the decisive one. An incremental backup copies only changed pages,
+  and its redo covers a shorter window, so there is less redo to hold, fewer
+  apply batches to collapse, and therefore less of the repeated page reading this
+  feature exists to remove. A smaller share of incremental prepare time sits in
+  redo apply at all: most of it is the delta merge in
+  `xtrabackup_apply_deltas()`, which this feature does not touch. The
+  `delta_merge_ms` counter added with this work would size that directly, and it
+  should be measured before any effort goes here.
+
+  There is a secondary question that would also need settling. Capture sits above
+  the write filter, so it records pages that `wf_incremental_process()` then
+  skips for having an LSN at or below `incremental_lsn`; after the merge those
+  pages come from the base backup rather than from this delta. That is *probably*
+  safe — a page unmodified since the base has the same LSN in both, and a prepared
+  base only raises it, which errs low and therefore errs safe — but it is
+  unverified reasoning, not a tested property, and unverified is not a basis for
+  shipping. If incremental is ever pursued, the clean answer is to move capture
+  inside `wf_incremental_process()` after its `continue` guards, so an entry
+  exists only for pages actually written into the `.delta`.
 
 - **`--lock-ddl=reduced`.** Designed in section 3.4, not yet implemented. The
   block header already carries the `generation` field it needs; the remaining
