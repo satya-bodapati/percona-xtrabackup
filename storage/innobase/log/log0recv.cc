@@ -1223,7 +1223,9 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
 
     mutex_exit(&recv_sys->mutex);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    /* A 500ms poll here costs whole seconds per batch on a prepare with many
+    batches, for a condition that clears in microseconds. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
   if (!allow_ibuf) {
@@ -1319,7 +1321,9 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
   while (recv_sys->n_addrs != 0) {
     mutex_exit(&recv_sys->mutex);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    /* Drain poll at the end of every apply batch. At 500ms this dominates
+    prepare once batches are numerous. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     mutex_enter(&recv_sys->mutex);
   }

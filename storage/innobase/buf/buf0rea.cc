@@ -705,7 +705,9 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
     while (buf_pool->n_pend_reads >=
            recv_n_frames_for_pages_per_pool_instance / 2) {
       os_aio_simulated_wake_handler_threads();
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      /* Read throttle. 10ms is far longer than an NVMe read takes, so this
+      paces recovery reads well below what the device can sustain. */
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
 
       count++;
 
