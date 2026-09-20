@@ -182,6 +182,13 @@ every copied page's FIL_PAGE_LSN into xtrabackup_page_lsn, and during
 prepares a map-bearing backup the old way. */
 bool opt_page_lsn_map = false;
 
+/** --innodb-buffer-pool-instances. Recovery has always run with a single
+buffer pool instance, which means a single free-list mutex behind every
+mem_heap the recovery hash allocates from. Expose it so a prepare with a
+large --use-memory can spread that contention. Default 1, which is what
+prepare has always done. */
+ulong xtrabackup_buffer_pool_instances = 1;
+
 long xtrabackup_throttle = 0; /* 0:unlimited */
 lint io_ticket;
 os_event_t wait_throttle = NULL;
@@ -868,6 +875,7 @@ enum options_xtrabackup {
   OPT_XTRA_TABLES_COMPATIBILITY_CHECK,
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
+  OPT_XTRA_BUFFER_POOL_INSTANCES,
   OPT_XTRA_CHECK_TABLES,
   OPT_XTRA_PAGE_LSN_MAP,
 };
@@ -1448,6 +1456,14 @@ struct my_option xb_client_options[] = {
      "privileges before performing any query.",
      &opt_check_privileges, &opt_check_privileges, 0, GET_BOOL, NO_ARG, 0, 0, 0,
      0, 0, 0},
+
+    {"innodb-buffer-pool-instances", OPT_XTRA_BUFFER_POOL_INSTANCES,
+     "Number of buffer pool instances to use during --prepare. The recovery "
+     "hash allocates from heaps backed by the buffer pool, so a single "
+     "instance serialises those allocations on one free-list mutex. Only "
+     "takes effect when --use-memory is large enough to divide. Default 1.",
+     &xtrabackup_buffer_pool_instances, &xtrabackup_buffer_pool_instances, 0,
+     GET_ULONG, REQUIRED_ARG, 1, 1, 64, 0, 1, 0},
 
     {"read_buffer_size", OPT_XTRA_READ_BUFFER_SIZE,
      "Set datafile read buffer size, given value is scaled up to page size."
@@ -2446,7 +2462,7 @@ static bool innodb_init_param(void) {
   changes the value so that it becomes the number of database pages. */
 
   srv_buf_pool_chunk_unit = 134217728;
-  srv_buf_pool_instances = 1;
+  srv_buf_pool_instances = xtrabackup_buffer_pool_instances;
   if (xtrabackup_incremental_dir) {
     real_redo_memory = incremental_redo_memory;
     real_redo_frames = incremental_redo_frames;
