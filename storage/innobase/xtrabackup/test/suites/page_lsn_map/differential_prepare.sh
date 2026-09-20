@@ -54,7 +54,7 @@ vlog "Two identical copies of the same backup"
 cp -a $topdir/bk $topdir/bk_map
 cp -a $topdir/bk $topdir/bk_nomap
 
-xtrabackup --prepare --use-memory=64M --use-page-lsn-map \
+xtrabackup --prepare --use-memory=64M --page-lsn-map \
            --target-dir=$topdir/bk_map
 xtrabackup --prepare --use-memory=64M --target-dir=$topdir/bk_nomap
 

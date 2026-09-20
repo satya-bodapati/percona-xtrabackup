@@ -176,11 +176,11 @@ bool xtrabackup_estimate_memory = false;
 
 bool xtrabackup_create_ib_logfile = false;
 
-/** --page-lsn-map: record every copied page's FIL_PAGE_LSN during --backup
-and ship it as xtrabackup_page_lsn. */
+/** --page-lsn-map. One option for both phases: during --backup it records
+every copied page's FIL_PAGE_LSN into xtrabackup_page_lsn, and during
+--prepare it consults that file. Leaving it off at prepare is how an operator
+prepares a map-bearing backup the old way. */
 bool opt_page_lsn_map = false;
-/** --use-page-lsn-map: consult that map during --prepare. */
-bool opt_use_page_lsn_map = false;
 
 long xtrabackup_throttle = 0; /* 0:unlimited */
 lint io_ticket;
@@ -870,7 +870,6 @@ enum options_xtrabackup {
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_CHECK_TABLES,
   OPT_XTRA_PAGE_LSN_MAP,
-  OPT_XTRA_USE_PAGE_LSN_MAP,
 };
 
 struct my_option xb_client_options[] = {
@@ -923,20 +922,16 @@ struct my_option xb_client_options[] = {
      (G_PTR *)&xtrabackup_estimate_memory, (G_PTR *)&xtrabackup_estimate_memory,
      0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"page-lsn-map", OPT_XTRA_PAGE_LSN_MAP,
-     "During --backup, record the FIL_PAGE_LSN of every copied page and write "
-     "it into the backup as xtrabackup_page_lsn. --prepare can then tell "
-     "whether a redo record is already contained in a page without reading "
-     "the page. Experimental, off by default. Ignored for --incremental and "
-     "for --lock-ddl=reduced.",
+     "Record page LSNs during --backup, and use them during --prepare to skip "
+     "pages that need no redo applied. Pass it to both commands: --backup "
+     "writes xtrabackup_page_lsn into the backup, and --prepare consults it "
+     "so a page whose redo records it already contains is never read. "
+     "Omitting it at --prepare ignores any map present and prepares the usual "
+     "way; if the map is absent or unusable, prepare also falls back silently. "
+     "Experimental, off by default. Not supported with --incremental or "
+     "--lock-ddl=reduced, where it is skipped with a warning.",
      (G_PTR *)&opt_page_lsn_map, (G_PTR *)&opt_page_lsn_map, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
-    {"use-page-lsn-map", OPT_XTRA_USE_PAGE_LSN_MAP,
-     "During --prepare, use xtrabackup_page_lsn (if the backup carries one) "
-     "to skip redo records that the page already contains, so those pages are "
-     "never read. Experimental, off by default. If the map is absent or "
-     "unusable, prepare behaves exactly as it does without this option.",
-     (G_PTR *)&opt_use_page_lsn_map, (G_PTR *)&opt_use_page_lsn_map, 0,
-     GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
     {"throttle", OPT_XTRA_THROTTLE,
      "limit count of IO operations (pairs of read&write) per second to IOS "
      "values (for '--backup')",
@@ -7494,9 +7489,9 @@ skip_check:
   incremental delta merge and after the reduced-lock .crpt/.del/.ren/.new
   resolution above, so the files it describes are the files recovery will
   touch. */
-  if (opt_use_page_lsn_map) {
+  if (opt_page_lsn_map) {
     if (xtrabackup_incremental_dir != nullptr) {
-      xb::warn() << "--use-page-lsn-map is ignored for an incremental prepare.";
+      xb::warn() << "--page-lsn-map is ignored for an incremental prepare.";
     } else if (page_lsn_map::load(xtrabackup_target_dir)) {
       xb::info() << "Using the page LSN map to skip redo records that the "
                     "pages already contain.";

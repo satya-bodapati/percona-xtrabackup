@@ -23,23 +23,23 @@ xtrabackup --backup --page-lsn-map --target-dir=$topdir/bk
 
 vlog "1. map absent"
 cp -a $topdir/bk $topdir/c1 && rm -f $topdir/c1/xtrabackup_page_lsn
-xtrabackup --prepare --use-page-lsn-map --target-dir=$topdir/c1
+xtrabackup --prepare --page-lsn-map --target-dir=$topdir/c1
 
 vlog "2. trailer destroyed (file truncated)"
 cp -a $topdir/bk $topdir/c2
 truncate -s -8 $topdir/c2/xtrabackup_page_lsn
-xtrabackup --prepare --use-page-lsn-map --target-dir=$topdir/c2
+xtrabackup --prepare --page-lsn-map --target-dir=$topdir/c2
 
 vlog "3. map is empty"
 cp -a $topdir/bk $topdir/c3
 : > $topdir/c3/xtrabackup_page_lsn
-xtrabackup --prepare --use-page-lsn-map --target-dir=$topdir/c3
+xtrabackup --prepare --page-lsn-map --target-dir=$topdir/c3
 
 vlog "4. first block body corrupted, so its CRC fails"
 cp -a $topdir/bk $topdir/c4
 printf 'XXXXXXXX' | dd of=$topdir/c4/xtrabackup_page_lsn bs=1 seek=48 \
     conv=notrunc 2>/dev/null
-xtrabackup --prepare --use-page-lsn-map --target-dir=$topdir/c4
+xtrabackup --prepare --page-lsn-map --target-dir=$topdir/c4
 
 vlog "5. a map is present but never asked for"
 cp -a $topdir/bk $topdir/c5
