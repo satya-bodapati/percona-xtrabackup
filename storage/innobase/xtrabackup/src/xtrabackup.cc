@@ -876,6 +876,11 @@ enum options_xtrabackup {
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_BUFFER_POOL_INSTANCES,
+  OPT_INNODB_IO_CAPACITY_MAX,
+  OPT_INNODB_PAGE_CLEANERS,
+  OPT_INNODB_LRU_SCAN_DEPTH,
+  OPT_INNODB_FLUSH_NEIGHBORS,
+  OPT_INNODB_ADAPTIVE_FLUSHING,
   OPT_XTRA_CHECK_TABLES,
   OPT_XTRA_PAGE_LSN_MAP,
 };
@@ -1625,6 +1630,36 @@ Disable with --skip-innodb-checksums.",
      "Number of IOPs the server can do. Tunes the background IO rate",
      (G_PTR *)&srv_io_capacity, (G_PTR *)&srv_io_capacity, 0, GET_ULONG,
      OPT_ARG, 200, 100, ~0UL, 0, 0, 0},
+    {"innodb_io_capacity_max", OPT_INNODB_IO_CAPACITY_MAX,
+     "Upper limit on the page cleaner's flush rate. The server derives this "
+     "as max(2 x io_capacity, 2000); --prepare has always left it at the "
+     "built-in 400, which caps background flushing at roughly 6 MB/s "
+     "regardless of the device.",
+     (G_PTR *)&srv_max_io_capacity, (G_PTR *)&srv_max_io_capacity, 0, GET_ULONG,
+     OPT_ARG, 400, 100, ~0UL, 0, 0, 0},
+
+    {"innodb_page_cleaners", OPT_INNODB_PAGE_CLEANERS,
+     "Number of page cleaner threads flushing dirty pages during --prepare.",
+     (G_PTR *)&srv_n_page_cleaners, (G_PTR *)&srv_n_page_cleaners, 0, GET_ULONG,
+     OPT_ARG, 4, 1, 64, 0, 0, 0},
+
+    {"innodb_lru_scan_depth", OPT_INNODB_LRU_SCAN_DEPTH,
+     "How far down the LRU each page cleaner scans for pages to free.",
+     (G_PTR *)&srv_LRU_scan_depth, (G_PTR *)&srv_LRU_scan_depth, 0, GET_ULONG,
+     OPT_ARG, 1024, 100, ~0UL, 0, 0, 0},
+
+    {"innodb_flush_neighbors", OPT_INNODB_FLUSH_NEIGHBORS,
+     "Flush neighbouring pages from the same extent: 0 off, 1 contiguous, "
+     "2 same extent.",
+     (G_PTR *)&srv_flush_neighbors, (G_PTR *)&srv_flush_neighbors, 0, GET_ULONG,
+     OPT_ARG, 1, 0, 2, 0, 0, 0},
+
+    {"innodb_adaptive_flushing", OPT_INNODB_ADAPTIVE_FLUSHING,
+     "Let the page cleaner scale its flush rate with how dirty the pool is. "
+     "--prepare has always forced this off.",
+     (G_PTR *)&srv_adaptive_flushing, (G_PTR *)&srv_adaptive_flushing, 0,
+     GET_BOOL, OPT_ARG, 0, 0, 0, 0, 0, 0},
+
     {"innodb_read_io_threads", OPT_INNODB_READ_IO_THREADS,
      "Number of background read I/O threads in InnoDB.",
      (G_PTR *)&innobase_read_io_threads, (G_PTR *)&innobase_read_io_threads, 0,
@@ -2440,7 +2475,8 @@ static bool innodb_init_param(void) {
     goto error;
   }
 
-  srv_adaptive_flushing = false;
+  /* srv_adaptive_flushing is owned by --innodb-adaptive-flushing, which
+  defaults to off, so prepare behaves as before unless asked otherwise. */
   /* --------------------------------------------------*/
 
   srv_log_n_files = (ulint)innobase_log_files_in_group;
