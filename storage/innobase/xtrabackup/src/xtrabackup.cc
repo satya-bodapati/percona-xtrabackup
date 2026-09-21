@@ -2586,6 +2586,34 @@ static bool innodb_init_param(void) {
   modules, we check at run time that the size is the same in
   these compilation modules. */
 
+  /* Both --backup and --prepare reach this function, so the flush method
+  is resolved here rather than in xtrabackup_backup_func(), which prepare
+  never calls. */
+#ifndef _WIN32
+  srv_unix_file_flush_method =
+      static_cast<srv_unix_flush_t>(innodb_flush_method);
+  ut_ad(innodb_flush_method <= SRV_UNIX_O_DIRECT_NO_FSYNC);
+
+  /* --prepare calls this function more than once; report the method once. */
+  static bool flush_method_logged = false;
+  if (!flush_method_logged) {
+    flush_method_logged = true;
+    switch (srv_unix_file_flush_method) {
+      case SRV_UNIX_O_DIRECT:
+        xb::info() << "using O_DIRECT";
+        break;
+      case SRV_UNIX_O_DIRECT_NO_FSYNC:
+        xb::info() << "using O_DIRECT_NO_FSYNC";
+        break;
+      default:
+        break;
+    }
+  }
+#else
+  srv_win_file_flush_method = static_cast<srv_win_flush_t>(innodb_flush_method);
+  ut_ad(innodb_flush_method <= SRV_WIN_IO_NORMAL);
+#endif
+
   /* On 5.5+ srv_use_native_aio is true by default. It is later reset
   if it is not supported by the platform in
   innobase_start_or_create_for_mysql(). As we don't call it in xtrabackup,
@@ -4549,25 +4577,6 @@ void xtrabackup_backup_func(void) {
   if (innodb_init_param()) exit(EXIT_FAILURE);
 
   xb_normalize_init_values();
-
-#ifndef _WIN32
-  srv_unix_file_flush_method =
-      static_cast<srv_unix_flush_t>(innodb_flush_method);
-  ut_ad(innodb_flush_method <= SRV_UNIX_O_DIRECT_NO_FSYNC);
-#else
-  srv_win_file_flush_method = static_cast<srv_win_flush_t>(innodb_flush_method);
-  ut_ad(innodb_flush_method <= SRV_WIN_IO_NORMAL);
-#endif
-  switch (srv_unix_file_flush_method) {
-    case SRV_UNIX_O_DIRECT:
-      xb::info() << "using O_DIRECT";
-      break;
-    case SRV_UNIX_O_DIRECT_NO_FSYNC:
-      xb::info() << "using O_DIRECT_NO_FSYNC";
-      break;
-    default:
-      break;
-  }
 
   if (srv_buf_pool_size >= 1000 * 1024 * 1024) {
     /* Here we still have srv_pool_size counted
