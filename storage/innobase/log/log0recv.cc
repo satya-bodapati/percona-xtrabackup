@@ -5262,6 +5262,12 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
   /* Worker 0 of the first window has no earlier position to resume from, so
   it uses the block marker like any interior seam does. */
   lsn_t resume_lsn = 0;
+  /* The furthest LSN whose records have actually been merged. Every exit
+  has to hand this back, or the serial fallback re-parses ground the
+  workers already covered -- measured once as 2,651,841 duplicate records,
+  exactly the tail. */
+  lsn_t filed_through = 0;
+  uint64_t windows = 0;
 
   /* recv_scan_log_recs() does more than parse, and skipping it skipped all
   of this. Most of it is bookkeeping, but recv_init_crash_recovery() also
@@ -5322,7 +5328,9 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
       const lsn_t got =
           recv_read_log_seg(log, window.data() + filled, read_lsn, want);
       if (got == 0) {
-        *io_start_lsn = start_lsn;
+        *io_start_lsn = (filed_through != 0) ? filed_through : start_lsn;
+        xb::info() << "XB-PARSCAN windows=" << windows
+                   << " filed_through=" << filed_through << " exit=read_eof";
         return false;
       }
       if (got <= read_lsn) break; /* end of the log */
@@ -5343,10 +5351,10 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
         resume_lsn, recv_sys->checkpoint_lsn, to_lsn, &new_pages);
     if (done_lsn == 0) {
       /* Nothing from THIS window was filed, but earlier windows were, so
-      the serial parse has to resume here rather than at the checkpoint.
-      Handing back the original LSN would re-parse and re-file everything
-      already merged. */
-      *io_start_lsn = start_lsn;
+      the serial parse has to resume where filing actually reached. */
+      *io_start_lsn = (filed_through != 0) ? filed_through : start_lsn;
+      xb::info() << "XB-PARSCAN windows=" << windows
+                 << " filed_through=" << filed_through << " exit=seam";
       return false;
     }
     if (done_lsn <= start_lsn) break;
@@ -5409,17 +5417,24 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     /* The next window resumes at this exact mtr boundary, reading from the
     block that contains it. */
     if (at_end) {
+      filed_through = done_lsn;
+      ++windows;
       start_lsn = done_lsn;
       break;
     }
 
+    filed_through = done_lsn;
+    ++windows;
     resume_lsn = done_lsn;
     start_lsn = ut_uint64_align_down(done_lsn, OS_FILE_LOG_BLOCK_SIZE);
 
     if (blocks < filled / OS_FILE_LOG_BLOCK_SIZE) break; /* log ended */
   }
 
+  if (filed_through != 0) start_lsn = filed_through;
   *io_start_lsn = start_lsn;
+  xb::info() << "XB-PARSCAN windows=" << windows
+             << " filed_through=" << filed_through << " exit=complete";
   return true;
 }
 
