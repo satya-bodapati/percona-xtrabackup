@@ -185,6 +185,18 @@ by the time you replay a DELETE, the workers have already filed page records
 for a space that should have been dropped. RENAME and EXTEND do not change
 routing and so can be deferred.
 
+They should also be unreachable under the default lock mode. `xb_init()`
+takes `LOCK INSTANCE FOR BACKUP` at `xtrabackup.cc:8117`, and `xb_init()` is
+called at `:8769` while `xtrabackup_backup_func()` is called at `:8837` — so
+with `--lock-ddl=ON` the lock is held before the backup function starts,
+before the checkpoint is read and before the redo follower runs, and no DDL
+can appear in the copied redo at all. That makes the gate ("refuse parallel
+prepare when the backup was taken with `--lock-ddl=OFF`") sound, and
+`lock_ddl_type` is recorded in `xtrabackup_info` by `backup_mysql.cc:1883`
+so prepare can read the mode rather than guess it. Keep the single-worker
+window anyway as a defensive path, so the gate does not have to be airtight
+to be safe.
+
 ### `MLOG_FILE_EXTEND` needs no replay at all
 
 xtrabackup already runs a dedicated pass **after** recovery
