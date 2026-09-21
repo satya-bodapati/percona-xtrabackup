@@ -1723,7 +1723,7 @@ Disable with --skip-innodb-checksums.",
     {"innodb_use_native_aio", OPT_INNODB_USE_NATIVE_AIO,
      "Use native AIO if supported on this platform.",
      (G_PTR *)&srv_use_native_aio, (G_PTR *)&srv_use_native_aio, 0, GET_BOOL,
-     NO_ARG, false, 0, 0, 0, 0, 0},
+     NO_ARG, true, 0, 0, 0, 0, 0},
     {"innodb_page_size", OPT_INNODB_PAGE_SIZE,
      "The universal page size of the database.", (G_PTR *)&innobase_page_size,
      (G_PTR *)&innobase_page_size, 0,
@@ -2647,7 +2647,10 @@ static bool innodb_init_param(void) {
 
 #elif defined(LINUX_NATIVE_AIO)
 
-  if (srv_use_native_aio) {
+  /* --prepare calls this function more than once; report the mode once. */
+  static bool native_aio_logged = false;
+  if (srv_use_native_aio && !native_aio_logged) {
+    native_aio_logged = true;
     ib::info() << "Using Linux native AIO";
   }
 #else
