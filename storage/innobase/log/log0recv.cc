@@ -1192,8 +1192,8 @@ static ulint recv_read_in_area(const page_id_t &page_id) {
         every byte. Count them to size the opportunity before acting on it. */
         {
           const recv_t *first = UT_LIST_GET_FIRST(recv_addr->rec_list);
-          if (first != nullptr && (first->type == MLOG_INIT_FILE_PAGE2 ||
-                                   first->type == MLOG_INIT_FILE_PAGE)) {
+          if (first != nullptr && (first->type() == MLOG_INIT_FILE_PAGE2 ||
+                                   first->type() == MLOG_INIT_FILE_PAGE)) {
             xb_io_brand_new_reads.fetch_add(1, std::memory_order_relaxed);
           }
         }

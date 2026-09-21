@@ -24,6 +24,7 @@ than guess.
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <unordered_map>
 
@@ -265,7 +266,14 @@ bool capture_enabled() { return g_capture; }
 
 void backup_init(uint64_t base_lsn, uint32_t n_threads) {
   g_base_lsn = base_lsn;
-  g_writers.assign(n_threads, nullptr);
+  /* The copy threads number themselves 1..N (xtrabackup.cc sets
+  data_threads[i].num = i + 1), so an array of exactly N slots leaves
+  thread N with no writer and slot 0 unused. Every page that thread copied
+  was then dropped: with --parallel=8 that silently cost 1/8 of all
+  tablespaces, and the one it happened to take out carried 37.5% of the
+  apply phase's record examinations. Size for the numbering actually
+  used. */
+  g_writers.assign(n_threads + 1, nullptr);
   for (uint32_t i = 0; i < n_threads; i++) {
     Writer *w = new Writer();
     if (w->open(i, base_lsn)) {
@@ -278,8 +286,17 @@ void backup_init(uint64_t base_lsn, uint32_t n_threads) {
   xb::info() << "page LSN map: capturing, base LSN " << base_lsn;
 }
 
+std::atomic<uint64_t> g_dropped_pages{0};
+
 Writer *writer_for_thread(uint32_t thread_n) {
-  if (!g_capture || thread_n >= g_writers.size()) return nullptr;
+  if (!g_capture) return nullptr;
+  if (thread_n >= g_writers.size()) {
+    /* Must never happen now that the array is sized for the 1-based
+    numbering, but a silent drop here is exactly how the off-by-one above
+    survived: the map simply came out short and nothing said so. */
+    g_dropped_pages.fetch_add(1, std::memory_order_relaxed);
+    return nullptr;
+  }
   return g_writers[thread_n];
 }
 
@@ -287,7 +304,10 @@ void capture_buffer(uint32_t space_id, bool is_system, const unsigned char *buf,
                     uint32_t first_page_no, uint32_t n_pages,
                     uint32_t page_size, uint32_t thread_n) {
   Writer *w = writer_for_thread(thread_n);
-  if (w == nullptr) return;
+  if (w == nullptr) {
+    g_dropped_pages.fetch_add(n_pages, std::memory_order_relaxed);
+    return;
+  }
 
   for (uint32_t i = 0; i < n_pages; i++) {
     const uint32_t page_no = first_page_no + i;
@@ -315,6 +335,18 @@ void capture_buffer(uint32_t space_id, bool is_system, const unsigned char *buf,
 
 void backup_finish_emit(ds_ctxt *ds) {
   if (!g_capture) return;
+
+  /* A map that is merely SHORT still prepares correctly -- a missing entry
+  just means the page is read as it always was -- so an incomplete map has
+  no symptom other than lost speed. Say so loudly rather than shipping a
+  quietly truncated map. */
+  const uint64_t dropped = g_dropped_pages.load(std::memory_order_relaxed);
+  if (dropped != 0) {
+    xb::warn() << "page LSN map: " << dropped
+               << " pages were not captured because no writer was available "
+                  "for the copy thread; the map will be incomplete and "
+                  "prepare will simply be slower for those pages";
+  }
 
   for (Writer *w : g_writers) {
     if (w != nullptr) w->close();
