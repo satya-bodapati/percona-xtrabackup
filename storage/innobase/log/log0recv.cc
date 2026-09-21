@@ -4726,18 +4726,28 @@ struct Worker {
   uint64_t serialized{0}; /* records parsed under the global mutex */
   lsn_t start_lsn{0};
   lsn_t stop_lsn{0};
-  /* mtrs starting below this are parsed but NOT filed. Recovery begins at
-  the start of the block containing checkpoint_lsn, so the first group of
-  records in that block usually begins before the checkpoint; the serial
-  parse walks them only to find mtr boundaries and drops them via
-  recv_update_bytes_to_ignore_before_checkpoint(). Same rule, expressed as
-  an LSN instead of a byte count. */
-  lsn_t file_from_lsn{0};
+  /* Byte budget of pre-checkpoint record data still to be ignored, the
+  exact analogue of recv_sys->bytes_to_ignore_before_checkpoint. It has to
+  be a byte count and not an LSN floor: the serial parse counts DOWN per
+  record, so when the first mtr is longer than the budget it drops the
+  leading records and KEEPS the rest. Dropping the whole mtr instead lost
+  six records out of 780,609,409 -- invisible in the datadir, because they
+  are no-ops, and caught only by the scan digest. Non-zero only for worker
+  0 of the first window; the budget never exceeds one block. */
+  uint64_t ignore_bytes{0};
   /* mtrs starting at or above this are neither parsed nor filed. The
   serial scan trims the final block to stop at exactly to_lsn; without the
   same bound the workers keep going to the end of the window and apply
   records the serial path never reaches. */
   lsn_t file_until_lsn{0};
+  /* Digest of what THIS worker filed. Folded into the global totals only
+  if the window survives the seam check: a worker files as it parses, so
+  counting globally at file time also counts windows that are discarded
+  and re-done serially, which reads as duplicate records that were never
+  actually filed. */
+  uint64_t dig_n{0};
+  uint64_t dig_sum{0};
+  uint64_t dig_sq{0};
   bool stopped_early{false};
 };
 
@@ -4772,6 +4782,26 @@ static inline bool is_filed(mlog_id_t type, page_no_t page_no) {
     default:
       return page_no != FIL_NULL;
   }
+}
+
+/* Per-worker form of xb_recv_note_filed(): accumulates locally, with no
+atomics on the hot path, and is folded into the global digest by
+merge_into_recv_sys() only once the window is known good. */
+static void xb_worker_note_filed(Worker &w, uint32_t space_id, uint32_t page_no,
+                                 uint64_t start_lsn, uint64_t end_lsn, int type,
+                                 uint32_t len, const unsigned char *body) {
+  if (!xb_scan_digest_on()) return;
+  uint32_t h = ut_crc32((const byte *)&space_id, sizeof(space_id));
+  h ^= ut_crc32((const byte *)&page_no, sizeof(page_no));
+  h ^= ut_crc32((const byte *)&start_lsn, sizeof(start_lsn));
+  h ^= ut_crc32((const byte *)&end_lsn, sizeof(end_lsn));
+  h ^= ut_crc32((const byte *)&type, sizeof(type));
+  h ^= ut_crc32((const byte *)&len, sizeof(len));
+  if (len > 0 && body != nullptr) h ^= ut_crc32(body, len);
+  const uint64_t v = h;
+  ++w.dig_n;
+  w.dig_sum += v;
+  w.dig_sq += v * v;
 }
 
 /* Files exactly what recv_add_to_hash_table() files, into this worker's own
@@ -4812,8 +4842,8 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
 
   const size_t body_len = (size_t)(rec_end - body);
   const bool body_is_inline = body_len <= RECV_INLINE_BODY_MAX;
-  xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
-                     (uint32_t)body_len, body);
+  xb_worker_note_filed(w, space_id, page_no, start_lsn, end_lsn, (int)type,
+                       (uint32_t)body_len, body);
 
   recv_t *recv = static_cast<recv_t *>(mem_heap_alloc(
       space->m_heap,
@@ -4891,6 +4921,7 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
     const byte *rec_end;
     lsn_t start;
     lsn_t end;
+    ulint consumed; /* bytes this record took, for the ignore budget */
   };
   Rec recs[1024];
   size_t n = 0;
@@ -4935,7 +4966,7 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
 
     const lsn_t next = recv_calc_lsn_on_data_add(lsn, len);
     if (n < 1024) {
-      recs[n++] = {type, space, page, body, p + len, lsn, next};
+      recs[n++] = {type, space, page, body, p + len, lsn, next, len};
     }
     lsn = next;
     total += len;
@@ -4945,10 +4976,16 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
     if (p >= end) return 0;
   }
 
-  if (mtr_lsn >= w.file_from_lsn &&
-      (w.file_until_lsn == 0 || mtr_lsn < w.file_until_lsn)) {
+  if (w.file_until_lsn == 0 || mtr_lsn < w.file_until_lsn) {
     for (size_t i = 0; i < n; ++i) {
       const Rec &r = recs[i];
+      /* Mirrors recv_update_bytes_to_ignore_before_checkpoint(): the
+      record that exhausts the budget is itself ignored. */
+      if (w.ignore_bytes != 0) {
+        w.ignore_bytes =
+            (w.ignore_bytes >= r.consumed) ? w.ignore_bytes - r.consumed : 0;
+        continue;
+      }
       if (is_filed(r.type, r.page)) {
         file_record(w, r.type, r.space, r.page, r.body, r.rec_end, r.start,
                     r.end);
@@ -5067,6 +5104,16 @@ recv_sys->n_addrs by exactly that much. O(distinct pages per worker), never
 O(records). */
 static uint64_t merge_into_recv_sys(std::vector<Worker> &ws) {
   uint64_t n_new = 0;
+
+  /* These records are now real, so they count. */
+  for (auto &w : ws) {
+    if (w.dig_n == 0) continue;
+    xb_recv_stats.filed_digest_n.fetch_add(w.dig_n, std::memory_order_relaxed);
+    xb_recv_stats.filed_digest_sum.fetch_add(w.dig_sum,
+                                             std::memory_order_relaxed);
+    xb_recv_stats.filed_digest_sq.fetch_add(w.dig_sq,
+                                            std::memory_order_relaxed);
+  }
   recv_sys_t::Spaces *out = recv_sys->spaces;
 
   for (auto &w : ws) {
@@ -5147,8 +5194,8 @@ checksum the caller has already verified -- this does no validation, it only
 parses. Returns the LSN one past the last complete mtr, which is what
 recv_sys->recovered_lsn becomes. */
 lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
-                   lsn_t resume_lsn, lsn_t file_from_lsn, lsn_t file_until_lsn,
-                   uint64_t *out_new_pages) {
+                   lsn_t resume_lsn, uint64_t ignore_bytes,
+                   lsn_t file_until_lsn, uint64_t *out_new_pages) {
   const size_t nw = threads();
   ut_a(nw > 0);
 
@@ -5171,7 +5218,10 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
   for (size_t i = 0; i < use; ++i) {
     const uint64_t blo = im.base + (uint64_t)i * per;
     const uint64_t bhi = (i == use - 1) ? im.base + im.blocks : blo + per;
-    ws[i].file_from_lsn = file_from_lsn;
+    /* Only the first worker of the first window can have anything to
+    ignore: the budget is at most one block, which cannot reach a later
+    worker's range. */
+    ws[i].ignore_bytes = (i == 0) ? ignore_bytes : 0;
     ws[i].file_until_lsn = file_until_lsn;
     th.emplace_back(run_worker, std::cref(im), blo, bhi, &ws[i],
                     i == 0 ? resume_lsn : 0);
@@ -5268,6 +5318,8 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
   exactly the tail. */
   lsn_t filed_through = 0;
   uint64_t windows = 0;
+  /* Seeded from the init block below, consumed by the first window. */
+  uint64_t ignore_bytes = 0;
 
   /* recv_scan_log_recs() does more than parse, and skipping it skipped all
   of this. Most of it is bookkeeping, but recv_init_crash_recovery() also
@@ -5298,6 +5350,7 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
            OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE);
       recv_sys->bytes_to_ignore_before_checkpoint =
           recv_sys->checkpoint_lsn - recv_sys->parse_start_lsn;
+      ignore_bytes = recv_sys->bytes_to_ignore_before_checkpoint;
     }
     recv_sys->scanned_lsn = recv_sys->parse_start_lsn;
     recv_sys->recovered_lsn = recv_sys->parse_start_lsn;
@@ -5328,7 +5381,13 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
       const lsn_t got =
           recv_read_log_seg(log, window.data() + filled, read_lsn, want);
       if (got == 0) {
-        *io_start_lsn = (filed_through != 0) ? filed_through : start_lsn;
+        /* Block-aligned: recv_read_log_seg() asserts on a misaligned
+        offset. The serial scan skips the part of that block already
+        covered, because recv_sys->recovered_lsn holds the exact point. */
+        *io_start_lsn =
+            (filed_through != 0)
+                ? ut_uint64_align_down(filed_through, OS_FILE_LOG_BLOCK_SIZE)
+                : start_lsn;
         xb::info() << "XB-PARSCAN windows=" << windows
                    << " filed_through=" << filed_through << " exit=read_eof";
         return false;
@@ -5346,13 +5405,17 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     const size_t used_before = recv_heap_used();
     const lsn_t window_start = start_lsn;
     uint64_t new_pages = 0;
-    lsn_t done_lsn = parse_window(
-        window.data(), start_lsn, (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
-        resume_lsn, recv_sys->checkpoint_lsn, to_lsn, &new_pages);
+    lsn_t done_lsn = parse_window(window.data(), start_lsn,
+                                  (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
+                                  resume_lsn, ignore_bytes, to_lsn, &new_pages);
+    ignore_bytes = 0; /* consumed by the first window */
     if (done_lsn == 0) {
       /* Nothing from THIS window was filed, but earlier windows were, so
       the serial parse has to resume where filing actually reached. */
-      *io_start_lsn = (filed_through != 0) ? filed_through : start_lsn;
+      *io_start_lsn =
+          (filed_through != 0)
+              ? ut_uint64_align_down(filed_through, OS_FILE_LOG_BLOCK_SIZE)
+              : start_lsn;
       xb::info() << "XB-PARSCAN windows=" << windows
                  << " filed_through=" << filed_through << " exit=seam";
       return false;
@@ -5431,7 +5494,9 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     if (blocks < filled / OS_FILE_LOG_BLOCK_SIZE) break; /* log ended */
   }
 
-  if (filed_through != 0) start_lsn = filed_through;
+  if (filed_through != 0) {
+    start_lsn = ut_uint64_align_down(filed_through, OS_FILE_LOG_BLOCK_SIZE);
+  }
   *io_start_lsn = start_lsn;
   xb::info() << "XB-PARSCAN windows=" << windows
              << " filed_through=" << filed_through << " exit=complete";
