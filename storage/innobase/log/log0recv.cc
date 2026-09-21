@@ -4748,6 +4748,11 @@ struct Worker {
   uint64_t dig_n{0};
   uint64_t dig_sum{0};
   uint64_t dig_sq{0};
+  /* start_lsn of the last mtr this worker actually FILED, as opposed to
+  stop_lsn which advances over mtrs that were parsed and skipped. */
+  lsn_t last_filed_mtr{0};
+  uint64_t blo{0};
+  uint64_t bhi{0};
   bool stopped_early{false};
 };
 
@@ -5000,6 +5005,7 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
       if (is_filed(r.type, r.page)) {
         file_record(w, r.type, r.space, r.page, r.body, r.rec_end, r.start,
                     mtr_end_lsn);
+        w.last_filed_mtr = mtr_lsn;
       }
     }
   }
@@ -5234,6 +5240,8 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
     worker's range. */
     ws[i].ignore_bytes = (i == 0) ? ignore_bytes : 0;
     ws[i].file_until_lsn = file_until_lsn;
+    ws[i].blo = blo;
+    ws[i].bhi = bhi;
     th.emplace_back(run_worker, std::cref(im), blo, bhi, &ws[i],
                     i == 0 ? resume_lsn : 0);
   }
@@ -5251,7 +5259,19 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
   lsn_t expect = 0;
   bool seams_ok = true;
   for (auto &w : ws) {
-    if (w.start_lsn == 0) continue; /* parsed nothing */
+    /* "Has work" means it PARSED something, not that it found a start.
+    A worker can locate a valid LOG_BLOCK_FIRST_REC_GROUP and still parse
+    nothing: its whole partition can lie past to_lsn, which is exactly
+    what the trailing workers of the final window do. Testing start_lsn
+    instead counted them as participants, compared their start against
+    the previous worker's stop, and rejected a window whose seams were
+    perfect -- workers 0..13 chained exactly, 14 and 15 were simply
+    beyond the end of recovery.
+
+    A worker whose partition is entirely interior to one large mtr is the
+    same case from the other direction: no start at all, no work, and it
+    must not break the chain either. */
+    if (w.mtrs == 0) continue;
     if (expect != 0 && w.start_lsn != expect) {
       seams_ok = false;
       break;
@@ -5268,9 +5288,38 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
   window and silently fell the whole log back to the serial parse. */
 
   if (!seams_ok) {
+    /* Dump every worker so the three cases this check currently conflates
+    can be told apart: a legitimate early stop at the window end (only the
+    highest worker with work may do that), an interior worker that found
+    no mtr start at all and correctly contributes nothing, and a genuine
+    gap where one worker stopped before the next one began. */
+    xb::info() << "XB-PARSCAN SEAM FAIL window_lsn=" << window_lsn
+               << " blocks=" << im.blocks << " workers=" << use;
+    for (size_t i = 0; i < use; ++i) {
+      const Worker &w = ws[i];
+      xb::info() << "XB-PARSCAN   w" << i << " blocks=[" << w.blo << ","
+                 << w.bhi << ") start_lsn=" << w.start_lsn
+                 << " stop_lsn=" << w.stop_lsn
+                 << " early=" << (w.stopped_early ? 1 : 0)
+                 << " last_filed_mtr=" << w.last_filed_mtr << " recs=" << w.recs
+                 << " mtrs=" << w.mtrs;
+    }
     free_workers(ws);
     *out_new_pages = 0;
     return 0; /* caller falls back to the serial parse for this window */
+  }
+
+  lsn_t last_filed = 0;
+  for (auto &w : ws) {
+    if (w.last_filed_mtr > last_filed) last_filed = w.last_filed_mtr;
+  }
+  if (xb_scan_digest_on() && last_filed != 0) {
+    /* done_lsn is where PARSING stopped; last_filed is the last mtr whose
+    records were kept. They differ whenever the tail of a window was
+    parsed and skipped, and handing back the former then steps over
+    records nobody filed. */
+    xb::info() << "XB-PARSCAN window done_lsn=" << done_lsn
+               << " last_filed_mtr=" << last_filed;
   }
 
   *out_new_pages = merge_into_recv_sys(ws);
