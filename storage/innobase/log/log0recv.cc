@@ -41,6 +41,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <array>
 #include <atomic>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <new>
 #include <string>
@@ -96,6 +97,15 @@ std::list<space_id_t> recv_encr_ts_list;
 /** Log records are stored in the hash table in chunks at most of this size;
 this must be less than UNIV_PAGE_SIZE as it is stored in the buffer pool */
 #define RECV_DATA_BLOCK_SIZE (MEM_MAX_ALLOC_IN_BUF - sizeof(recv_data_t))
+
+/* The packing is the point, so pin it: a regression here silently costs
+apply batches rather than failing anything. */
+static_assert(sizeof(recv_t) == 40, "recv_t must stay 40 bytes");
+
+/** Largest body that can be stored inline after a recv_t. The heap grows
+into the buffer pool, so the struct and its inline body together must
+still fit one buffer-backed allocation. */
+#define RECV_INLINE_BODY_MAX (MEM_MAX_ALLOC_IN_BUF - sizeof(recv_t))
 
 /** Read-ahead area in applying log records to file pages */
 static const size_t RECV_READ_AHEAD_AREA = 32;
@@ -3026,11 +3036,19 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
   /* check if we already have a Heap for this space id */
   auto space = xtrabackup::recv_get_page_map(space_id);
 
+  /* Mirror recv_add_to_hash_table()'s allocation exactly: descriptor plus
+  an inline body when it fits one chunk, otherwise descriptor plus the
+  chain head pointer and then the chunks below. */
+  const size_t est_body_len = (size_t)(rec_end - body);
+  const bool est_inline = est_body_len <= RECV_INLINE_BODY_MAX;
+  const size_t est_recv_size =
+      sizeof(recv_t) + (est_inline ? est_body_len : sizeof(recv_data_t *));
+
   pxb_mem_block *last_block = space->m_blocks.back();
-  if (last_block->len < (last_block->free + MEM_SPACE_NEEDED(sizeof(recv_t)))) {
-    last_block = xtrabackup::add_new_block(space, sizeof(recv_t));
+  if (last_block->len < (last_block->free + MEM_SPACE_NEEDED(est_recv_size))) {
+    last_block = xtrabackup::add_new_block(space, est_recv_size);
   }
-  last_block->free = last_block->free + MEM_SPACE_NEEDED(sizeof(recv_t));
+  last_block->free = last_block->free + MEM_SPACE_NEEDED(est_recv_size);
 
   if (space->m_pages.find(page_no) == space->m_pages.end()) {
     if (last_block->len <
@@ -3041,7 +3059,7 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
     space->m_pages.insert(page_no);
   }
 
-  while (rec_end > body) {
+  while (!est_inline && rec_end > body) {
     ulint len = rec_end - body;
 
     if (len > RECV_DATA_BLOCK_SIZE) {
@@ -3115,14 +3133,29 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
   space = recv_get_page_map(space_id, true);
 
+  /* Carry the body in the same allocation as the descriptor whenever it
+  fits one buffer-backed chunk, which is every ordinary OLTP record. That
+  removes both the recv_data_t header and a pointer chase, and it is the
+  whole point of the packing: less heap per record means fewer apply
+  batches, and a batch costs a full buffer pool invalidation. Records too
+  long for one chunk keep the old chain, with its head stored in the same
+  trailing slot. */
+  const size_t rec_body_len = (size_t)(rec_end - body);
+  const bool body_is_inline = rec_body_len <= RECV_INLINE_BODY_MAX;
+
   recv_t *recv;
 
-  recv = static_cast<recv_t *>(mem_heap_alloc(space->m_heap, sizeof(*recv)));
+  recv = static_cast<recv_t *>(mem_heap_alloc(
+      space->m_heap,
+      sizeof(*recv) + (body_is_inline ? rec_body_len : sizeof(recv_data_t *))));
 
-  recv->type = type;
-  recv->end_lsn = end_lsn;
-  recv->len = rec_end - body;
+  ut_a(end_lsn >= start_lsn &&
+       end_lsn - start_lsn <= std::numeric_limits<uint32_t>::max());
+  recv->type_id = static_cast<uint8_t>(type);
+  recv->end_delta = static_cast<uint32_t>(end_lsn - start_lsn);
+  recv->len = static_cast<uint32_t>(rec_end - body);
   recv->start_lsn = start_lsn;
+  recv->body_inline = body_is_inline ? 1 : 0;
 
   auto it = space->m_pages.find(page_no);
 
@@ -3165,9 +3198,20 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
   UT_LIST_ADD_LAST(recv_addr->rec_list, recv);
 
+  if (body_is_inline) {
+    /* The common case by a wide margin: the body rode along in the same
+    allocation as the recv_t, so there is nothing to chain and no
+    recv_data_t header to pay for. */
+    if (recv->len > 0) {
+      memcpy(recv->inline_body(), body, recv->len);
+    }
+    return;
+  }
+
   recv_data_t **prev_field;
 
-  prev_field = &recv->data;
+  recv_data_t *chain_head = nullptr;
+  prev_field = &chain_head;
 
   /* Store the log record body in chunks of less than UNIV_PAGE_SIZE:
   the heap grows into the buffer pool, and bigger chunks could not
@@ -3195,6 +3239,7 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
   }
 
   *prev_field = nullptr;
+  recv->set_chain(chain_head);
 }
 
 /** Copies the log record body from recv to buf.
@@ -3202,7 +3247,7 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 @param[in]      recv            Log record */
 static void recv_data_copy_to_buf(byte *buf, recv_t *recv) {
   ulint len = recv->len;
-  recv_data_t *recv_data = recv->data;
+  recv_data_t *recv_data = recv->chain();
 
   while (len > 0) {
     ulint part_len;
@@ -3242,7 +3287,8 @@ bool recv_page_is_brand_new(buf_block_t *block) {
     mutex_exit(&recv_sys->mutex);
     return true;
   }
-  if (recv->type == MLOG_INIT_FILE_PAGE2 || recv->type == MLOG_INIT_FILE_PAGE) {
+  if (recv->type() == MLOG_INIT_FILE_PAGE2 ||
+      recv->type() == MLOG_INIT_FILE_PAGE) {
     mutex_exit(&recv_sys->mutex);
     return true;
   }
@@ -3403,29 +3449,27 @@ void recv_recover_page_func(
 #ifdef XTRABACKUP
     ++xb_total;
 #endif /* XTRABACKUP */
-    end_lsn = recv->end_lsn;
+    end_lsn = recv->end_lsn();
 #ifndef UNIV_HOTBACKUP
     ut_ad(end_lsn <= log_sys->m_scanned_lsn);
 #endif /* !UNIV_HOTBACKUP */
 
     byte *buf = nullptr;
 
-    if (recv->len > RECV_DATA_BLOCK_SIZE) {
-      /* We have to copy the record body to a separate buffer */
+    if (!recv->body_inline) {
+      /* Too long to have ridden along with the recv_t, so it is a chain of
+      chunks and has to be copied out to a contiguous buffer. Rare. */
       buf = static_cast<byte *>(
           ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, recv->len));
       recv_data_copy_to_buf(buf, recv);
-    } else if (recv->data != nullptr) {
-      buf = ((byte *)(recv->data)) + sizeof(recv_data_t);
-    } else {
-      /* Redo record that does not have a payload, such as
-       MLOG_UNDO_ERASE_END, MLOG_COMP_PAGE_CREATE, MLOG_INIT_FILE_PAGE2 etc.
-     */
-      ut_ad(recv->data == nullptr);
-      ut_ad(recv->len == 0);
+    } else if (recv->len > 0) {
+      buf = recv->inline_body();
     }
+    /* Otherwise a redo record with no payload at all, such as
+    MLOG_UNDO_ERASE_END, MLOG_COMP_PAGE_CREATE or MLOG_INIT_FILE_PAGE2, and
+    buf stays null. */
 
-    if (recv->type == MLOG_INIT_FILE_PAGE) {
+    if (recv->type() == MLOG_INIT_FILE_PAGE) {
       page_lsn = page_newest_lsn;
 
       memset(FIL_PAGE_LSN + page, 0, 8);
@@ -3459,10 +3503,11 @@ void recv_recover_page_func(
         start_lsn = recv->start_lsn;
       }
 
-      DBUG_PRINT("ib_log", ("apply " LSN_PF ":"
-                            " %s len " ULINTPF " page %u:%u",
-                            recv->start_lsn, get_mlog_string(recv->type),
-                            recv->len, recv_addr->space, recv_addr->page_no));
+      DBUG_PRINT("ib_log",
+                 ("apply " LSN_PF ":"
+                  " %s len " ULINTPF " page %u:%u",
+                  recv->start_lsn, get_mlog_string(recv->type()),
+                  ulint{recv->len}, recv_addr->space, recv_addr->page_no));
       /* Since buf can be a nullptr for record types without a payload we can
       end up with nullptr + 0 if we calc buf + recv->len. This is undefined
       behaviour. Avoid this by only calculating the end_ptr when there's
@@ -3471,7 +3516,7 @@ void recv_recover_page_func(
       if (buf != nullptr) {
         buf_end = buf + recv->len;
       }
-      recv_parse_or_apply_log_rec_body(recv->type, buf, buf_end,
+      recv_parse_or_apply_log_rec_body(recv->type(), buf, buf_end,
                                        recv_addr->space, recv_addr->page_no,
                                        block, &mtr, ULINT_UNDEFINED, LSN_MAX);
 
@@ -3485,7 +3530,7 @@ void recv_recover_page_func(
 #endif /* UNIV_HOTBACKUP */
     }
 
-    if (recv->len > RECV_DATA_BLOCK_SIZE) {
+    if (!recv->body_inline) {
       ut::free(buf);
     }
   }

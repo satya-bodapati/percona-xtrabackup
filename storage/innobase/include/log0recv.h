@@ -320,31 +320,60 @@ struct recv_data_t {
   recv_data_t *next;
 };
 
-/** Stored log record struct */
+/** Stored log record struct.
+
+One of these exists for every redo record recovery holds, and the recovery
+heap is what decides how many apply batches --prepare has to run: when the
+heap hits its bound the batch fires, the buffer pool is invalidated, and
+every page named in a later batch is read again. So the width of this
+struct, not the redo volume, is what sets the batch count on a typical OLTP
+log where bodies are 8-35 bytes. It is packed accordingly, and the body of
+a record short enough to fit one chunk -- which is nearly all of them --
+lives inline immediately after the struct instead of behind a recv_data_t.
+That is 40 bytes of overhead per record where it used to be 64. */
 struct recv_t {
   using Node = UT_LIST_NODE_T(recv_t);
-
-  /** Log record type */
-  mlog_id_t type;
-
-  /** Log record body length in bytes */
-  ulint len;
-
-  /** Chain of blocks containing the log record body */
-  recv_data_t *data;
 
   /** Start lsn of the log segment written by the mtr which generated
   this log record: NOTE that this is not necessarily the start lsn of
   this log record */
   lsn_t start_lsn;
 
+  /** List node, list anchored in recv_addr_t */
+  Node rec_list;
+
+  /** Log record body length in bytes */
+  uint32_t len;
+
+  /** end_lsn - start_lsn of the mtr that generated this record. An mtr
+  never spans 4 GiB of LSN, so the delta fits where the absolute value did
+  not. */
+  uint32_t end_delta;
+
+  /** Log record type. Every mlog_id_t value fits in a byte. */
+  uint8_t type_id;
+
+  /** Nonzero when the body is stored inline directly after this struct;
+  zero when it is a recv_data_t chain whose head is stored there instead. */
+  uint8_t body_inline;
+
+  mlog_id_t type() const { return static_cast<mlog_id_t>(type_id); }
+
   /** End lsn of the log segment written by the mtr which generated
   this log record: NOTE that this is not necessarily the end LSN of
   this log record */
-  lsn_t end_lsn;
+  lsn_t end_lsn() const { return start_lsn + end_delta; }
 
-  /** List node, list anchored in recv_addr_t */
-  Node rec_list;
+  /** @return the inline body, valid only when body_inline and len > 0 */
+  byte *inline_body() { return reinterpret_cast<byte *>(this + 1); }
+
+  /** @return head of the body chain, valid only when !body_inline */
+  recv_data_t *chain() const {
+    return *reinterpret_cast<recv_data_t *const *>(this + 1);
+  }
+  void set_chain(recv_data_t *d) {
+    *reinterpret_cast<recv_data_t **>(this + 1) = d;
+  }
 };
 
 /** States of recv_addr_t */
