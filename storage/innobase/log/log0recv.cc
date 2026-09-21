@@ -4976,6 +4976,17 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
     if (p >= end) return 0;
   }
 
+  /* Every record of an mtr carries the MTR's end_lsn, not its own. The
+  serial parse computes new_recovered_lsn once from total_len and passes
+  that same value for all n_recs (log0recv.cc, recv_multi_rec), while
+  start_lsn does advance per record. It matters because
+  recv_recover_page_func() stamps the page's newest_modification from
+  end_lsn, so a per-record value writes a different LSN into the page
+  header. Cost of getting it wrong: an identical record COUNT with
+  different content, invisible to everything except the scan digest, and
+  one corrupt file (sbtest44.ibd) out of 67. */
+  const lsn_t mtr_end_lsn = lsn;
+
   if (w.file_until_lsn == 0 || mtr_lsn < w.file_until_lsn) {
     for (size_t i = 0; i < n; ++i) {
       const Rec &r = recs[i];
@@ -4988,7 +4999,7 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
       }
       if (is_filed(r.type, r.page)) {
         file_record(w, r.type, r.space, r.page, r.body, r.rec_end, r.start,
-                    r.end);
+                    mtr_end_lsn);
       }
     }
   }
