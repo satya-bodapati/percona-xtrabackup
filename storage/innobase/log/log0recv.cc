@@ -4457,17 +4457,22 @@ bool meb_scan_log_recs(
 
 #ifndef UNIV_HOTBACKUP
 #ifdef XTRABACKUP
+    /* One call, not two: recv_heap_used() walks every space's heap and this
+    runs once per scan chunk, so asking twice doubled a cost that is already
+    O(spaces) per chunk. The high water mark is why the batches fire. */
+    const size_t heap_used = recv_heap_used();
     {
-      /* Why the batches fire: the heap holding record bodies hit the budget. */
-      const uint64_t used = recv_heap_used();
       uint64_t prev =
           xb_recv_stats.heap_max_bytes.load(std::memory_order_relaxed);
-      while (used > prev && !xb_recv_stats.heap_max_bytes.compare_exchange_weak(
-                                prev, used, std::memory_order_relaxed)) {
+      while (heap_used > prev &&
+             !xb_recv_stats.heap_max_bytes.compare_exchange_weak(
+                 prev, heap_used, std::memory_order_relaxed)) {
       }
     }
+#else  /* XTRABACKUP */
+    const size_t heap_used = recv_heap_used();
 #endif /* XTRABACKUP */
-    if (recv_heap_used() > *max_memory) {
+    if (heap_used > *max_memory) {
       recv_apply_hashed_log_recs(log, false);
     }
 #endif /* !UNIV_HOTBACKUP */
