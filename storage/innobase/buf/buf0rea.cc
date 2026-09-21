@@ -654,6 +654,18 @@ void buf_read_ibuf_merge_pages(bool sync, const space_id_t *space_ids,
   }
 }
 
+#ifdef XTRABACKUP
+/* XB_SYNC_READS=1 reads recovery pages synchronously instead of through the
+simulated AIO array. Off by default. */
+static bool xb_sync_recv_reads() {
+  static const bool on = []() {
+    const char *e = getenv("XB_SYNC_READS");
+    return e != nullptr && *e == '1';
+  }();
+  return on;
+}
+#endif /* XTRABACKUP */
+
 void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
                          ulint n_stored) {
   ulint count;
@@ -730,6 +742,23 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
                                 prev, pend, std::memory_order_relaxed)) {
       }
       xb_io_reads_issued.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif /* XTRABACKUP */
+#ifdef XTRABACKUP
+    /* Prepare reads BUFFERED (PXB-3878), and 84-98% of these reads are
+    served from the page cache without touching the device. Routing a cache
+    hit through the AIO array still pays for reserve_slot, a futex wake of
+    the handler threads, and select_oldest scanning the slot array with a
+    clock_gettime per slot -- measured at ~23.5% of all CPU at 32 apply
+    threads, which is what makes apply collapse as submitters are added
+    while the device sits at 20%. A synchronous read is a plain pread that
+    hits the same cache, and buf_page_io_complete() then runs inline, so
+    recv_recover_page_func() executes on this apply thread instead of an
+    I/O thread. Concurrency then comes from the apply threads themselves. */
+    if (xb_sync_recv_reads()) {
+      buf_read_page_low(&err, true, IORequest::DO_NOT_WAKE, BUF_READ_ANY_PAGE,
+                        cur_page_id, page_size, true);
+      continue;
     }
 #endif /* XTRABACKUP */
     buf_read_page_low(&err, false, IORequest::DO_NOT_WAKE, BUF_READ_ANY_PAGE,
