@@ -1682,7 +1682,7 @@ Disable with --skip-innodb-checksums.",
     {"innodb_flush_method", OPT_INNODB_FLUSH_METHOD,
      "With which method to flush data.", &innodb_flush_method,
      &innodb_flush_method, &innodb_flush_method_typelib, GET_ENUM, REQUIRED_ARG,
-     ISO_REPEATABLE_READ, 0, 0, 0, 0, 0},
+     0, 0, 0, 0, 0, 0},
 
     /* ####### Should we use this option? ####### */
     {"innodb_force_recovery", OPT_INNODB_FORCE_RECOVERY,
