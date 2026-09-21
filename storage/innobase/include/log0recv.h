@@ -48,6 +48,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <atomic>
 #include <list>
+#include <map>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 
@@ -819,6 +821,14 @@ struct xb_recv_stats_t {
   std::atomic<uint64_t> sup_space_absent{0};
   std::atomic<uint64_t> sup_page_past_end{0};
   std::atomic<uint64_t> sup_page_inside_range{0};
+
+  /** Per-tablespace tally of the records the map failed to drop. The gap
+  is concentrated -- roughly 15,000 pages carry 294.6M records, about
+  10,000 each -- so naming the spaces is what turns "missing coverage"
+  into a fix. Guarded by its own mutex and touched once per page visit,
+  not once per record. */
+  std::mutex sup_by_space_mutex;
+  std::map<space_id_t, uint64_t> sup_by_space;
   /** records dropped before entering the hash because the map said so */
   std::atomic<uint64_t> recs_dropped_by_map{0};
   /** pages never entered into the hash at all because the map dropped every

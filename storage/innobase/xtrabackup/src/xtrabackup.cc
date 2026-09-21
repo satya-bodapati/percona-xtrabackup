@@ -7260,6 +7260,29 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);
 
+  /* The coverage gap is concentrated in a few tablespaces, so name them
+  rather than only counting. Top ten by undropped records: each entry is
+  space_id:records:map_entries_for_that_space:highest_page_the_map_holds. */
+  std::ostringstream supspaces;
+  {
+    std::vector<std::pair<space_id_t, uint64_t>> v(st.sup_by_space.begin(),
+                                                   st.sup_by_space.end());
+    std::sort(v.begin(), v.end(),
+              [](const std::pair<space_id_t, uint64_t> &a,
+                 const std::pair<space_id_t, uint64_t> &b) {
+                return a.second > b.second;
+              });
+    if (v.size() > 10) v.resize(10);
+    for (const auto &e : v) {
+      bool present;
+      uint64_t sn;
+      uint32_t smax;
+      page_lsn_map::probe(e.first, 0, &present, &sn, &smax);
+      supspaces << e.first << ":" << e.second << ":" << (present ? sn : 0)
+                << ":" << smax << " ";
+    }
+  }
+
   xb::info() << "XB-PREPARE-STATS v=1"
              << " batches=" << st.batches.load()
              << " batches_inval=" << st.batches_invalidating.load()
@@ -7278,6 +7301,7 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
              << " sup_space_absent=" << st.sup_space_absent.load()
              << " sup_page_past_end=" << st.sup_page_past_end.load()
              << " sup_page_inside_range=" << st.sup_page_inside_range.load()
+             << " sup_top_spaces=[" << supspaces.str() << "]"
              << " pages_skipped_by_map=" << st.pages_skipped_by_map.load()
              << " redo_scan_bytes=" << st.redo_scan_bytes.load()
              << " heap_max=" << st.heap_max_bytes.load()

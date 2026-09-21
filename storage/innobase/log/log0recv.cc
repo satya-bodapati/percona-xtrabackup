@@ -3568,6 +3568,10 @@ void recv_recover_page_func(
         xb_recv_stats.sup_page_inside_range.fetch_add(
             n, std::memory_order_relaxed);
       }
+      {
+        std::lock_guard<std::mutex> g(xb_recv_stats.sup_by_space_mutex);
+        xb_recv_stats.sup_by_space[recv_addr->space] += n;
+      }
     } else if (page_lsn > copy_lsn) {
       xb_recv_stats.sup_page_ahead.fetch_add(n, std::memory_order_relaxed);
       xb_recv_stats.sup_pages_page_ahead.fetch_add(1,
