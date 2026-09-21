@@ -82,6 +82,63 @@ batch trigger's prediction. **128 MB is the operating point.**
 Worker count saturates earlier than window size: 4 workers 115 s, 8 workers
 111 s, 16 workers 104 s at a 64 MB window.
 
+## Reading the window
+
+Parsing in parallel only pays if the redo can be fed to the workers fast
+enough, and for a long time it could not. The window was filled with
+`RECV_SCAN_SIZE` (64 KB) calls to `recv_read_log_seg()`, on the assumption
+that 64 KB was the unit that function is written for. It is not: it serves an
+arbitrary range in a single `os_file_read()` and loops internally across a
+redo file boundary, advancing both `start_lsn` and `buf`.
+
+The assumption was expensive for a reason that is easy to miss.
+`recv_read_log_seg()` constructs a `Log_file_handle`, whose constructor calls
+`os_file_create()` and whose destructor calls `os_file_close()`. So a 21.3 GB
+redo log became **348,160 open/pread/close triples**. The syscall count is the
+smaller cost. **Kernel readahead state is per file descriptor**, so closing
+every 64 KB discarded the ramp before it could build: the kernel saw 348,160
+unrelated one-shot opens rather than one sequential stream.
+
+The gap that opens up is large. On the same file, same device, same moment,
+`cat(1)` read the redo at 1.8 GB/s while this path managed 343-476 MB/s.
+
+Asking for the whole window in one call is worth 32% of the scan:
+
+| 32 workers, 21.3 GB redo | scan | prepare wall |
+|---|---|---|
+| 64 KB reads | 36.8 s | 95 s |
+| whole window per call | 24.9 s | 84 s |
+| redo already in page cache | 14.9 s | 71 s |
+
+Useful cores during the scan rise from 13.3 to 22.0. The cache-warm row is the
+upper bound for the read path, so the change recovers a little over half of
+what reads were costing; the remaining ~10 s is the read still being serial
+and unoverlapped with parsing.
+
+Two things about this are worth recording, because both are counter-intuitive
+and both cost time to learn.
+
+**The same change is nearly worthless on the serial scan.** Raising the serial
+read from 64 KB to 8 MB moved it only 102.0 s to 98.3 s, 3.6%. When the parser
+is slow, the kernel's automatic readahead comfortably stays ahead of it and the
+reads are already overlapped. Small reads only hurt once the consumer is fast:
+32 workers drain a window quicker than a 128 KB readahead window refills it.
+The effective cost of a read pattern is a function of how fast the consumer is,
+not a property of the pattern alone. The serial read size therefore has a knob
+(`XB_SCAN_READ_KB`) but its default is deliberately left at `RECV_SCAN_SIZE`.
+
+**Widening the kernel's readahead window would not have helped either**, and a
+sweep of `read_ahead_kb` was staged before this was understood. It would have
+produced a confident negative result: there is no point widening a window that
+is thrown away every 64 KB.
+
+The backup side has the identical pattern and is *not* fixed here.
+`Redo_Log_Reader::read_log_seg()` also opens per call, and `read_logfile()`
+drives it in 64 KB steps for the whole duration of the backup. It is not a
+one-line change there, because `scan_log_recs()` hardcodes
+`while (log_block < buf + RECV_SCAN_SIZE)`, coupling the read size to the scan
+size. It needs a backup-throughput measurement rather than a prepare one.
+
 ## Correctness rules
 
 ### Seams
@@ -327,6 +384,24 @@ runs, so this is latent rather than active, but it should be fixed on its own
 merits rather than relied upon.
 
 ## What is not done
+
+**Overlapping the window read with parsing.** The remaining ~10 s of scan time
+is one serial reader that no worker can proceed past. The obvious fix,
+prefetching window N+1 while the pool parses N, is complicated by the fact that
+the next window does not start where the current one ends: it starts at
+`ut_uint64_align_down(done_lsn, OS_FILE_LOG_BLOCK_SIZE)`, and `done_lsn` is a
+parse *result* (the last mtr boundary reached), not something known in advance.
+A straddling mtr therefore makes the next window overlap the tail of the
+current one by an unpredictable amount. True double buffering would have to
+carry that overlap across buffers.
+
+`posix_fadvise(POSIX_FADV_WILLNEED)` sidesteps that entirely, because being
+slightly wrong about the next offset costs nothing when the call is advisory.
+It needs a file descriptor, and `Log_file` exposes `offset()` and `contains()`
+but no path; the path lives on `Log_file_handle`. So it needs a small amount of
+plumbing through the log file abstraction, which is why it is not done here.
+
+
 
 - `MetadataRecover` merge (blocked on PXB-2865)
 - `recv_sys->keys`: `parse_only` parameter, per-worker collection, ordered replay
