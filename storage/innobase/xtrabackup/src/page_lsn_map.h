@@ -159,6 +159,14 @@ uint64_t lookup(uint32_t space_id, uint32_t page_no);
 /** Number of entries loaded, for the prepare stats line. */
 uint64_t n_entries();
 
+/** Diagnostic: is this page missing because the whole tablespace is absent
+from the map, or because the map stops short of this page?
+@param[out] space_present  map holds at least one entry for space_id
+@param[out] space_n        entries the map holds for space_id
+@param[out] space_max_page highest page_no the map holds for space_id */
+void probe(uint32_t space_id, uint32_t page_no, bool *space_present,
+           uint64_t *space_n, uint32_t *space_max_page);
+
 void unload();
 
 }  // namespace page_lsn_map

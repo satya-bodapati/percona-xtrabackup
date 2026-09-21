@@ -71,6 +71,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "os0thread-create.h"
 #include "page0cur.h"
 #include "page0zip.h"
+#include "page_lsn_map.h"
 #include "trx0rec.h"
 #include "trx0undo.h"
 #include "ut0new.h"
@@ -3550,6 +3551,23 @@ void recv_recover_page_func(
     if (copy_lsn == 0) {
       xb_recv_stats.sup_no_entry.fetch_add(n, std::memory_order_relaxed);
       xb_recv_stats.sup_pages_no_entry.fetch_add(1, std::memory_order_relaxed);
+      bool space_present;
+      uint64_t space_n;
+      uint32_t space_max;
+      page_lsn_map::probe(recv_addr->space, recv_addr->page_no, &space_present,
+                          &space_n, &space_max);
+      if (!space_present) {
+        xb_recv_stats.sup_space_absent.fetch_add(n, std::memory_order_relaxed);
+      } else if (recv_addr->page_no > space_max) {
+        /* The tablespace grew after the copy thread passed this offset, so
+        the page exists only in the redo. */
+        xb_recv_stats.sup_page_past_end.fetch_add(n, std::memory_order_relaxed);
+      } else {
+        /* Inside the range the map covers, yet absent -- a hole, which the
+        capture should not be able to produce. */
+        xb_recv_stats.sup_page_inside_range.fetch_add(
+            n, std::memory_order_relaxed);
+      }
     } else if (page_lsn > copy_lsn) {
       xb_recv_stats.sup_page_ahead.fetch_add(n, std::memory_order_relaxed);
       xb_recv_stats.sup_pages_page_ahead.fetch_add(1,

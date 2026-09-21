@@ -545,6 +545,24 @@ bool load(const char *dir) {
 
 bool is_loaded() { return g_loaded; }
 
+/* Diagnostic for the records the filter fails to drop: says whether the map
+holds nothing at all for this tablespace, or holds it but stops short of this
+page. The two have completely different causes and completely different
+fixes, and the counters at the apply site cannot tell them apart. */
+void probe(uint32_t space_id, uint32_t page_no, bool *space_present,
+           uint64_t *space_n, uint32_t *space_max_page) {
+  *space_present = false;
+  *space_n = 0;
+  *space_max_page = 0;
+  if (!g_loaded) return;
+  auto it = g_map.find(space_id);
+  if (it == g_map.end()) return;
+  *space_present = true;
+  *space_n = it->second.v.size();
+  if (!it->second.v.empty()) *space_max_page = it->second.v.back().first;
+  (void)page_no;
+}
+
 uint64_t n_entries() { return g_n_entries; }
 
 uint64_t lookup(uint32_t space_id, uint32_t page_no) {
