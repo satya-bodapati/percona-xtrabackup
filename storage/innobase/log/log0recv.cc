@@ -71,7 +71,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "os0thread-create.h"
 #include "page0cur.h"
 #include "page0zip.h"
-#include "page_lsn_map.h"
 #include "trx0rec.h"
 #include "trx0undo.h"
 #include "ut0new.h"

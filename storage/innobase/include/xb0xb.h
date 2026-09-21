@@ -102,6 +102,8 @@ xtrabackup source directory. */
 namespace page_lsn_map {
 bool is_loaded();
 lsn_t lookup(uint32_t space_id, uint32_t page_no);
+void probe(uint32_t space_id, uint32_t page_no, bool *space_present,
+           uint64_t *space_n, uint32_t *space_max_page);
 }  // namespace page_lsn_map
 #define SQUOTE(str) "'" << str << "'"
 
