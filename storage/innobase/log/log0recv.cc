@@ -5013,8 +5013,15 @@ static uint64_t merge_into_recv_sys(std::vector<Worker> &ws) {
     for (auto &skv : w.spaces) {
       auto sit = out->find(skv.first);
       if (sit == out->end()) {
+        /* Give the Space a real heap even though every record in it was
+        allocated from the worker's. recv_add_to_hash_table() allocates
+        from Space::m_heap, so a space left with a null heap here is a
+        null dereference the moment anything files into it serially --
+        which is exactly what happens when a later window falls back. */
+        mem_heap_t *h =
+            mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
         sit = out->insert(sit, recv_sys_t::Spaces::value_type{
-                                   skv.first, recv_sys_t::Space(nullptr)});
+                                   skv.first, recv_sys_t::Space(h)});
         sit->second.m_pages = std::move(skv.second.m_pages);
         n_new += sit->second.m_pages.size();
         continue;
