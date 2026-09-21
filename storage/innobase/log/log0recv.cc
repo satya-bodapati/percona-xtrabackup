@@ -3181,8 +3181,10 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
 #ifdef XTRABACKUP
   xb_recv_stats_note_body((uint64_t)(rec_end - body));
-  xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
-                     (uint32_t)(rec_end - body), body);
+  if (xb_scan_digest) {
+    xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
+                       (uint32_t)(rec_end - body), body);
+  }
 #endif /* XTRABACKUP */
 
   recv_sys_t::Space *space;
@@ -4853,8 +4855,10 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
 
   const size_t body_len = (size_t)(rec_end - body);
   const bool body_is_inline = body_len <= RECV_INLINE_BODY_MAX;
-  xb_worker_note_filed(w, space_id, page_no, start_lsn, end_lsn, (int)type,
-                       (uint32_t)body_len, body);
+  if (xb_scan_digest) {
+    xb_worker_note_filed(w, space_id, page_no, start_lsn, end_lsn, (int)type,
+                         (uint32_t)body_len, body);
+  }
 
   recv_t *recv = static_cast<recv_t *>(mem_heap_alloc(
       space->m_heap,
@@ -5011,7 +5015,11 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
       if (is_filed(r.type, r.page)) {
         file_record(w, r.type, r.space, r.page, r.body, r.rec_end, r.start,
                     mtr_end_lsn);
-        w.last_filed_mtr = mtr_lsn;
+        /* Both of these exist only for verification, and this loop runs
+        780,609,409 times, so neither may cost a call when it is off. */
+        if (xb_scan_digest) {
+          w.last_filed_mtr = mtr_lsn;
+        }
       }
     }
   }
