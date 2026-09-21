@@ -4695,6 +4695,11 @@ struct Worker {
   recv_update_bytes_to_ignore_before_checkpoint(). Same rule, expressed as
   an LSN instead of a byte count. */
   lsn_t file_from_lsn{0};
+  /* mtrs starting at or above this are neither parsed nor filed. The
+  serial scan trims the final block to stop at exactly to_lsn; without the
+  same bound the workers keep going to the end of the window and apply
+  records the serial path never reaches. */
+  lsn_t file_until_lsn{0};
   bool stopped_early{false};
 };
 
@@ -4880,7 +4885,8 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
     if (p >= end) return 0;
   }
 
-  if (mtr_lsn >= w.file_from_lsn) {
+  if (mtr_lsn >= w.file_from_lsn &&
+      (w.file_until_lsn == 0 || mtr_lsn < w.file_until_lsn)) {
     for (size_t i = 0; i < n; ++i) {
       const Rec &r = recs[i];
       if (is_filed(r.type, r.page)) {
@@ -4937,6 +4943,7 @@ static void run_worker(const Image &im, uint64_t blo, uint64_t bhi, Worker *w,
   refill();
 
   while (cur < stop) {
+    if (w->file_until_lsn != 0 && cur >= w->file_until_lsn) break;
     if (have - pos < REFILL_BELOW) refill();
     if (pos >= have) break;
 
@@ -5073,7 +5080,7 @@ checksum the caller has already verified -- this does no validation, it only
 parses. Returns the LSN one past the last complete mtr, which is what
 recv_sys->recovered_lsn becomes. */
 lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
-                   lsn_t resume_lsn, lsn_t file_from_lsn,
+                   lsn_t resume_lsn, lsn_t file_from_lsn, lsn_t file_until_lsn,
                    uint64_t *out_new_pages) {
   const size_t nw = threads();
   ut_a(nw > 0);
@@ -5098,6 +5105,7 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
     const uint64_t blo = im.base + (uint64_t)i * per;
     const uint64_t bhi = (i == use - 1) ? im.base + im.blocks : blo + per;
     ws[i].file_from_lsn = file_from_lsn;
+    ws[i].file_until_lsn = file_until_lsn;
     th.emplace_back(run_worker, std::cref(im), blo, bhi, &ws[i],
                     i == 0 ? resume_lsn : 0);
   }
@@ -5260,11 +5268,20 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     const size_t used_before = recv_heap_used();
     const lsn_t window_start = start_lsn;
     uint64_t new_pages = 0;
-    const lsn_t done_lsn = parse_window(
+    lsn_t done_lsn = parse_window(
         window.data(), start_lsn, (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
-        resume_lsn, recv_sys->checkpoint_lsn, &new_pages);
+        resume_lsn, recv_sys->checkpoint_lsn, to_lsn, &new_pages);
     if (done_lsn == 0) return false; /* seam check failed; nothing filed */
     if (done_lsn <= start_lsn) break;
+
+    /* Reaching to_lsn ends recovery. Clamp and stop: leaving the loop to
+    notice on its own would spin, because start_lsn for the next window is
+    done_lsn rounded DOWN to a block and so never reaches to_lsn. */
+    bool at_end = false;
+    if (to_lsn != 0 && to_lsn != LSN_MAX && done_lsn >= to_lsn) {
+      done_lsn = to_lsn;
+      at_end = true;
+    }
 
     mutex_enter(&recv_sys->mutex);
     recv_sys->n_addrs += new_pages;
@@ -5301,6 +5318,11 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
 
     /* The next window resumes at this exact mtr boundary, reading from the
     block that contains it. */
+    if (at_end) {
+      start_lsn = done_lsn;
+      break;
+    }
+
     resume_lsn = done_lsn;
     start_lsn = ut_uint64_align_down(done_lsn, OS_FILE_LOG_BLOCK_SIZE);
 
