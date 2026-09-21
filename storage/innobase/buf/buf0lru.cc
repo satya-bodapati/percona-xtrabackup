@@ -136,6 +136,19 @@ std::chrono::milliseconds get_buf_LRU_old_threshold() {
 
 /** @} */
 
+#ifdef XTRABACKUP
+std::atomic<uint64_t> xb_io_reads_issued{0};
+std::atomic<uint64_t> xb_io_lru_wait_ns{0};
+std::atomic<uint64_t> xb_io_lru_waits{0};
+std::atomic<uint64_t> xb_io_single_flush{0};
+std::atomic<uint64_t> xb_io_batch_evict{0};
+std::atomic<uint64_t> xb_io_batch_evict_pages{0};
+std::atomic<uint64_t> xb_io_brand_new_reads{0};
+std::atomic<uint64_t> xb_io_pend_sum{0};
+std::atomic<uint64_t> xb_io_pend_n{0};
+std::atomic<uint64_t> xb_io_pend_max{0};
+#endif /* XTRABACKUP */
+
 /** Takes a block out of the LRU list and page hash table.
 If the block is compressed-only (BUF_BLOCK_ZIP_PAGE),
 the object will be freed.
@@ -1398,7 +1411,21 @@ loop:
 
   if (n_iterations > 1) {
     MONITOR_INC(MONITOR_LRU_GET_FREE_WAITS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    /* Waiting for the page cleaner to hand back a free frame. During redo
+    apply every thread that needs a page ends up here, so a 10ms nap per
+    retry is most of the wall clock. */
+#ifdef XTRABACKUP
+    const auto xb_w0 = std::chrono::steady_clock::now();
+#endif
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+#ifdef XTRABACKUP
+    xb_io_lru_wait_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - xb_w0)
+            .count(),
+        std::memory_order_relaxed);
+    xb_io_lru_waits.fetch_add(1, std::memory_order_relaxed);
+#endif
   }
 
   /* No free block was found: try to flush the LRU list.
@@ -1412,6 +1439,36 @@ loop:
   involved (particularly in case of compressed pages). We
   can do that in a separate patch sometime in future. */
 
+#ifdef XTRABACKUP
+  /* Flushing one page at a time, synchronously, from the thread that wanted a
+  frame. During redo apply this fires on nearly every read, so the whole
+  write-back ends up serialised through the apply threads in 16KB units while
+  the batching path sits idle. XB_BATCH_EVICT=<n> asks for a proper LRU batch
+  instead, so writes are submitted in bulk and the device sees a queue.
+  buf_flush_do_batch() returns false if the page cleaner already has an LRU
+  batch running, in which case a batch is being produced anyway and the single
+  page fallback still covers this thread. */
+  static const ulint xb_batch_evict = []() -> ulint {
+    const char *e = getenv("XB_BATCH_EVICT");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    return (v > 0 && v <= 65536) ? static_cast<ulint>(v) : 0;
+  }();
+
+  if (xb_batch_evict != 0) {
+    ulint n_flushed = 0;
+    if (buf_flush_do_batch(buf_pool, BUF_FLUSH_LRU, xb_batch_evict, 0,
+                           &n_flushed) &&
+        n_flushed > 0) {
+      xb_io_batch_evict.fetch_add(1, std::memory_order_relaxed);
+      xb_io_batch_evict_pages.fetch_add(n_flushed, std::memory_order_relaxed);
+      srv_stats.buf_pool_wait_free.add(n_iterations, 1);
+      n_iterations++;
+      goto loop;
+    }
+  }
+
+  xb_io_single_flush.fetch_add(1, std::memory_order_relaxed);
+#endif /* XTRABACKUP */
   if (!buf_flush_single_page_from_LRU(buf_pool)) {
     MONITOR_INC(MONITOR_LRU_SINGLE_FLUSH_FAILURE_COUNT);
     ++flush_failures;

@@ -769,6 +769,20 @@ struct xb_recv_stats_t {
   /** individual records applied vs already contained in the page */
   std::atomic<uint64_t> recs_applied{0};
   std::atomic<uint64_t> recs_superseded{0};
+  /** Why a superseded record survived the map filter. Classified once per
+  page at apply, then attributed to all of that page's superseded records.
+  sup_no_entry: the map has no copy_lsn for the page, so nothing was dropped
+  and the page's own FIL_PAGE_LSN did the filtering -- pure coverage gap.
+  sup_page_ahead: the map HAS an entry but the page in the pool is already
+  past it, i.e. an earlier batch applied to it, so the filter could not have
+  known. sup_unexplained: entry present and page not ahead -- should be 0,
+  and is the assertion that the filter is doing what it claims. */
+  std::atomic<uint64_t> sup_no_entry{0};
+  std::atomic<uint64_t> sup_page_ahead{0};
+  std::atomic<uint64_t> sup_unexplained{0};
+  /** the same three, counted per page rather than per record */
+  std::atomic<uint64_t> sup_pages_no_entry{0};
+  std::atomic<uint64_t> sup_pages_page_ahead{0};
   /** records dropped before entering the hash because the map said so */
   std::atomic<uint64_t> recs_dropped_by_map{0};
   /** pages never entered into the hash at all because the map dropped every

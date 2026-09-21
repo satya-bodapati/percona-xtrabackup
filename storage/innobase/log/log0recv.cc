@@ -37,11 +37,14 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <my_aes.h>
 #include <sys/types.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <iomanip>
 #include <map>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "arch0arch.h"
@@ -96,6 +99,9 @@ this must be less than UNIV_PAGE_SIZE as it is stored in the buffer pool */
 
 /** Read-ahead area in applying log records to file pages */
 static const size_t RECV_READ_AHEAD_AREA = 32;
+
+/** Upper bound for a runtime-widened recovery read-ahead window. */
+static const size_t RECV_READ_AHEAD_AREA_MAX = 512;
 
 /** The recovery system */
 recv_sys_t *recv_sys = nullptr;
@@ -836,7 +842,19 @@ static void recv_writer_thread() {
       return state == SRV_SHUTDOWN_NONE || state == SRV_SHUTDOWN_EXIT_THREADS;
     }));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    /* This is the only thing driving LRU flushing during recovery -- the
+    normal page cleaner sits idle ("flush 0 and evict 0"). One wake per 100ms
+    times lru_scan_depth pages is the entire supply of free frames, and apply
+    demands far more, so threads fall back to evicting inline one page at a
+    time. XB_WRITER_SLEEP_MS shortens the cycle. */
+    {
+      static const int ms = []() {
+        const char *e = getenv("XB_WRITER_SLEEP_MS");
+        const long v = (e == nullptr) ? 0 : atol(e);
+        return (v > 0 && v <= 1000) ? static_cast<int>(v) : 100;
+      }();
+      std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    }
 
     mutex_enter(&recv_sys->writer_mutex);
 
@@ -1108,17 +1126,44 @@ static
 page number.
 @param[in]      page_id         Read the pages around this page number
 @return number of pages found */
-static ulint recv_read_in_area(const page_id_t &page_id) {
-  page_no_t low_limit;
+/** Recovery read-ahead window size; the apply sharding must use the same
+value so a window never spans two threads. */
+static page_no_t xb_read_ahead_area() {
+  static const page_no_t area = []() -> page_no_t {
+    const char *e = getenv("XB_READ_AHEAD_AREA");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    if (v >= 8 && v <= (long)RECV_READ_AHEAD_AREA_MAX && (v & (v - 1)) == 0) {
+      return static_cast<page_no_t>(v);
+    }
+    return RECV_READ_AHEAD_AREA;
+  }();
+  return area;
+}
 
-  low_limit = page_id.page_no() - (page_id.page_no() % RECV_READ_AHEAD_AREA);
+static ulint recv_read_in_area(const page_id_t &page_id) {
+  /* Every page queued here is one that recv_get_rec() found in the recovery
+  hash, so widening the window batches more pages that genuinely need redo --
+  it never pulls in unrelated pages. A wider batch is submitted with
+  DO_NOT_WAKE and woken once, so the window size is effectively the read queue
+  depth recovery achieves. Must stay a power of two: the window is aligned. */
+  const page_no_t area = xb_read_ahead_area();
+  static const page_no_t unused_area_marker = []() -> page_no_t {
+    const char *e = getenv("XB_READ_AHEAD_AREA");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    if (v >= 8 && v <= (long)RECV_READ_AHEAD_AREA_MAX && (v & (v - 1)) == 0) {
+      return static_cast<page_no_t>(v);
+    }
+    return RECV_READ_AHEAD_AREA;
+  }();
+
+  (void)unused_area_marker;
+  const page_no_t low_limit = page_id.page_no() - (page_id.page_no() % area);
 
   ulint n = 0;
 
-  std::array<page_no_t, RECV_READ_AHEAD_AREA> page_nos;
+  std::array<page_no_t, RECV_READ_AHEAD_AREA_MAX> page_nos;
 
-  for (page_no_t page_no = low_limit;
-       page_no < low_limit + RECV_READ_AHEAD_AREA; ++page_no) {
+  for (page_no_t page_no = low_limit; page_no < low_limit + area; ++page_no) {
     recv_addr_t *recv_addr;
 
     recv_addr = recv_get_rec(page_id.space(), page_no);
@@ -1130,6 +1175,19 @@ static ulint recv_read_in_area(const page_id_t &page_id) {
 
       if (recv_addr->state == RECV_NOT_PROCESSED) {
         recv_addr->state = RECV_BEING_READ;
+
+#ifdef XTRABACKUP
+        /* If the first record initialises the whole page, its previous
+        contents are irrelevant -- we read 16KB off disk and then overwrite
+        every byte. Count them to size the opportunity before acting on it. */
+        {
+          const recv_t *first = UT_LIST_GET_FIRST(recv_addr->rec_list);
+          if (first != nullptr && (first->type == MLOG_INIT_FILE_PAGE2 ||
+                                   first->type == MLOG_INIT_FILE_PAGE)) {
+            xb_io_brand_new_reads.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+#endif /* XTRABACKUP */
 
         page_nos[n] = page_no;
 
@@ -1213,6 +1271,198 @@ static void recv_apply_log_rec(recv_addr_t *recv_addr) {
   }
 }
 
+#ifdef XTRABACKUP
+/* Parallel apply, XB_APPLY_THREADS=<n>.
+
+The apply driver is single threaded. It walks every page in the batch and, for
+pages already resident, applies redo inline; only misses take the async read
+path. Measured consequence: average device queue depth 0.3, device 23% busy,
+1.5 of 128 cores busy. The device does 227 MB/s at queue depth 1 and
+7.6 GB/s at depth 128, so depth is the whole game.
+
+Apply inside a batch has no ordering constraint at all. Each page's record list
+is already in LSN order and pages are independent, so this is a flat work queue
+over pages. The only shared mutable state is recv_sys->n_addrs, missing_ids,
+deleted and the recv_addr states, all of which recv_sys->mutex already covers.
+
+Tablespaces are opened once, serially, before any of their pages are queued --
+fil_tablespace_open_for_recovery() is not something to race on. */
+static size_t xb_apply_threads() {
+  static const size_t n = []() -> size_t {
+    const char *e = getenv("XB_APPLY_THREADS");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    return (v > 0 && v <= 256) ? static_cast<size_t>(v) : 0;
+  }();
+  return n;
+}
+
+/* Same decisions as recv_apply_log_rec(), but each thread takes and drops
+recv_sys->mutex itself rather than inheriting it from the caller. */
+static std::atomic<size_t> xb_apply_done{0};
+
+/* Sharded by tablespace: one thread owns a space for the whole batch, so this
+recv_addr and the 32-page read-ahead windows around it are private and the
+state transitions need no lock.
+
+The previous version took the GLOBAL recv_sys->mutex two to three times per
+page -- roughly 20M acquisitions across 8M page applies. perf showed 25% of
+all CPU spinning on locks at 8 threads (13.9% kernel + 11.4% InnoDB) while the
+real work fell, which is why scaling capped at 4% and collapsed at 16. */
+static void xb_apply_one(recv_addr_t *recv_addr, bool dropped) {
+  if (dropped) {
+    recv_addr->state = RECV_DISCARDED;
+  }
+
+  if (recv_addr->state == RECV_DISCARDED) {
+    xb_apply_done.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+
+  bool found;
+  const page_id_t page_id(recv_addr->space, recv_addr->page_no);
+  const page_size_t page_size =
+      fil_space_get_page_size(recv_addr->space, &found);
+
+  if (!found) {
+    recv_addr->state = RECV_PROCESSED;
+    xb_apply_done.fetch_add(1, std::memory_order_relaxed);
+    mutex_enter(&recv_sys->mutex);
+    if (recv_sys->deleted.find(recv_addr->space) == recv_sys->deleted.end()) {
+      recv_sys->missing_ids.insert(recv_addr->space);
+    }
+    mutex_exit(&recv_sys->mutex);
+    return;
+  }
+
+  if (recv_addr->state != RECV_NOT_PROCESSED) {
+    return;
+  }
+
+  if (buf_page_peek(page_id)) {
+    mtr_t mtr;
+    mtr_start(&mtr);
+    buf_block_t *block =
+        buf_page_get(page_id, page_size, RW_X_LATCH, UT_LOCATION_HERE, &mtr);
+    buf_block_dbg_add_level(block, SYNC_NO_ORDER_CHECK);
+    recv_recover_page(false, block);
+    mtr_commit(&mtr);
+  } else {
+    recv_read_in_area(page_id);
+  }
+}
+
+/* Called with recv_sys->mutex held; returns with it held. Work is handed out
+per TABLESPACE so no two threads share a space's pages. */
+static void xb_apply_parallel(size_t batch_size) {
+  /* Sharding per tablespace leaves one thread doing everything when the redo
+  is all from one table, which is a common shape. Shard by read-ahead WINDOW
+  instead: recv_read_in_area() works on an aligned window of
+  RECV_READ_AHEAD_AREA pages, so a whole window must belong to one thread or
+  two threads race inside it. window = page_no / area, owner = window % N.
+  That parallelises a single tablespace and keeps every window private. */
+  struct Work {
+    recv_addr_t *addr;
+    bool dropped;
+  };
+  const size_t nthreads = xb_apply_threads();
+  std::vector<std::vector<Work>> buckets(nthreads);
+  std::vector<Work> flat;
+  const page_no_t area = xb_read_ahead_area();
+  size_t n_pages_total = 0;
+  for (const auto &sp : *recv_sys->spaces)
+    n_pages_total += sp.second.m_pages.size();
+  flat.reserve(n_pages_total);
+  (void)batch_size;
+
+  for (const auto &space : *recv_sys->spaces) {
+    bool dropped = false;
+
+    if (space.first != TRX_SYS_SPACE) {
+      dberr_t err = fil_tablespace_open_for_recovery(space.first);
+      if (err == DB_CORRUPTION) {
+        mutex_exit(&recv_sys->mutex);
+        ib::fatal(UT_LOCATION_HERE, ER_IB_ERR_CORRUPT_TABLESPACE_UNRECOVERABLE,
+                  space.first);
+      } else if (err != DB_SUCCESS) {
+        ut_a_eq(err, DB_FAIL);
+        if (fil_tablespace_lookup_for_recovery(space.first)) {
+          ut_ad(fsp_is_undo_tablespace(space.first));
+        }
+        dropped = true;
+      }
+    }
+    /* Resolved once per space instead of re-checked under the global mutex
+    on every page. */
+    if (recv_sys->missing_ids.find(space.first) !=
+        recv_sys->missing_ids.end()) {
+      dropped = true;
+    }
+    for (const auto &pg : space.second.m_pages) {
+      flat.push_back({pg.second, dropped});
+    }
+  }
+
+  /* Contiguous ranges, not round robin. window % nthreads would give each
+  thread a strided set of windows -- the worst possible layout for the device.
+  Sorting by (space, page) and cutting into N contiguous chunks gives every
+  thread a sequential region to read and write, which is where the sequential
+  bandwidth (14.8 GB/s vs 5.6 GB/s random) comes from. Cuts land on window
+  boundaries so a read-ahead window is never split across threads. */
+  std::sort(flat.begin(), flat.end(), [](const Work &a, const Work &b) {
+    if (a.addr->space != b.addr->space) return a.addr->space < b.addr->space;
+    return a.addr->page_no < b.addr->page_no;
+  });
+
+  {
+    const size_t per = (flat.size() + nthreads - 1) / nthreads;
+    size_t t = 0, i = 0;
+    while (i < flat.size() && t < nthreads) {
+      size_t end = std::min(i + per, flat.size());
+      /* do not cut inside a read-ahead window */
+      while (end < flat.size() && t + 1 < nthreads &&
+             flat[end].addr->space == flat[end - 1].addr->space &&
+             (flat[end].addr->page_no / area) ==
+                 (flat[end - 1].addr->page_no / area)) {
+        ++end;
+      }
+      buckets[t].assign(flat.begin() + i, flat.begin() + end);
+      i = end;
+      ++t;
+    }
+  }
+
+  xb_apply_done.store(0, std::memory_order_relaxed);
+
+  mutex_exit(&recv_sys->mutex);
+
+  std::vector<std::thread> threads;
+  threads.reserve(nthreads);
+
+  for (size_t t = 0; t < nthreads; ++t) {
+    threads.emplace_back([&buckets, t]() {
+      my_thread_init();
+      for (const Work &w : buckets[t]) {
+        xb_apply_one(w.addr, w.dropped);
+      }
+      my_thread_end();
+    });
+  }
+
+  for (auto &th : threads) {
+    th.join();
+  }
+
+  mutex_enter(&recv_sys->mutex);
+
+  /* Pages retired without going through recv_recover_page still have to come
+  off the outstanding count, which that path would otherwise decrement. */
+  const size_t done = xb_apply_done.load(std::memory_order_relaxed);
+  if (recv_sys->n_addrs >= done) {
+    recv_sys->n_addrs -= done;
+  }
+}
+#endif /* XTRABACKUP */
+
 void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
   for (;;) {
     mutex_enter(&recv_sys->mutex);
@@ -1263,56 +1513,87 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
 
   auto start_time = std::chrono::steady_clock::now();
 
-  for (const auto &space : *recv_sys->spaces) {
-    bool dropped = false;
+#ifdef XTRABACKUP
+  if (xb_apply_threads() > 1) {
+    xb_apply_parallel(batch_size);
+  } else
+#endif /* XTRABACKUP */
+  {
+    for (const auto &space : *recv_sys->spaces) {
+      bool dropped = false;
 
-    if (space.first != TRX_SYS_SPACE) {
-      dberr_t err = fil_tablespace_open_for_recovery(space.first);
-      if (err == DB_CORRUPTION) {
-        /* Page couldn't be recovered from double-write, we cannot proceed
-        with recovery. Skip applying redos and abort the startup. */
-        mutex_exit(&recv_sys->mutex);
-        ib::fatal(UT_LOCATION_HERE, ER_IB_ERR_CORRUPT_TABLESPACE_UNRECOVERABLE,
-                  space.first);
-      } else if (err != DB_SUCCESS) {
-        ut_a_eq(err, DB_FAIL);
+      if (space.first != TRX_SYS_SPACE) {
+        dberr_t err = fil_tablespace_open_for_recovery(space.first);
+        if (err == DB_CORRUPTION) {
+          /* Page couldn't be recovered from double-write, we cannot proceed
+          with recovery. Skip applying redos and abort the startup. */
+          mutex_exit(&recv_sys->mutex);
+          ib::fatal(UT_LOCATION_HERE,
+                    ER_IB_ERR_CORRUPT_TABLESPACE_UNRECOVERABLE, space.first);
+        } else if (err != DB_SUCCESS) {
+          ut_a_eq(err, DB_FAIL);
 
-        /* Tablespace was dropped. It should not have been scanned unless it
-        is an undo space that was under construction. */
+          /* Tablespace was dropped. It should not have been scanned unless it
+          is an undo space that was under construction. */
 
-        if (fil_tablespace_lookup_for_recovery(space.first)) {
-          ut_ad(fsp_is_undo_tablespace(space.first));
+          if (fil_tablespace_lookup_for_recovery(space.first)) {
+            ut_ad(fsp_is_undo_tablespace(space.first));
+          }
+          dropped = true;
         }
-        dropped = true;
-      }
-    }
-
-    for (auto pages : space.second.m_pages) {
-      ut_ad(pages.second->space == space.first);
-
-      if (dropped) {
-        pages.second->state = RECV_DISCARDED;
       }
 
-      recv_apply_log_rec(pages.second);
-
-      ++applied;
-
-      if (unit == 0 || (applied % unit) == 0) {
-        ib::info(ER_IB_MSG_708) << pct << "%";
-
-        pct += PCT;
-
-        start_time = std::chrono::steady_clock::now();
-
-      } else if (std::chrono::steady_clock::now() - start_time >=
-                 PRINT_INTERVAL) {
-        start_time = std::chrono::steady_clock::now();
-
-        ib::info(ER_IB_MSG_709)
-            << std::setprecision(2)
-            << ((double)applied * 100) / (double)batch_size << "%";
+#ifdef XTRABACKUP
+      /* m_pages is an unordered_map, so the pages of one tablespace are visited
+      in hash order and both the reads and the evictions they force are
+      scattered. XB_SORT_APPLY=1 visits them in page order instead. */
+      static const bool xb_sort_apply = []() {
+        const char *e = getenv("XB_SORT_APPLY");
+        return e != nullptr && atoi(e) != 0;
+      }();
+      std::vector<recv_addr_t *> xb_sorted;
+      if (xb_sort_apply) {
+        xb_sorted.reserve(space.second.m_pages.size());
+        for (auto &pg : space.second.m_pages) xb_sorted.push_back(pg.second);
+        std::sort(xb_sorted.begin(), xb_sorted.end(),
+                  [](const recv_addr_t *a, const recv_addr_t *b) {
+                    return a->page_no < b->page_no;
+                  });
+        for (recv_addr_t *ra : xb_sorted) {
+          if (dropped) ra->state = RECV_DISCARDED;
+          recv_apply_log_rec(ra);
+          ++applied;
+        }
       }
+      if (!xb_sort_apply)
+#endif /* XTRABACKUP */
+        for (auto pages : space.second.m_pages) {
+          ut_ad(pages.second->space == space.first);
+
+          if (dropped) {
+            pages.second->state = RECV_DISCARDED;
+          }
+
+          recv_apply_log_rec(pages.second);
+
+          ++applied;
+
+          if (unit == 0 || (applied % unit) == 0) {
+            ib::info(ER_IB_MSG_708) << pct << "%";
+
+            pct += PCT;
+
+            start_time = std::chrono::steady_clock::now();
+
+          } else if (std::chrono::steady_clock::now() - start_time >=
+                     PRINT_INTERVAL) {
+            start_time = std::chrono::steady_clock::now();
+
+            ib::info(ER_IB_MSG_709)
+                << std::setprecision(2)
+                << ((double)applied * 100) / (double)batch_size << "%";
+          }
+        }
     }
   }
 
@@ -3214,6 +3495,24 @@ void recv_recover_page_func(
   xb_recv_stats.recs_applied.fetch_add(xb_applied, std::memory_order_relaxed);
   xb_recv_stats.recs_superseded.fetch_add(xb_total - xb_applied,
                                           std::memory_order_relaxed);
+  /* Classify the survivors: every superseded record is one the map COULD in
+  principle have dropped, so the split says whether the remaining waste is a
+  coverage gap in the map or something the filter could never have known. */
+  if (xb_total > xb_applied && page_lsn_map::is_loaded()) {
+    const uint64_t n = xb_total - xb_applied;
+    const lsn_t copy_lsn =
+        page_lsn_map::lookup(recv_addr->space, recv_addr->page_no);
+    if (copy_lsn == 0) {
+      xb_recv_stats.sup_no_entry.fetch_add(n, std::memory_order_relaxed);
+      xb_recv_stats.sup_pages_no_entry.fetch_add(1, std::memory_order_relaxed);
+    } else if (page_lsn > copy_lsn) {
+      xb_recv_stats.sup_page_ahead.fetch_add(n, std::memory_order_relaxed);
+      xb_recv_stats.sup_pages_page_ahead.fetch_add(1,
+                                                   std::memory_order_relaxed);
+    } else {
+      xb_recv_stats.sup_unexplained.fetch_add(n, std::memory_order_relaxed);
+    }
+  }
   if (xb_total > 0 && xb_applied == 0) {
     xb_recv_stats.pages_wasted.fetch_add(1, std::memory_order_relaxed);
   }
@@ -4266,14 +4565,31 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
   recv_previous_parsed_rec_is_multi = 0;
   ut_ad(recv_max_page_lsn == 0);
 
+  /* The recovery heap grows into the buffer pool, so whatever it does not
+  take is what remains for reading pages. At the default this leaves 256
+  frames for the entire apply phase: with 16 apply threads that is 16 frames
+  each, while one recv_read_in_area() window alone wants 32. The threads then
+  spend their time in buf_flush_single_page_from_LRU() evicting one page at a
+  time to make room. XB_KEEP_FREE_PAGES raises the reservation, trading a
+  slightly smaller heap (a few more batches) for frames the readers can
+  actually use. */
+  const size_t xb_keep_free = []() -> size_t {
+    const char *e = getenv("XB_KEEP_FREE_PAGES");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    return (v > 0) ? static_cast<size_t>(v) : 0;
+  }();
+
   const auto pages_to_be_kept_free = std::min(
       size_t{buf_pool_get_n_pages()} / 2,
-      /* This value should be greater than the number of pages we want
-      to apply redo records for concurrently. This should be greater
-      than number of concurrent IOs we want to sustain. We should also keep in
-      mind that the limit for the deltas hashmap is not strictly enforced and
-      this number includes the not-well specified safety margin. */
-      size_t{256} * srv_buf_pool_instances);
+      xb_keep_free != 0
+          ? xb_keep_free
+          :
+          /* This value should be greater than the number of pages we want
+          to apply redo records for concurrently. This should be greater
+          than number of concurrent IOs we want to sustain. We should also keep
+          in mind that the limit for the deltas hashmap is not strictly enforced
+          and this number includes the not-well specified safety margin. */
+          size_t{256} * srv_buf_pool_instances);
 #ifndef XTRABACKUP
   const
 #endif

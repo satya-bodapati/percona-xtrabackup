@@ -48,6 +48,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "buf/buf.h"
 
+#include <atomic>
 #include <ostream>
 
 // Forward declaration
@@ -2266,6 +2267,26 @@ struct buf_buddy_stat_t {
     return {used.load(), relocated, relocated_duration};
   }
 };
+
+#ifdef XTRABACKUP
+/** Apply-phase IO instrumentation. External sampling cannot see inside the
+process; these count what recovery itself issues and waits for, so achieved
+IOPS and frame-starvation cost are measured rather than inferred. */
+extern std::atomic<uint64_t> xb_io_reads_issued; /*!< pages read during apply */
+extern std::atomic<uint64_t>
+    xb_io_lru_wait_ns; /*!< ns blocked for a free frame */
+extern std::atomic<uint64_t> xb_io_lru_waits; /*!< times blocked for a frame */
+extern std::atomic<uint64_t>
+    xb_io_single_flush; /*!< inline single-page evictions */
+extern std::atomic<uint64_t> xb_io_batch_evict; /*!< batch evictions taken */
+extern std::atomic<uint64_t>
+    xb_io_batch_evict_pages; /*!< pages freed by them */
+extern std::atomic<uint64_t>
+    xb_io_brand_new_reads; /*!< reads of pages overwritten wholesale */
+extern std::atomic<uint64_t> xb_io_pend_sum; /*!< sum of n_pend_reads samples */
+extern std::atomic<uint64_t> xb_io_pend_n;   /*!< number of samples */
+extern std::atomic<uint64_t> xb_io_pend_max; /*!< peak n_pend_reads seen */
+#endif                                       /* XTRABACKUP */
 
 /** @brief The buffer pool structure.
 

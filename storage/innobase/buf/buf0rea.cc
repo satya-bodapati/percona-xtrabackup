@@ -720,6 +720,18 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
 
     dberr_t err;
 
+#ifdef XTRABACKUP
+    {
+      const uint64_t pend = buf_pool->n_pend_reads;
+      xb_io_pend_sum.fetch_add(pend, std::memory_order_relaxed);
+      xb_io_pend_n.fetch_add(1, std::memory_order_relaxed);
+      uint64_t prev = xb_io_pend_max.load(std::memory_order_relaxed);
+      while (pend > prev && !xb_io_pend_max.compare_exchange_weak(
+                                prev, pend, std::memory_order_relaxed)) {
+      }
+      xb_io_reads_issued.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif /* XTRABACKUP */
     buf_read_page_low(&err, false, IORequest::DO_NOT_WAKE, BUF_READ_ANY_PAGE,
                       cur_page_id, page_size, true);
   }

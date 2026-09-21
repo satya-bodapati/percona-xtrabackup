@@ -105,6 +105,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "backup_copy.h"
 #include "backup_mysql.h"
+#include "buf0buf.h"
 #include "buf0flu.h"
 #include "changed_page_tracking.h"
 #include "crc_glue.h"
@@ -7268,6 +7269,12 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
              << " recs_applied=" << st.recs_applied.load()
              << " recs_superseded=" << st.recs_superseded.load()
              << " recs_dropped_by_map=" << st.recs_dropped_by_map.load()
+             << " map_entries=" << page_lsn_map::n_entries()
+             << " sup_no_entry=" << st.sup_no_entry.load()
+             << " sup_page_ahead=" << st.sup_page_ahead.load()
+             << " sup_unexplained=" << st.sup_unexplained.load()
+             << " sup_pages_no_entry=" << st.sup_pages_no_entry.load()
+             << " sup_pages_page_ahead=" << st.sup_pages_page_ahead.load()
              << " pages_skipped_by_map=" << st.pages_skipped_by_map.load()
              << " redo_scan_bytes=" << st.redo_scan_bytes.load()
              << " heap_max=" << st.heap_max_bytes.load()
@@ -7281,6 +7288,63 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
              << " body_bytes_filed=" << st.body_bytes_filed.load()
              << " recs_per_page_hist=" << hist.str()
              << " body_size_hist=" << bhist.str();
+
+  /* Free-frame starvation is what the off-CPU profile showed during apply:
+  every thread blocked in buf_LRU_get_free_block -> buf_flush_single_page_
+  from_LRU, evicting one page at a time because the page cleaner had not kept
+  any free. buf_pool_wait_free counts how often a thread had to wait for a
+  frame. If the cleaner is keeping up it stays near zero and free_list is
+  non-empty; if it is not, this is where the wall clock goes. */
+  {
+    ulint free_len = 0, lru_len = 0, flush_len = 0;
+    uint64_t written = 0, pread = 0;
+
+    for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
+      buf_pool_t *bp = buf_pool_from_array(i);
+      free_len += UT_LIST_GET_LEN(bp->free);
+      lru_len += UT_LIST_GET_LEN(bp->LRU);
+      flush_len += UT_LIST_GET_LEN(bp->flush_list);
+      written += bp->stat.n_pages_written.load();
+      pread += bp->stat.n_pages_read.load();
+    }
+
+    /* Achieved IO, measured from inside recovery rather than sampled from
+    outside: reads issued, the queue depth they were issued at, and the time
+    threads spent blocked waiting for a free frame. apply_ms gives the window,
+    so these convert directly to IOPS and a percentage of wall clock. */
+    const uint64_t apply_s_ms = apply_ms ? apply_ms : 1;
+    const uint64_t reads = xb_io_reads_issued.load();
+    const uint64_t pend_n = xb_io_pend_n.load();
+    const uint64_t waits = xb_io_lru_waits.load();
+    const uint64_t wait_ms = xb_io_lru_wait_ns.load() / 1000000;
+
+    xb::info() << "XB-IOSTATS v=1"
+               << " reads_issued=" << reads
+               << " read_iops=" << (reads * 1000 / apply_s_ms)
+               << " read_MBps=" << (reads * 16 / 1024 * 1000 / apply_s_ms)
+               << " avg_queue_depth="
+               << (pend_n ? xb_io_pend_sum.load() / pend_n : 0)
+               << " peak_queue_depth=" << xb_io_pend_max.load()
+               << " frame_waits=" << waits << " frame_wait_ms=" << wait_ms
+               << " frame_wait_pct_of_apply=" << (wait_ms * 100 / apply_s_ms)
+               << " single_page_evictions=" << xb_io_single_flush.load()
+               << " batch_evictions=" << xb_io_batch_evict.load()
+               << " batch_evict_pages=" << xb_io_batch_evict_pages.load()
+               << " brand_new_reads=" << xb_io_brand_new_reads.load()
+               << " apply_ms=" << apply_ms;
+
+    xb::info() << "XB-BUFSTATS v=1"
+               << " wait_free=" << (ulint)srv_stats.buf_pool_wait_free
+               << " free_list=" << free_len << " lru_list=" << lru_len
+               << " flush_list=" << flush_len << " pages_written=" << written
+               << " pages_read_bp=" << pread
+               << " pool_pages=" << buf_pool_get_n_pages()
+               << " instances=" << srv_buf_pool_instances
+               << " lru_scan_depth=" << srv_LRU_scan_depth
+               << " page_cleaners=" << srv_n_page_cleaners
+               << " io_capacity=" << srv_io_capacity
+               << " io_capacity_max=" << srv_max_io_capacity;
+  }
 }
 
 static void xtrabackup_prepare_func(int argc, char **argv) {
