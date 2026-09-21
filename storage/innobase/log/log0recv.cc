@@ -5445,13 +5445,36 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
   for (;;) {
     if (start_lsn >= to_lsn) break;
 
-    /* Fill the window with RECV_SCAN_SIZE reads, the unit recv_read_log_seg
-    is written for. */
+    /* Fill the window. recv_read_log_seg() serves an arbitrary range in one
+    os_file_read() and loops internally across a file boundary, so the whole
+    window can be asked for at once. Asking in RECV_SCAN_SIZE (64KB) pieces
+    instead cost two things, because the function opens and closes the redo
+    file on every call: 21.3GB of redo became 348,160 open/pread/close
+    triples, and -- the expensive part -- kernel readahead state is per file
+    descriptor, so closing every 64KB threw it away before it could ramp.
+    The kernel saw 348,160 unrelated one-shot opens rather than one
+    sequential stream. Measured: cat(1) reads the same file at 1.8GB/s while
+    this path managed 343-476MB/s.
+
+    XB_PARSCAN_READ_KB caps the request size so the old behaviour can be
+    reproduced for comparison (64 gives the previous 64KB reads); 0, the
+    default, means the whole window in one call. */
     size_t filled = 0;
     lsn_t read_lsn = start_lsn;
+    static const size_t read_cap = []() -> size_t {
+      const char *e = getenv("XB_PARSCAN_READ_KB");
+      const long v = (e == nullptr) ? 0 : atol(e);
+      if (v <= 0) return 0;
+      size_t want = (size_t)v * 1024;
+      want -= want % OS_FILE_LOG_BLOCK_SIZE; /* must stay block aligned */
+      return (want >= OS_FILE_LOG_BLOCK_SIZE) ? want : 0;
+    }();
     while (filled < wbytes) {
+      const lsn_t window_end = start_lsn + (lsn_t)wbytes;
       const lsn_t want =
-          std::min<lsn_t>(read_lsn + RECV_SCAN_SIZE, start_lsn + (lsn_t)wbytes);
+          (read_cap == 0)
+              ? window_end
+              : std::min<lsn_t>(read_lsn + (lsn_t)read_cap, window_end);
       const lsn_t got =
           recv_read_log_seg(log, window.data() + filled, read_lsn, want);
       if (got == 0) {
