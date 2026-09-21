@@ -5261,7 +5261,10 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
           std::min<lsn_t>(read_lsn + RECV_SCAN_SIZE, start_lsn + (lsn_t)wbytes);
       const lsn_t got =
           recv_read_log_seg(log, window.data() + filled, read_lsn, want);
-      if (got == 0) return false;
+      if (got == 0) {
+        *io_start_lsn = start_lsn;
+        return false;
+      }
       if (got <= read_lsn) break; /* end of the log */
       filled += (size_t)(got - read_lsn);
       read_lsn = got;
@@ -5278,7 +5281,14 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     lsn_t done_lsn = parse_window(
         window.data(), start_lsn, (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
         resume_lsn, recv_sys->checkpoint_lsn, to_lsn, &new_pages);
-    if (done_lsn == 0) return false; /* seam check failed; nothing filed */
+    if (done_lsn == 0) {
+      /* Nothing from THIS window was filed, but earlier windows were, so
+      the serial parse has to resume here rather than at the checkpoint.
+      Handing back the original LSN would re-parse and re-file everything
+      already merged. */
+      *io_start_lsn = start_lsn;
+      return false;
+    }
     if (done_lsn <= start_lsn) break;
 
     /* Reaching to_lsn ends recovery. Clamp and stop: leaving the loop to
@@ -5446,8 +5456,11 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
     if (xb_parscan::drive(log, &delta_hashmap_max_mem, &start_lsn, to_lsn)) {
       finished = true;
     } else {
-      xb::warn() << "parallel redo parse could not handle the window at LSN "
-                 << start_lsn << "; continuing serially from there";
+      /* start_lsn has been updated to where the parallel parse actually
+      stopped, so the serial loop below resumes from there rather than
+      re-reading what has already been filed. */
+      xb::warn() << "parallel redo parse stopped at LSN " << start_lsn
+                 << "; continuing serially from there";
     }
   }
 #endif /* XTRABACKUP */
