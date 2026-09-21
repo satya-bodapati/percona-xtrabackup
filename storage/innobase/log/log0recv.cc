@@ -5109,13 +5109,16 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
       seams_ok = false;
       break;
     }
-    if (w.stopped_early) {
-      seams_ok = false;
-      break;
-    }
     expect = w.stop_lsn;
     if (w.stop_lsn > done_lsn) done_lsn = w.stop_lsn;
   }
+  /* Deliberately NOT checking Worker::stopped_early. The last worker in a
+  window always stops early: it runs out of window in the middle of an mtr,
+  and that point is exactly where the window ends and the next one resumes.
+  An INTERIOR worker stopping short is a real gap, and the seam equality
+  above already catches it, because its stop_lsn then falls below the next
+  worker's start_lsn. Rejecting on stopped_early instead failed every
+  window and silently fell the whole log back to the serial parse. */
 
   if (!seams_ok) {
     free_workers(ws);

@@ -272,9 +272,12 @@ void backup_init(uint64_t base_lsn, uint32_t n_threads) {
   was then dropped: with --parallel=8 that silently cost 1/8 of all
   tablespaces, and the one it happened to take out carried 37.5% of the
   apply phase's record examinations. Size for the numbering actually
-  used. */
+  used, and fill EVERY slot: sizing the array without extending the loop
+  that populates it leaves the new slot null and drops exactly as much as
+  before, which is what the first attempt at this fix did (507,079 pages,
+  caught only because the drop counter below now exists). */
   g_writers.assign(n_threads + 1, nullptr);
-  for (uint32_t i = 0; i < n_threads; i++) {
+  for (uint32_t i = 0; i < g_writers.size(); i++) {
     Writer *w = new Writer();
     if (w->open(i, base_lsn)) {
       g_writers[i] = w;
