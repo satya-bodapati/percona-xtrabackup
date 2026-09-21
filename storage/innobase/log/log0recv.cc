@@ -5176,6 +5176,45 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
   /* Worker 0 of the first window has no earlier position to resume from, so
   it uses the block marker like any interior seam does. */
   lsn_t resume_lsn = 0;
+
+  /* recv_scan_log_recs() does more than parse, and skipping it skipped all
+  of this. Most of it is bookkeeping, but recv_init_crash_recovery() also
+  starts recv_writer_thread, which is the ONLY producer of free frames
+  during recovery -- without it apply cannot get a frame and the run
+  livelocks in buf_LRU_get_free_block. It also sets recv_needed_recovery,
+  which recv_recover_page_func() asserts on. */
+  {
+    byte first[OS_FILE_LOG_BLOCK_SIZE];
+    const lsn_t blk_lsn =
+        ut_uint64_align_down(start_lsn, OS_FILE_LOG_BLOCK_SIZE);
+    if (recv_read_log_seg(log, first, blk_lsn,
+                          blk_lsn + OS_FILE_LOG_BLOCK_SIZE) == 0) {
+      return false;
+    }
+    Log_data_block_header hdr;
+    log_data_block_header_deserialize(first, hdr);
+    if (hdr.m_first_rec_group == 0) return false;
+
+    recv_sys->parse_start_lsn = blk_lsn + hdr.m_first_rec_group;
+    if (recv_sys->parse_start_lsn < recv_sys->checkpoint_lsn) {
+      /* Records between parse_start_lsn and checkpoint_lsn belong to a
+      group that began before the checkpoint. The serial parse counts them
+      down through recv_update_bytes_to_ignore_before_checkpoint() and does
+      not file them; the workers have no equivalent yet, so refuse the
+      window rather than file records the serial path would have dropped. */
+      return false;
+    }
+    recv_sys->scanned_lsn = recv_sys->parse_start_lsn;
+    recv_sys->recovered_lsn = recv_sys->parse_start_lsn;
+    recv_track_changes_of_recovered_lsn();
+
+    if (!recv_needed_recovery) {
+      if (srv_read_only_mode) return false;
+      recv_init_crash_recovery();
+    }
+    start_lsn = blk_lsn;
+    resume_lsn = recv_sys->parse_start_lsn;
+  }
   /* Heap bytes consumed per byte of redo, learned from the windows already
   parsed. 4.0 until the first measurement: guessing high only costs an early
   batch, guessing low exhausts the pool. */
