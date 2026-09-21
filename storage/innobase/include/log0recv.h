@@ -822,6 +822,21 @@ struct xb_recv_stats_t {
   std::atomic<uint64_t> sup_page_past_end{0};
   std::atomic<uint64_t> sup_page_inside_range{0};
 
+  /* Order-independent digest of every record the scan files, so the
+  parallel parse can be compared against the serial one DIRECTLY rather
+  than through a prepared datadir. Each record contributes
+  h = crc32(space, page, start_lsn, end_lsn, type, len, body); the three
+  accumulators below are a multiset fingerprint -- count catches an added
+  or dropped record, sum catches a changed one, and sum of squares makes
+  a compensating pair of changes vanishingly unlikely. Summation is
+  commutative, so workers can accumulate concurrently and in any order,
+  which is the point: the digest must not care who parsed what, only that
+  the same set of records came out. Ordering WITHIN a page is checked
+  separately, by assertion at apply. */
+  std::atomic<uint64_t> filed_digest_n{0};
+  std::atomic<uint64_t> filed_digest_sum{0};
+  std::atomic<uint64_t> filed_digest_sq{0};
+
   /** Per-tablespace tally of the records the map failed to drop. The gap
   is concentrated -- roughly 15,000 pages carry 294.6M records, about
   10,000 each -- so naming the spaces is what turns "missing coverage"
@@ -864,6 +879,12 @@ void xb_recv_stats_note_page(uint64_t n_recs);
 
 /** Record one filed record's body length. */
 void xb_recv_stats_note_body(uint64_t len);
+
+/** Fold one filed record into the scan digest. Called from both the serial
+and the parallel filing paths, which is the whole point. */
+void xb_recv_note_filed(uint32_t space_id, uint32_t page_no, uint64_t start_lsn,
+                        uint64_t end_lsn, int type, uint32_t len,
+                        const unsigned char *body);
 #endif /* XTRABACKUP */
 
 /** Size of the parsing buffer; it must accommodate RECV_SCAN_SIZE many

@@ -7301,6 +7301,8 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
              << " sup_space_absent=" << st.sup_space_absent.load()
              << " sup_page_past_end=" << st.sup_page_past_end.load()
              << " sup_page_inside_range=" << st.sup_page_inside_range.load()
+             << " scan_digest=" << st.filed_digest_n.load() << ":"
+             << st.filed_digest_sum.load() << ":" << st.filed_digest_sq.load()
              << " sup_top_spaces=[" << supspaces.str() << "]"
              << " pages_skipped_by_map=" << st.pages_skipped_by_map.load()
              << " redo_scan_bytes=" << st.redo_scan_bytes.load()

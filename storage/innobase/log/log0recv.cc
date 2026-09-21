@@ -218,6 +218,33 @@ Set before innodb_init() by xtrabackup_prepare_func(). */
 /** Counters for one --prepare run. See log0recv.h. */
 xb_recv_stats_t xb_recv_stats;
 
+/* XB_SCAN_DIGEST=1 fingerprints every filed record. Off by default: it is a
+crc32 over each record body, which is not free. */
+static bool xb_scan_digest_on() {
+  static const bool on = []() {
+    const char *e = getenv("XB_SCAN_DIGEST");
+    return e != nullptr && *e == '1';
+  }();
+  return on;
+}
+
+void xb_recv_note_filed(uint32_t space_id, uint32_t page_no, uint64_t start_lsn,
+                        uint64_t end_lsn, int type, uint32_t len,
+                        const unsigned char *body) {
+  if (!xb_scan_digest_on()) return;
+  uint32_t h = ut_crc32((const byte *)&space_id, sizeof(space_id));
+  h ^= ut_crc32((const byte *)&page_no, sizeof(page_no));
+  h ^= ut_crc32((const byte *)&start_lsn, sizeof(start_lsn));
+  h ^= ut_crc32((const byte *)&end_lsn, sizeof(end_lsn));
+  h ^= ut_crc32((const byte *)&type, sizeof(type));
+  h ^= ut_crc32((const byte *)&len, sizeof(len));
+  if (len > 0 && body != nullptr) h ^= ut_crc32(body, len);
+  const uint64_t v = h;
+  xb_recv_stats.filed_digest_n.fetch_add(1, std::memory_order_relaxed);
+  xb_recv_stats.filed_digest_sum.fetch_add(v, std::memory_order_relaxed);
+  xb_recv_stats.filed_digest_sq.fetch_add(v * v, std::memory_order_relaxed);
+}
+
 void xb_recv_stats_note_body(uint64_t len) {
   xb_recv_stats.recs_filed.fetch_add(1, std::memory_order_relaxed);
   xb_recv_stats.body_bytes_filed.fetch_add(len, std::memory_order_relaxed);
@@ -3148,6 +3175,8 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
 #ifdef XTRABACKUP
   xb_recv_stats_note_body((uint64_t)(rec_end - body));
+  xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
+                     (uint32_t)(rec_end - body), body);
 #endif /* XTRABACKUP */
 
   recv_sys_t::Space *space;
@@ -3466,9 +3495,18 @@ void recv_recover_page_func(
   uint64_t xb_applied = 0;
 #endif /* XTRABACKUP */
 
+#ifdef XTRABACKUP
+  /* The digest deliberately ignores order, so this is what catches a
+  mis-spliced list: records for one page must be in ascending LSN, or
+  recv_recover_page_func() skips the earlier ones against a page_lsn the
+  later ones already advanced. */
+  lsn_t xb_prev_lsn = 0;
+#endif /* XTRABACKUP */
   for (auto recv : recv_addr->rec_list) {
 #ifdef XTRABACKUP
     ++xb_total;
+    ut_a(recv->start_lsn >= xb_prev_lsn);
+    xb_prev_lsn = recv->start_lsn;
 #endif /* XTRABACKUP */
     end_lsn = recv->end_lsn();
 #ifndef UNIV_HOTBACKUP
@@ -4754,6 +4792,8 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
 
   const size_t body_len = (size_t)(rec_end - body);
   const bool body_is_inline = body_len <= RECV_INLINE_BODY_MAX;
+  xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
+                     (uint32_t)body_len, body);
 
   recv_t *recv = static_cast<recv_t *>(mem_heap_alloc(
       space->m_heap,
