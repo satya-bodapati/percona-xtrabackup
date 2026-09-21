@@ -4688,6 +4688,13 @@ struct Worker {
   uint64_t serialized{0}; /* records parsed under the global mutex */
   lsn_t start_lsn{0};
   lsn_t stop_lsn{0};
+  /* mtrs starting below this are parsed but NOT filed. Recovery begins at
+  the start of the block containing checkpoint_lsn, so the first group of
+  records in that block usually begins before the checkpoint; the serial
+  parse walks them only to find mtr boundaries and drops them via
+  recv_update_bytes_to_ignore_before_checkpoint(). Same rule, expressed as
+  an LSN instead of a byte count. */
+  lsn_t file_from_lsn{0};
   bool stopped_early{false};
 };
 
@@ -4873,11 +4880,13 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
     if (p >= end) return 0;
   }
 
-  for (size_t i = 0; i < n; ++i) {
-    const Rec &r = recs[i];
-    if (is_filed(r.type, r.page)) {
-      file_record(w, r.type, r.space, r.page, r.body, r.rec_end, r.start,
-                  r.end);
+  if (mtr_lsn >= w.file_from_lsn) {
+    for (size_t i = 0; i < n; ++i) {
+      const Rec &r = recs[i];
+      if (is_filed(r.type, r.page)) {
+        file_record(w, r.type, r.space, r.page, r.body, r.rec_end, r.start,
+                    r.end);
+      }
     }
   }
   return total;
@@ -5064,7 +5073,8 @@ checksum the caller has already verified -- this does no validation, it only
 parses. Returns the LSN one past the last complete mtr, which is what
 recv_sys->recovered_lsn becomes. */
 lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
-                   lsn_t resume_lsn, uint64_t *out_new_pages) {
+                   lsn_t resume_lsn, lsn_t file_from_lsn,
+                   uint64_t *out_new_pages) {
   const size_t nw = threads();
   ut_a(nw > 0);
 
@@ -5087,6 +5097,7 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
   for (size_t i = 0; i < use; ++i) {
     const uint64_t blo = im.base + (uint64_t)i * per;
     const uint64_t bhi = (i == use - 1) ? im.base + im.blocks : blo + per;
+    ws[i].file_from_lsn = file_from_lsn;
     th.emplace_back(run_worker, std::cref(im), blo, bhi, &ws[i],
                     i == 0 ? resume_lsn : 0);
   }
@@ -5197,12 +5208,15 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
 
     recv_sys->parse_start_lsn = blk_lsn + hdr.m_first_rec_group;
     if (recv_sys->parse_start_lsn < recv_sys->checkpoint_lsn) {
-      /* Records between parse_start_lsn and checkpoint_lsn belong to a
-      group that began before the checkpoint. The serial parse counts them
-      down through recv_update_bytes_to_ignore_before_checkpoint() and does
-      not file them; the workers have no equivalent yet, so refuse the
-      window rather than file records the serial path would have dropped. */
-      return false;
+      /* Normal, not exceptional: recovery starts at the beginning of the
+      block holding checkpoint_lsn, so the first group in that block
+      usually begins before it. Those records are parsed for their mtr
+      boundaries and dropped, which is what
+      recv_update_bytes_to_ignore_before_checkpoint() does serially. */
+      ut_a(recv_sys->checkpoint_lsn - recv_sys->parse_start_lsn <=
+           OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE);
+      recv_sys->bytes_to_ignore_before_checkpoint =
+          recv_sys->checkpoint_lsn - recv_sys->parse_start_lsn;
     }
     recv_sys->scanned_lsn = recv_sys->parse_start_lsn;
     recv_sys->recovered_lsn = recv_sys->parse_start_lsn;
@@ -5246,9 +5260,9 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     const size_t used_before = recv_heap_used();
     const lsn_t window_start = start_lsn;
     uint64_t new_pages = 0;
-    const lsn_t done_lsn = parse_window(window.data(), start_lsn,
-                                        (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
-                                        resume_lsn, &new_pages);
+    const lsn_t done_lsn = parse_window(
+        window.data(), start_lsn, (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
+        resume_lsn, recv_sys->checkpoint_lsn, &new_pages);
     if (done_lsn == 0) return false; /* seam check failed; nothing filed */
     if (done_lsn <= start_lsn) break;
 
