@@ -5719,9 +5719,35 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
   }
 #endif /* XTRABACKUP */
 
+#ifdef XTRABACKUP
+  /* The serial scan reads RECV_SCAN_SIZE (64KB) at a time into log.buf, which
+  is srv_log_buffer_size (16MB by default) -- 256x larger than the request.
+  recv_read_log_seg() opens and closes the redo file per call, and kernel
+  readahead state is per file descriptor, so a small request size costs both
+  the open/close churn and the readahead ramp. recv_scan_log_recs() only
+  requires the length to be block aligned and non-empty, so a larger read is
+  safe here.
+
+  Default is unchanged at RECV_SCAN_SIZE until this is measured; XB_SCAN_READ_KB
+  raises it, capped by the buffer. */
+  size_t serial_read = RECV_SCAN_SIZE;
+  {
+    const char *e = getenv("XB_SCAN_READ_KB");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    if (v > 0) {
+      size_t want = (size_t)v * 1024;
+      want -= want % OS_FILE_LOG_BLOCK_SIZE; /* must stay block aligned */
+      if (want > (size_t)log.buf_size) want = (size_t)log.buf_size;
+      if (want >= OS_FILE_LOG_BLOCK_SIZE) serial_read = want;
+    }
+  }
+#else
+  const size_t serial_read = RECV_SCAN_SIZE;
+#endif /* XTRABACKUP */
+
   while (!finished) {
     const lsn_t end_lsn =
-        recv_read_log_seg(log, log.buf, start_lsn, start_lsn + RECV_SCAN_SIZE);
+        recv_read_log_seg(log, log.buf, start_lsn, start_lsn + serial_read);
 
     if (end_lsn == 0) {
       return DB_ERROR;
