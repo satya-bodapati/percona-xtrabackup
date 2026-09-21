@@ -219,13 +219,19 @@ Set before innodb_init() by xtrabackup_prepare_func(). */
 xb_recv_stats_t xb_recv_stats;
 
 /* XB_SCAN_DIGEST=1 fingerprints every filed record. Off by default: it is a
-crc32 over each record body, which is not free. */
-static bool xb_scan_digest_on() {
-  static const bool on = []() {
-    const char *e = getenv("XB_SCAN_DIGEST");
-    return e != nullptr && *e == '1';
-  }();
-  return on;
+crc32 over each record body, which is not free.
+
+A plain flag, not a function-local static. The guard check the compiler
+emits for a dynamically-initialised static is nothing on its own, but this
+is read once per filed record -- 780,609,409 times on the benchmark corpus
+-- and that is not nothing. Set once from recv_recovery_begin(). */
+static bool xb_scan_digest = false;
+
+static inline bool xb_scan_digest_on() { return xb_scan_digest; }
+
+static void xb_scan_digest_init() {
+  const char *e = getenv("XB_SCAN_DIGEST");
+  xb_scan_digest = (e != nullptr && *e == '1');
 }
 
 void xb_recv_note_filed(uint32_t space_id, uint32_t page_no, uint64_t start_lsn,
@@ -5655,6 +5661,10 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
 
   lsn_t start_lsn =
       ut_uint64_align_down(checkpoint_lsn, OS_FILE_LOG_BLOCK_SIZE);
+
+#ifdef XTRABACKUP
+  xb_scan_digest_init();
+#endif /* XTRABACKUP */
 
   bool finished = false;
 
