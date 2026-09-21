@@ -5176,6 +5176,10 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
   /* Worker 0 of the first window has no earlier position to resume from, so
   it uses the block marker like any interior seam does. */
   lsn_t resume_lsn = 0;
+  /* Heap bytes consumed per byte of redo, learned from the windows already
+  parsed. 4.0 until the first measurement: guessing high only costs an early
+  batch, guessing low exhausts the pool. */
+  double heap_per_redo_byte = 4.0;
 
   for (;;) {
     if (start_lsn >= to_lsn) break;
@@ -5200,6 +5204,8 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
                                                filled / OS_FILE_LOG_BLOCK_SIZE);
     if (blocks == 0) break; /* nothing usable: end of the log */
 
+    const size_t used_before = recv_heap_used();
+    const lsn_t window_start = start_lsn;
     uint64_t new_pages = 0;
     const lsn_t done_lsn = parse_window(window.data(), start_lsn,
                                         (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
@@ -5214,8 +5220,29 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     mutex_exit(&recv_sys->mutex);
     log.m_scanned_lsn = done_lsn;
 
-    /* Same trigger the serial scan uses, now counting the worker heaps. */
-    if (recv_heap_used() > *max_memory) {
+    /* The serial scan can check the budget every 64 KiB, so overshooting it
+    is not possible there. A window is thousands of times bigger, and the
+    heap a window produces is roughly 2.6x its redo bytes -- records average
+    21 bytes of redo but 55 bytes of recv_t, and every worker keeps its own
+    recv_addr per page it touches. Checking only after the fact therefore
+    overshoots by a whole window, which at 256 MiB against a 1.6 GiB budget
+    exhausts the buffer pool mid-window and livelocks in
+    buf_LRU_get_free_block ("Difficult to find free blocks").
+
+    So predict instead: measure what the last window actually cost per redo
+    byte and apply early if the next one would not fit. The first window
+    uses a deliberately pessimistic 4x until there is a measurement. */
+    const size_t used_now = recv_heap_used();
+    const size_t window_redo = (size_t)(done_lsn - window_start);
+    if (window_redo > 0) {
+      const double ratio = (double)(used_now - used_before) / window_redo;
+      heap_per_redo_byte = (heap_per_redo_byte == 0.0)
+                               ? ratio
+                               : (heap_per_redo_byte * 0.5 + ratio * 0.5);
+    }
+    const size_t predicted =
+        used_now + (size_t)(heap_per_redo_byte * (double)wbytes);
+    if (used_now > *max_memory || predicted > *max_memory) {
       recv_apply_hashed_log_recs(log, false);
     }
 
