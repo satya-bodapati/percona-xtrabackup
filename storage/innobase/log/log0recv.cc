@@ -4790,6 +4790,26 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
   }
   recv_sys_t::Space *space = &it->second;
 
+  /* The same page LSN map filter recv_add_to_hash_table() applies, and for
+  the same reason: a record the page already contains is pure cost. Leaving
+  it out here filed 305,574,676 extra records against the serial path's
+  780,609,409 -- 39% more heap, which took apply batches from 30 to 48 and
+  apply itself from 47.6s to 71s. The output stayed byte-identical the
+  whole time, because these records are no-ops by construction, so only the
+  scan digest could see it.
+
+  page_lsn_map::lookup() is read-only once loaded and memoises per thread,
+  so the workers can call it concurrently. MLOG_INIT_FILE_PAGE/_PAGE2 are
+  never dropped, exactly as in the serial path. */
+  if (page_lsn_map::is_loaded() && type != MLOG_INIT_FILE_PAGE &&
+      type != MLOG_INIT_FILE_PAGE2) {
+    const lsn_t copy_lsn = page_lsn_map::lookup(space_id, page_no);
+    if (copy_lsn != 0 && !xb_redo_record_applies(start_lsn, copy_lsn)) {
+      xb_recv_stats.recs_dropped_by_map.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+
   const size_t body_len = (size_t)(rec_end - body);
   const bool body_is_inline = body_len <= RECV_INLINE_BODY_MAX;
   xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
@@ -5360,6 +5380,19 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     byte and apply early if the next one would not fit. The first window
     uses a deliberately pessimistic 4x until there is a measurement. */
     const size_t used_now = recv_heap_used();
+    /* heap_max is otherwise sampled only in recv_scan_log_recs(), which in
+    a parallel run executes just for the fallback tail -- so the figure
+    reported for a parallel prepare described the serial remnant and not
+    the parallel path at all. Sample it where the memory is actually
+    being used. */
+    {
+      uint64_t prev =
+          xb_recv_stats.heap_max_bytes.load(std::memory_order_relaxed);
+      while (used_now > prev &&
+             !xb_recv_stats.heap_max_bytes.compare_exchange_weak(
+                 prev, used_now, std::memory_order_relaxed)) {
+      }
+    }
     const size_t window_redo = (size_t)(done_lsn - window_start);
     if (window_redo > 0) {
       const double ratio = (double)(used_now - used_before) / window_redo;
