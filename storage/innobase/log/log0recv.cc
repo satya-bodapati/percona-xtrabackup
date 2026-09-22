@@ -5836,6 +5836,15 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
 
 #ifdef XTRABACKUP
   const auto xb_scan_start = std::chrono::steady_clock::now();
+  /* drive() and the serial loop below both trigger apply batches when the
+  recovery heap fills, and those batches also accumulate into apply_ns. Without
+  discounting them, scan_ms is scan PLUS the applies that happened during it,
+  and the two phases cannot be added. That double count is what made a
+  75.2s recovery look like it had 22.5s unaccounted at 32G while showing
+  0.2s at 16G -- the artifact tracked how many batches fired inside the
+  bracket, not anything real. */
+  const uint64_t xb_apply_ns_at_scan_start =
+      xb_recv_stats.apply_ns.load(std::memory_order_relaxed);
 
   /* Parse the log with XB_PARSCAN_THREADS workers instead of one. Falls
   back to the serial loop below from wherever it stopped, having filed
@@ -5902,11 +5911,18 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
   }
 
 #ifdef XTRABACKUP
-  xb_recv_stats.scan_ns.fetch_add(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - xb_scan_start)
-          .count(),
-      std::memory_order_relaxed);
+  {
+    const uint64_t elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - xb_scan_start)
+            .count();
+    const uint64_t applied_during_scan =
+        xb_recv_stats.apply_ns.load(std::memory_order_relaxed) -
+        xb_apply_ns_at_scan_start;
+    xb_recv_stats.scan_ns.fetch_add(
+        elapsed > applied_during_scan ? elapsed - applied_during_scan : 0,
+        std::memory_order_relaxed);
+  }
 #endif /* XTRABACKUP */
 
   DBUG_PRINT("ib_log", ("scan " LSN_PF " completed", log.m_scanned_lsn));
