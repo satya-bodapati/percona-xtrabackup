@@ -7295,45 +7295,51 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
     }
   }
 
-  xb::info() << "XB-PREPARE-STATS v=1"
-             << " batches=" << st.batches.load()
-             << " batches_inval=" << st.batches_invalidating.load()
-             << " pages_read=" << st.pages_read.load()
-             << " page_applies=" << st.page_applies.load()
-             << " pages_wasted=" << st.pages_wasted.load()
-             << " recs_applied=" << st.recs_applied.load()
-             << " recs_superseded=" << st.recs_superseded.load()
-             << " recs_dropped_by_map=" << st.recs_dropped_by_map.load()
-             << " map_entries=" << page_lsn_map::n_entries()
-             << " sup_no_entry=" << st.sup_no_entry.load()
-             << " sup_page_ahead=" << st.sup_page_ahead.load()
-             << " sup_unexplained=" << st.sup_unexplained.load()
-             << " sup_pages_no_entry=" << st.sup_pages_no_entry.load()
-             << " sup_pages_page_ahead=" << st.sup_pages_page_ahead.load()
-             << " sup_space_absent=" << st.sup_space_absent.load()
-             << " sup_page_past_end=" << st.sup_page_past_end.load()
-             << " sup_page_inside_range=" << st.sup_page_inside_range.load()
-             << " scan_digest=" << st.filed_digest_n.load() << ":"
-             << st.filed_digest_sum.load() << ":" << st.filed_digest_sq.load()
-             << " sup_top_spaces=[" << supspaces.str() << "]"
-             << " pages_skipped_by_map=" << st.pages_skipped_by_map.load()
-             << " redo_scan_bytes=" << st.redo_scan_bytes.load()
-             << " heap_max=" << st.heap_max_bytes.load()
-             << " scan_ms=" << scan_ms << " apply_ms=" << apply_ms
-             << " recovery_ms=" << xb_recovery_ms << " await_no_flush_ms="
-             << (xb_recv_stats.await_no_flush_ns.load() / 1000000)
-             << " flush_list_ms="
-             << (xb_recv_stats.flush_list_ns.load() / 1000000)
-             << " invalidate_ms="
-             << (xb_recv_stats.invalidate_ns.load() / 1000000)
-             << " delta_merge_ms=" << xb_delta_merge_ms
-             << " total_ms=" << total_ms << " use_memory=" << srv_buf_pool_size
-             << " buf_pool_pages=" << buf_pool_get_n_pages()
-             << " maxrss_kb=" << (uint64_t)ru.ru_maxrss
-             << " recs_filed=" << st.recs_filed.load()
-             << " body_bytes_filed=" << st.body_bytes_filed.load()
-             << " recs_per_page_hist=" << hist.str()
-             << " body_size_hist=" << bhist.str();
+  xb::info()
+      << "XB-PREPARE-STATS v=1"
+      << " batches=" << st.batches.load()
+      << " batches_inval=" << st.batches_invalidating.load()
+      << " pages_read=" << st.pages_read.load()
+      << " page_applies=" << st.page_applies.load()
+      << " pages_wasted=" << st.pages_wasted.load()
+      << " recs_applied=" << st.recs_applied.load()
+      << " recs_superseded=" << st.recs_superseded.load()
+      << " recs_dropped_by_map=" << st.recs_dropped_by_map.load()
+      << " map_entries=" << page_lsn_map::n_entries()
+      << " sup_no_entry=" << st.sup_no_entry.load()
+      << " sup_page_ahead=" << st.sup_page_ahead.load()
+      << " sup_unexplained=" << st.sup_unexplained.load()
+      << " sup_pages_no_entry=" << st.sup_pages_no_entry.load()
+      << " sup_pages_page_ahead=" << st.sup_pages_page_ahead.load()
+      << " sup_space_absent=" << st.sup_space_absent.load()
+      << " sup_page_past_end=" << st.sup_page_past_end.load()
+      << " sup_page_inside_range=" << st.sup_page_inside_range.load()
+      << " scan_digest=" << st.filed_digest_n.load() << ":"
+      << st.filed_digest_sum.load() << ":" << st.filed_digest_sq.load()
+      << " sup_top_spaces=[" << supspaces.str() << "]"
+      << " pages_skipped_by_map=" << st.pages_skipped_by_map.load()
+      << " redo_scan_bytes=" << st.redo_scan_bytes.load()
+      << " heap_max=" << st.heap_max_bytes.load() << " scan_ms=" << scan_ms
+      << " apply_ms=" << apply_ms << " recovery_ms=" << xb_recovery_ms
+      << " apply_busy_ms=" << (xb_recv_stats.apply_busy_ns.load() / 1000000)
+      << " apply_page_get_ms="
+      << (xb_recv_stats.apply_page_get_ns.load() / 1000000)
+      << " apply_recover_ms="
+      << (xb_recv_stats.apply_recover_ns.load() / 1000000)
+      << " apply_readin_ms=" << (xb_recv_stats.apply_mutex_ns.load() / 1000000)
+      << " apply_items=" << xb_recv_stats.apply_items.load()
+      << " await_no_flush_ms="
+      << (xb_recv_stats.await_no_flush_ns.load() / 1000000)
+      << " flush_list_ms=" << (xb_recv_stats.flush_list_ns.load() / 1000000)
+      << " invalidate_ms=" << (xb_recv_stats.invalidate_ns.load() / 1000000)
+      << " delta_merge_ms=" << xb_delta_merge_ms << " total_ms=" << total_ms
+      << " use_memory=" << srv_buf_pool_size
+      << " buf_pool_pages=" << buf_pool_get_n_pages()
+      << " maxrss_kb=" << (uint64_t)ru.ru_maxrss
+      << " recs_filed=" << st.recs_filed.load()
+      << " body_bytes_filed=" << st.body_bytes_filed.load()
+      << " recs_per_page_hist=" << hist.str()
+      << " body_size_hist=" << bhist.str();
 
   /* Free-frame starvation is what the off-CPU profile showed during apply:
   every thread blocked in buf_LRU_get_free_block -> buf_flush_single_page_

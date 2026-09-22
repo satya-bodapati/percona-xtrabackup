@@ -1404,16 +1404,39 @@ static void xb_apply_one(recv_addr_t *recv_addr, bool dropped) {
     return;
   }
 
+  /* Split the work item into acquiring the page and applying to it. A
+  resident page still has to be latched, and the latch can block behind
+  another thread or behind the read that is filling it; recv_read_in_area()
+  blocks on frames and on the read itself. Summed across threads these say
+  whether the apply threads are working or waiting, which is the question
+  external samplers could not answer here (no frame pointers, so bcc
+  resolves user stacks as [unknown]). */
   if (buf_page_peek(page_id)) {
     mtr_t mtr;
     mtr_start(&mtr);
+    const auto g0 = std::chrono::steady_clock::now();
     buf_block_t *block =
         buf_page_get(page_id, page_size, RW_X_LATCH, UT_LOCATION_HERE, &mtr);
+    const auto g1 = std::chrono::steady_clock::now();
     buf_block_dbg_add_level(block, SYNC_NO_ORDER_CHECK);
     recv_recover_page(false, block);
+    const auto g2 = std::chrono::steady_clock::now();
     mtr_commit(&mtr);
+    using ns = std::chrono::nanoseconds;
+    xb_recv_stats.apply_page_get_ns.fetch_add(
+        std::chrono::duration_cast<ns>(g1 - g0).count(),
+        std::memory_order_relaxed);
+    xb_recv_stats.apply_recover_ns.fetch_add(
+        std::chrono::duration_cast<ns>(g2 - g1).count(),
+        std::memory_order_relaxed);
   } else {
+    const auto r0 = std::chrono::steady_clock::now();
     recv_read_in_area(page_id);
+    xb_recv_stats.apply_mutex_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - r0)
+            .count(),
+        std::memory_order_relaxed);
   }
 }
 
@@ -1507,9 +1530,17 @@ static void xb_apply_parallel(size_t batch_size) {
   for (size_t t = 0; t < nthreads; ++t) {
     threads.emplace_back([&buckets, t]() {
       my_thread_init();
+      const auto t0 = std::chrono::steady_clock::now();
       for (const Work &w : buckets[t]) {
         xb_apply_one(w.addr, w.dropped);
       }
+      xb_recv_stats.apply_busy_ns.fetch_add(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count(),
+          std::memory_order_relaxed);
+      xb_recv_stats.apply_items.fetch_add(buckets[t].size(),
+                                          std::memory_order_relaxed);
       my_thread_end();
     });
   }

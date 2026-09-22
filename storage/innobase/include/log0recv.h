@@ -874,6 +874,19 @@ struct xb_recv_stats_t {
   applying and has repeatedly been mis-attributed by inspection. At
   --use-memory=32G, recovery_ms minus scan_ms minus apply_ms leaves 24.4s
   unaccounted; these say where it goes. Totals across all batches. */
+  /** Apply-thread accounting, summed across all apply threads and batches.
+  The apply phase uses about 40 of 128 cores and writes 0.8-1.4 GB/s where
+  the same device sustains 2.5-3.3, so neither CPU nor disk is saturated and
+  the threads must be waiting. External samplers cannot see this: the build
+  has no frame pointers, so bcc resolves user stacks as [unknown]. The driver
+  is our own code, so it can time itself.
+  busy_ns is wall summed over threads; busy_ns / batch_wall is the effective
+  core count actually achieved. */
+  std::atomic<uint64_t> apply_busy_ns{0};
+  std::atomic<uint64_t> apply_page_get_ns{0};
+  std::atomic<uint64_t> apply_recover_ns{0};
+  std::atomic<uint64_t> apply_mutex_ns{0};
+  std::atomic<uint64_t> apply_items{0};
   std::atomic<uint64_t> await_no_flush_ns{0};
   std::atomic<uint64_t> flush_list_ns{0};
   std::atomic<uint64_t> invalidate_ns{0};
