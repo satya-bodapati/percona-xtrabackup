@@ -1741,7 +1741,34 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
     const auto xb_t2 = std::chrono::steady_clock::now();
 #endif /* XTRABACKUP */
 
+#ifdef XTRABACKUP
+    /* The invalidate costs 46-79ms directly, which is nothing. Its real cost
+    is indirect and much larger: because the pool is emptied, buf_page_peek()
+    in xb_apply_one() is ALWAYS false, so every one of 794,292 work items
+    takes the recv_read_in_area() branch and apply_recover_ms measures zero.
+    The apply threads never apply, they queue reads, and that path costs
+    0.40ms per item at 16 threads and 2.13ms at 64.
+
+    The working set is 261k pages (4.2GB) against a 16GB pool, so without the
+    invalidate most pages stay resident and later batches take the cheap
+    buf_page_get plus recv_recover_page path instead.
+
+    What removes pages then: nothing in bulk. buf_LRU_get_free_block() takes
+    a frame from the free list, or evicts from the LRU tail, clean pages
+    immediately and dirty ones after a write. That is demand driven rather
+    than periodic, which is the point, but it shifts the load onto the free
+    frame supply that a 100ms timer drives and that falls back to
+    buf_flush_single_page_from_LRU() under the LRU mutex.
+
+    Not safe by default: pages read while ibuf merges are suppressed stay
+    resident un-merged, and the final allow_ibuf pass only re-reads what it
+    happens to name. Needs the explicit post-recovery merge phase first. */
+    if (getenv("XB_NO_INVALIDATE") == nullptr) {
+      buf_pool_invalidate();
+    }
+#else
     buf_pool_invalidate();
+#endif /* XTRABACKUP */
 #ifdef XTRABACKUP
     {
       const auto xb_t3 = std::chrono::steady_clock::now();
