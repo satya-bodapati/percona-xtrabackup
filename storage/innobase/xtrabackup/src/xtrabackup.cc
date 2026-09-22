@@ -7321,6 +7321,7 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
       << " redo_scan_bytes=" << st.redo_scan_bytes.load()
       << " heap_max=" << st.heap_max_bytes.load() << " scan_ms=" << scan_ms
       << " apply_ms=" << apply_ms << " recovery_ms=" << xb_recovery_ms
+      << " recs_other_partition=" << xb_recv_stats.recs_other_partition.load()
       << " apply_busy_ms=" << (xb_recv_stats.apply_busy_ns.load() / 1000000)
       << " apply_page_get_ms="
       << (xb_recv_stats.apply_page_get_ns.load() / 1000000)

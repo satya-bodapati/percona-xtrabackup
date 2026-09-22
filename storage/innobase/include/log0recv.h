@@ -882,6 +882,8 @@ struct xb_recv_stats_t {
   is our own code, so it can time itself.
   busy_ns is wall summed over threads; busy_ns / batch_wall is the effective
   core count actually achieved. */
+  /** records skipped because they belong to another page partition */
+  std::atomic<uint64_t> recs_other_partition{0};
   std::atomic<uint64_t> apply_busy_ns{0};
   std::atomic<uint64_t> apply_page_get_ns{0};
   std::atomic<uint64_t> apply_recover_ns{0};
