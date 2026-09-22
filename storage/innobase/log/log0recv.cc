@@ -3240,19 +3240,24 @@ a page-number range keeps the partitions balanced without needing to know how
 pages are distributed across the space. */
 static uint32_t xb_partition_count() {
   static const uint32_t n = []() -> uint32_t {
-    const char *e = getenv("XB_PAGE_PARTITIONS");
-    const long v = (e == nullptr) ? 1 : atol(e);
+    const char *e = getenv("XB_PAGE_PARTITION");
+    if (e == nullptr) return 1;
+    const char *slash = strchr(e, '/');
+    if (slash == nullptr) return 1;
+    const long v = atol(slash + 1);
     return (v > 0 && v <= 1024) ? (uint32_t)v : 1;
   }();
   return n;
 }
 
-/* Which partition the current pass is filing, driven by the loop in
-recv_recovery_from_checkpoint_start(). */
-static std::atomic<uint32_t> xb_cur_partition{0};
-
 static uint32_t xb_partition_index() {
-  return xb_cur_partition.load(std::memory_order_relaxed);
+  static const uint32_t k = []() -> uint32_t {
+    const char *e = getenv("XB_PAGE_PARTITION");
+    if (e == nullptr) return 0;
+    const long v = atol(e);
+    return (v >= 0) ? (uint32_t)v : 0;
+  }();
+  return k;
 }
 
 /** @return true if this record belongs to the partition being applied */
@@ -3260,15 +3265,6 @@ static inline bool xb_page_in_partition(space_id_t space_id,
                                         page_no_t page_no) {
   const uint32_t n = xb_partition_count();
   if (n <= 1) return true;
-  /* Startup initialises rollback segments and walks the undo file lists
-  before any later partition has run, so these must be complete after every
-  pass. Filing them in all passes is harmless: recv_recover_page() applies a
-  record only when start_lsn >= page_lsn, so the second and third
-  applications are no-ops. Partitioning them instead crashes startup in
-  trx_rseg_physical_initialize() following a stale flst pointer. */
-  if (space_id == TRX_SYS_SPACE || fsp_is_undo_tablespace(space_id)) {
-    return true;
-  }
   /* cheap mix so neighbouring pages land in different partitions */
   uint64_t h = (uint64_t)space_id * 0x9E3779B97F4A7C15ULL + (uint64_t)page_no;
   h ^= h >> 29;
@@ -6192,51 +6188,10 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn,
     }
   }
 
-#ifdef XTRABACKUP
-  /* Partitioned recovery for the small pool case.
-
-  A batch's page set does not shrink when the batch covers less redo: at 2GB
-  a prepare runs 26 batches naming 225,795 pages each against a working set
-  of 261,038, because pages are modified throughout the backup window. So an
-  LSN range cannot be sized to fit a small pool. Partitioning by page can:
-  each pass files only its own pages, so its page set fits.
-
-  The loop has to live here rather than in separate xtrabackup runs. Every
-  --prepare finishes by starting InnoDB, and a partial apply is not a
-  startable database: running one partition alone crashed in
-  trx_rseg_physical_initialize() walking an undo file list whose redo
-  belonged to another partition. All partitions must be applied before
-  startup proceeds.
-
-  recv_recovery_begin() resets recovered_lsn, parse_start_lsn and the hash
-  table at entry, so calling it again re-scans from the checkpoint. Each pass
-  but the last must apply what it filed first, because the next call empties
-  the hash table and would otherwise discard it. The last pass is left to the
-  caller's final apply, which is where ibuf merges are permitted. */
-  {
-    const uint32_t nparts = xb_partition_count();
-    for (uint32_t part = 0; part < nparts; ++part) {
-      xb_cur_partition.store(part, std::memory_order_relaxed);
-      if (nparts > 1) {
-        xb::info() << "Partitioned recovery: pass " << (part + 1) << " of "
-                   << nparts;
-      }
-      err = recv_recovery_begin(log, checkpoint_lsn, to_lsn);
-      if (err != DB_SUCCESS) {
-        return err;
-      }
-      if (part + 1 < nparts) {
-        recv_apply_hashed_log_recs(log, false);
-      }
-    }
-    xb_cur_partition.store(0, std::memory_order_relaxed);
-  }
-#else
   err = recv_recovery_begin(log, checkpoint_lsn, to_lsn);
   if (err != DB_SUCCESS) {
     return err;
   }
-#endif /* XTRABACKUP */
 
   if (srv_read_only_mode && log.m_scanned_lsn > checkpoint_lsn) {
     ib::error(ER_IB_MSG_RECOVERY_IN_READ_ONLY);
