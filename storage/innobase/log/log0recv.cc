@@ -5446,7 +5446,17 @@ class Parse_pool {
 
  private:
   void loop(size_t idx) {
-    uint64_t seen = 0;
+    /* Start from the generation current when this thread was created, not
+    from zero. stop() bumps the generation, so a pool restarted for a later
+    partition would otherwise have its new threads see generation != 0
+    immediately and process a window that no longer exists -- m_ws points at
+    a vector<Worker> destroyed at the end of the previous pass. That is a
+    SIGSEGV on the first window of pass 2, and invisible with one pass. */
+    uint64_t seen;
+    {
+      std::unique_lock<std::mutex> lk0(m_mutex);
+      seen = m_generation;
+    }
     for (;;) {
       std::unique_lock<std::mutex> lk(m_mutex);
       m_wake.wait(lk,
