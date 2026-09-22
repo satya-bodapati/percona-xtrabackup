@@ -880,34 +880,6 @@ void MetadataRecover::store() {
 
 /** recv_writer thread tasked with flushing dirty pages from the buffer
 pools. */
-
-#ifdef XTRABACKUP
-/* Port of the idea in upstream WL#15372 (b2ab97cc3feb), adapted to 8.4.
-
-Upstream observed that the recovery flush list only has to stay LSN-ordered
-because pages survive recovery into normal service. If the pool is cleared
-before recovery ends, the order stops mattering and the red-black tree that
-maintains it -- an O(log n) rbt_insert plus rbt_prev under the flush list
-mutex, paid on EVERY page dirtied -- can be deleted outright. They removed
-276 lines of buf0flu.cc that way.
-
-8.4 currently pays both sides: it invalidates on every intermediate batch AND
-maintains flush_rbt, because its final allow_ibuf=true apply does not
-invalidate, so pages do survive and the order still matters.
-
-This makes the final apply clear the pool too, which makes flush_rbt
-unnecessary for the whole of recovery. Unlike upstream we do NOT disable ibuf
-merges: the final pass still merges, and the flush below persists the merged
-pages before the pool is dropped, so --export keeps working. */
-static bool xb_no_flush_rbt() {
-  static const bool on = []() {
-    const char *e = getenv("XB_NO_FLUSH_RBT");
-    return e != nullptr && *e == '1';
-  }();
-  return on;
-}
-#endif /* XTRABACKUP */
-
 static void recv_writer_thread() {
   ut_ad(!srv_read_only_mode);
 
@@ -1738,24 +1710,6 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
 
     recv_no_ibuf_operations = false;
   }
-#ifdef XTRABACKUP
-  else if (xb_no_flush_rbt()) {
-    /* Same flush and clear as above, without the redo-write bracket: this
-    pass had ibuf merges enabled and those commit mtrs, so redo writes must
-    stay permitted. Clearing here is what lets flush_rbt be skipped. */
-    ut_a(recv_sys->flush_end != nullptr);
-    mutex_exit(&recv_sys->mutex);
-    mutex_enter(&recv_sys->writer_mutex);
-    buf_flush_await_no_flushing(nullptr, BUF_FLUSH_LRU);
-    os_event_reset(recv_sys->flush_end);
-    recv_sys->flush_type = BUF_FLUSH_LIST;
-    os_event_set(recv_sys->flush_start);
-    os_event_wait(recv_sys->flush_end);
-    buf_pool_invalidate();
-    mutex_exit(&recv_sys->writer_mutex);
-    mutex_enter(&recv_sys->mutex);
-  }
-#endif /* XTRABACKUP */
 
   recv_sys->apply_log_recs = false;
   recv_sys->apply_batch_on = false;
@@ -5855,10 +5809,7 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn,
                                             lsn_t to_lsn) {
   /* Initialize red-black tree for fast insertions into the
   flush_list during recovery process. */
-#ifdef XTRABACKUP
-  if (!xb_no_flush_rbt())
-#endif /* XTRABACKUP */
-    buf_flush_init_flush_rbt();
+  buf_flush_init_flush_rbt();
 
   if (srv_force_recovery >= SRV_FORCE_NO_LOG_REDO) {
     ib::info(ER_IB_MSG_728);
@@ -6124,10 +6075,7 @@ MetadataRecover *recv_recovery_from_checkpoint_finish(bool aborting) {
   }
 
   /* Free up the flush_rbt. */
-#ifdef XTRABACKUP
-  if (!xb_no_flush_rbt())
-#endif /* XTRABACKUP */
-    buf_flush_free_flush_rbt();
+  buf_flush_free_flush_rbt();
 
   return metadata;
 }
