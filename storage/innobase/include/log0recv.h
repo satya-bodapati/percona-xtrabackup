@@ -870,6 +870,13 @@ struct xb_recv_stats_t {
   /** nanoseconds in the scan loop and inside apply batches */
   std::atomic<uint64_t> scan_ns{0};
   std::atomic<uint64_t> apply_ns{0};
+  /** Decomposition of the end-of-batch tail, which is neither scanning nor
+  applying and has repeatedly been mis-attributed by inspection. At
+  --use-memory=32G, recovery_ms minus scan_ms minus apply_ms leaves 24.4s
+  unaccounted; these say where it goes. Totals across all batches. */
+  std::atomic<uint64_t> await_no_flush_ns{0};
+  std::atomic<uint64_t> flush_list_ns{0};
+  std::atomic<uint64_t> invalidate_ns{0};
 };
 
 extern xb_recv_stats_t xb_recv_stats;

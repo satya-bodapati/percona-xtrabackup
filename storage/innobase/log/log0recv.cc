@@ -1686,12 +1686,18 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
     /* Stop the recv_writer thread from issuing any LRU
     flush batches. */
     mutex_enter(&recv_sys->writer_mutex);
+#ifdef XTRABACKUP
+    const auto xb_t0 = std::chrono::steady_clock::now();
+#endif /* XTRABACKUP */
 
     /* Wait for any currently run batch to end. Note that BUF_FLUSH_LIST could
     only be initiated by us in earlier call, but buf_pool_invalidate() waits for
     all batches to finish, so only BUF_FLUSH_LRU can be running.
     TBD: why is it important to wait for BUF_FLUSH_LRU to finish here? */
     buf_flush_await_no_flushing(nullptr, BUF_FLUSH_LRU);
+#ifdef XTRABACKUP
+    const auto xb_t1 = std::chrono::steady_clock::now();
+#endif /* XTRABACKUP */
 
     os_event_reset(recv_sys->flush_end);
 
@@ -1700,8 +1706,26 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
     os_event_set(recv_sys->flush_start);
 
     os_event_wait(recv_sys->flush_end);
+#ifdef XTRABACKUP
+    const auto xb_t2 = std::chrono::steady_clock::now();
+#endif /* XTRABACKUP */
 
     buf_pool_invalidate();
+#ifdef XTRABACKUP
+    {
+      const auto xb_t3 = std::chrono::steady_clock::now();
+      using ns = std::chrono::nanoseconds;
+      xb_recv_stats.await_no_flush_ns.fetch_add(
+          std::chrono::duration_cast<ns>(xb_t1 - xb_t0).count(),
+          std::memory_order_relaxed);
+      xb_recv_stats.flush_list_ns.fetch_add(
+          std::chrono::duration_cast<ns>(xb_t2 - xb_t1).count(),
+          std::memory_order_relaxed);
+      xb_recv_stats.invalidate_ns.fetch_add(
+          std::chrono::duration_cast<ns>(xb_t3 - xb_t2).count(),
+          std::memory_order_relaxed);
+    }
+#endif /* XTRABACKUP */
 
     /* Allow batches from recv_writer thread. */
     mutex_exit(&recv_sys->writer_mutex);

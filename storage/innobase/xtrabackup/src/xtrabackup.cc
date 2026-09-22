@@ -7320,7 +7320,12 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
              << " redo_scan_bytes=" << st.redo_scan_bytes.load()
              << " heap_max=" << st.heap_max_bytes.load()
              << " scan_ms=" << scan_ms << " apply_ms=" << apply_ms
-             << " recovery_ms=" << xb_recovery_ms
+             << " recovery_ms=" << xb_recovery_ms << " await_no_flush_ms="
+             << (xb_recv_stats.await_no_flush_ns.load() / 1000000)
+             << " flush_list_ms="
+             << (xb_recv_stats.flush_list_ns.load() / 1000000)
+             << " invalidate_ms="
+             << (xb_recv_stats.invalidate_ns.load() / 1000000)
              << " delta_merge_ms=" << xb_delta_merge_ms
              << " total_ms=" << total_ms << " use_memory=" << srv_buf_pool_size
              << " buf_pool_pages=" << buf_pool_get_n_pages()
