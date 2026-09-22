@@ -40,9 +40,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <new>
 #include <string>
 #include <thread>
@@ -5224,6 +5226,109 @@ offset, and [blo, bhi) must contain only blocks whose header number and
 checksum the caller has already verified -- this does no validation, it only
 parses. Returns the LSN one past the last complete mtr, which is what
 recv_sys->recovered_lsn becomes. */
+
+/* A pool of parse threads that outlives the windows.
+
+parse_window() used to create its workers with std::thread and join them
+before returning, so a 21.3GB redo log at 128MB per window meant 171 rounds
+of spawning and joining -- about 5,500 pthread_create/join pairs for 32
+workers. Nothing about how a window is divided changes here: the same
+contiguous block ranges, the same seam checks, the same LSN-ordered merge.
+The threads simply persist and are handed the next window instead of being
+destroyed and recreated.
+
+The barrier per window stays, because the seam check has to see every
+worker's result before anything is merged. */
+class Parse_pool {
+ public:
+  void start(size_t n) {
+    if (m_threads.size() == n) return;
+    stop();
+    m_stop = false;
+    m_threads.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      m_threads.emplace_back([this, i]() { loop(i); });
+    }
+  }
+
+  void stop() {
+    if (m_threads.empty()) return;
+    {
+      std::unique_lock<std::mutex> lk(m_mutex);
+      m_stop = true;
+      ++m_generation;
+    }
+    m_wake.notify_all();
+    for (auto &t : m_threads) t.join();
+    m_threads.clear();
+  }
+
+  /* Run one window across the first `use` threads and wait for all of them. */
+  void run_window(const Image &im, std::vector<Worker> &ws, size_t use,
+                  uint64_t base, uint64_t blocks, lsn_t resume_lsn) {
+    {
+      std::unique_lock<std::mutex> lk(m_mutex);
+      m_im = &im;
+      m_ws = &ws;
+      m_use = use;
+      m_base = base;
+      m_blocks = blocks;
+      m_resume_lsn = resume_lsn;
+      m_pending = use;
+      ++m_generation;
+    }
+    m_wake.notify_all();
+    std::unique_lock<std::mutex> lk(m_mutex);
+    m_done.wait(lk, [this]() { return m_pending == 0; });
+  }
+
+  ~Parse_pool() { stop(); }
+
+ private:
+  void loop(size_t idx) {
+    uint64_t seen = 0;
+    for (;;) {
+      std::unique_lock<std::mutex> lk(m_mutex);
+      m_wake.wait(lk,
+                  [this, seen]() { return m_generation != seen || m_stop; });
+      if (m_stop) return;
+      seen = m_generation;
+      if (idx >= m_use) continue; /* window smaller than the pool */
+      const Image *im = m_im;
+      std::vector<Worker> *ws = m_ws;
+      const uint64_t per = m_blocks / m_use;
+      const uint64_t blo = m_base + (uint64_t)idx * per;
+      const uint64_t bhi = (idx == m_use - 1) ? m_base + m_blocks : blo + per;
+      const lsn_t force = (idx == 0) ? m_resume_lsn : 0;
+      lk.unlock();
+
+      run_worker(*im, blo, bhi, &(*ws)[idx], force);
+
+      lk.lock();
+      if (--m_pending == 0) {
+        lk.unlock();
+        m_done.notify_one();
+      }
+    }
+  }
+
+  std::vector<std::thread> m_threads;
+  std::mutex m_mutex;
+  std::condition_variable m_wake;
+  std::condition_variable m_done;
+  uint64_t m_generation{0};
+  size_t m_pending{0};
+  bool m_stop{false};
+  const Image *m_im{nullptr};
+  std::vector<Worker> *m_ws{nullptr};
+  size_t m_use{0};
+  uint64_t m_base{0};
+  uint64_t m_blocks{0};
+  lsn_t m_resume_lsn{0};
+};
+
+static Parse_pool g_parse_pool;
+
 lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
                    lsn_t resume_lsn, uint64_t ignore_bytes,
                    lsn_t file_until_lsn, uint64_t *out_new_pages) {
@@ -5243,7 +5348,6 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
 
   const size_t use = std::min<size_t>(nw, (size_t)im.blocks);
   std::vector<Worker> ws(use);
-  std::vector<std::thread> th;
   const uint64_t per = im.blocks / use;
 
   for (size_t i = 0; i < use; ++i) {
@@ -5256,10 +5360,10 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
     ws[i].file_until_lsn = file_until_lsn;
     ws[i].blo = blo;
     ws[i].bhi = bhi;
-    th.emplace_back(run_worker, std::cref(im), blo, bhi, &ws[i],
-                    i == 0 ? resume_lsn : 0);
   }
-  for (auto &t : th) t.join();
+  /* Same ranges as before; the threads are reused rather than recreated. */
+  g_parse_pool.start(use);
+  g_parse_pool.run_window(im, ws, use, im.base, im.blocks, resume_lsn);
 
   /* Check the seams BEFORE merging anything. Worker i must finish exactly
   where worker i+1 began: a short fall is lost records, an overshoot is
@@ -5379,6 +5483,13 @@ static uint64_t valid_block_prefix(const byte *buf, lsn_t window_lsn,
 parallel, in which case the caller must fall back to the serial scan from
 *io_start_lsn -- nothing from the failed window has been filed. */
 bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
+  /* drive() has several early returns; join the parse threads on all of
+  them rather than leaving it to static destruction at process exit. */
+  class Pool_guard {
+   public:
+    ~Pool_guard() { g_parse_pool.stop(); }
+  } pool_guard;
+
   const size_t wbytes = window_bytes();
   std::vector<byte> window(wbytes);
 
