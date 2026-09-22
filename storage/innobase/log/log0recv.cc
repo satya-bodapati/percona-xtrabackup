@@ -3214,6 +3214,27 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
 }
 }  // namespace xtrabackup
 #endif
+
+#ifdef XTRABACKUP
+/* Frames the pages accumulated so far will need when this batch is applied.
+
+The batch is cut on heap bytes alone, which is only half of what the buffer
+pool has to hold: the records AND the pages they will be applied to. Those
+pages are already known during the scan -- recv_sys->n_addrs counts the
+distinct ones -- so the decision does not have to be made blind and then
+discovered during apply.
+
+Ignoring the page side is what produces the eviction storm at small pools. A
+2GB pool cuts the batch when the heap reaches its bound, by which point the
+hash table names ~226,000 pages needing 3.6GB of frames, against a pool that
+no longer has them. Result: 201,903 single page evictions and every page read
+again on the next batch. Counting both terms cuts the batch while its pages
+still fit, so nothing has to be evicted. */
+static inline size_t xb_frames_needed_bytes() {
+  return (size_t)recv_sys->n_addrs * UNIV_PAGE_SIZE;
+}
+#endif /* XTRABACKUP */
+
 /** Adds a new log record to the hash table of log records.
 @param[in]      type            log record type
 @param[in]      space_id        Tablespace id
@@ -4622,7 +4643,11 @@ bool meb_scan_log_recs(
 #else  /* XTRABACKUP */
     const size_t heap_used = recv_heap_used();
 #endif /* XTRABACKUP */
+#ifdef XTRABACKUP
+    if (heap_used + xb_frames_needed_bytes() > *max_memory) {
+#else
     if (heap_used > *max_memory) {
+#endif /* XTRABACKUP */
       recv_apply_hashed_log_recs(log, false);
     }
 #endif /* !UNIV_HOTBACKUP */
@@ -5771,9 +5796,10 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
                                ? ratio
                                : (heap_per_redo_byte * 0.5 + ratio * 0.5);
     }
+    const size_t frames_now = xb_frames_needed_bytes();
     const size_t predicted =
-        used_now + (size_t)(heap_per_redo_byte * (double)wbytes);
-    if (used_now > *max_memory || predicted > *max_memory) {
+        used_now + frames_now + (size_t)(heap_per_redo_byte * (double)wbytes);
+    if (used_now + frames_now > *max_memory || predicted > *max_memory) {
       recv_apply_hashed_log_recs(log, false);
     }
 
