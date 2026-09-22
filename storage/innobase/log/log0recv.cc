@@ -3214,66 +3214,6 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
 }
 }  // namespace xtrabackup
 #endif
-#ifdef XTRABACKUP
-/* Page partitioning for the small-pool case.
-
-The measurement that forces this: a batch's page set does not shrink when the
-batch covers less redo. At --use-memory=16G a prepare runs 3 batches naming
-235,700 pages each; at 2G it runs 26 batches naming 225,795 each, against a
-working set of 261,038. So one twenty-sixth of the redo still touches
-86 percent of the pages -- they are modified throughout. Sizing an LSN range
-so its pages fit a small pool is therefore impossible.
-
-Partitioning by PAGE does work, and the backup already measures what it needs:
---estimate-memory records redo_frames, the number of distinct pages the redo
-touches, so
-
-    partitions = ceil(redo_frames * page_size / frames_available)
-
-Each partition scans all the redo but files only its own pages, so its page
-set fits the pool by construction and nothing has to be evicted. The cost is
-scanning the redo once per partition, which is sequential and which we have
-measured at ~1.8GB/s, against page re-reads which are random.
-
-XB_PAGE_PARTITION="k/n" selects partition k of n. Hashing rather than taking
-a page-number range keeps the partitions balanced without needing to know how
-pages are distributed across the space. */
-static uint32_t xb_partition_count() {
-  static const uint32_t n = []() -> uint32_t {
-    const char *e = getenv("XB_PAGE_PARTITION");
-    if (e == nullptr) return 1;
-    const char *slash = strchr(e, '/');
-    if (slash == nullptr) return 1;
-    const long v = atol(slash + 1);
-    return (v > 0 && v <= 1024) ? (uint32_t)v : 1;
-  }();
-  return n;
-}
-
-static uint32_t xb_partition_index() {
-  static const uint32_t k = []() -> uint32_t {
-    const char *e = getenv("XB_PAGE_PARTITION");
-    if (e == nullptr) return 0;
-    const long v = atol(e);
-    return (v >= 0) ? (uint32_t)v : 0;
-  }();
-  return k;
-}
-
-/** @return true if this record belongs to the partition being applied */
-static inline bool xb_page_in_partition(space_id_t space_id,
-                                        page_no_t page_no) {
-  const uint32_t n = xb_partition_count();
-  if (n <= 1) return true;
-  /* cheap mix so neighbouring pages land in different partitions */
-  uint64_t h = (uint64_t)space_id * 0x9E3779B97F4A7C15ULL + (uint64_t)page_no;
-  h ^= h >> 29;
-  h *= 0xBF58476D1CE4E5B9ULL;
-  h ^= h >> 32;
-  return (uint32_t)(h % n) == xb_partition_index();
-}
-#endif /* XTRABACKUP */
-
 /** Adds a new log record to the hash table of log records.
 @param[in]      type            log record type
 @param[in]      space_id        Tablespace id
@@ -3313,11 +3253,6 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
      otherwise allocate an empty Space as a side effect.
 
   A missing entry returns 0 and nothing is dropped. */
-  if (!xb_page_in_partition(space_id, page_no)) {
-    xb_recv_stats.recs_other_partition.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-
   if (page_lsn_map::is_loaded() && type != MLOG_INIT_FILE_PAGE &&
       type != MLOG_INIT_FILE_PAGE2) {
     const lsn_t copy_lsn = page_lsn_map::lookup(space_id, page_no);
@@ -4970,18 +4905,9 @@ static void xb_worker_note_filed(Worker &w, uint32_t space_id, uint32_t page_no,
 Spaces and heap. It must stay byte-for-byte equivalent to that function,
 including the inline-body layout, because the merge splices these records
 straight into recv_sys->spaces and apply cannot tell them apart. */
-
 static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
                         page_no_t page_no, const byte *body,
                         const byte *rec_end, lsn_t start_lsn, lsn_t end_lsn) {
-  /* Same partition gate as the serial path. Dropping here rather than after
-  the heap allocation is the point: a record for another partition must cost
-  nothing, since every partition scans the whole redo. */
-  if (!xb_page_in_partition(space_id, page_no)) {
-    xb_recv_stats.recs_other_partition.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-
   auto it = w.spaces.find(space_id);
   if (it == w.spaces.end()) {
     mem_heap_t *heap =
