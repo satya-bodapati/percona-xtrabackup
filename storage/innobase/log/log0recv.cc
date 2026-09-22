@@ -1696,6 +1696,27 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
 
   /* Wait until all the pages have been processed */
 
+#ifdef XTRABACKUP
+  /* This loop waits on a counter, not on the pages themselves, so a page
+  counted into n_addrs but never retired by either recv_recover_page() or
+  the xb_apply_done tally hangs it forever at 1ms. Say so instead of
+  spinning silently. */
+  {
+    uint64_t spins = 0;
+    while (recv_sys->n_addrs != 0) {
+      mutex_exit(&recv_sys->mutex);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (++spins % 5000 == 0) {
+        xb::warn() << "apply drain stuck: n_addrs=" << recv_sys->n_addrs
+                   << " xb_apply_done="
+                   << xb_apply_done.load(std::memory_order_relaxed)
+                   << " batch_size=" << batch_size << " after "
+                   << (spins / 1000) << "s";
+      }
+      mutex_enter(&recv_sys->mutex);
+    }
+  }
+#else
   while (recv_sys->n_addrs != 0) {
     mutex_exit(&recv_sys->mutex);
 
@@ -1705,6 +1726,7 @@ void recv_apply_hashed_log_recs(log_t &log, bool allow_ibuf) {
 
     mutex_enter(&recv_sys->mutex);
   }
+#endif /* XTRABACKUP */
 
   if (!allow_ibuf) {
     /* Flush all the file pages to disk and invalidate them in
@@ -3233,6 +3255,63 @@ still fit, so nothing has to be evicted. */
 static inline size_t xb_frames_needed_bytes() {
   return (size_t)recv_sys->n_addrs * UNIV_PAGE_SIZE;
 }
+
+/* The real ceiling for heap + frames.
+
+Both live in the buffer pool: the recovery heap allocates its blocks with
+MEM_HEAP_FOR_RECV_SYS, which is MEM_HEAP_BUFFER, so mem_heap_create_block()
+takes them from buf_block_alloc(). Pages take frames from the same pool. So
+the constraint is simply
+
+    heap_bytes + pages * page_size  <=  pool_bytes
+
+max_memory must NOT be used for this. It is already the pool minus
+pages_to_be_kept_free, a static reservation for exactly these pages, so
+adding the frame term to it reserves the frames twice. Measured: at 2G that
+cut the first batch at heap 409MB + frames 1128MB against a 1535MB budget --
+while 119,290 of 131,072 frames were free, the LRU list was empty and nothing
+was dirty. 119 batches instead of 26, purely from cutting into an empty
+pool. */
+static inline size_t xb_pool_bytes() {
+  return (size_t)buf_pool_get_n_pages() * UNIV_PAGE_SIZE;
+}
+
+/* XB_FRAME_AWARE_CUT=0 restores the stock rule (heap alone against
+max_memory) so both arms can be measured with one binary. */
+static bool xb_frame_aware_cut() {
+  static const bool on = []() {
+    const char *e = getenv("XB_FRAME_AWARE_CUT");
+    return (e == nullptr) || (atoi(e) != 0);
+  }();
+  return on;
+}
+
+/* True when this window must be cut. want_heap is the heap bytes to test
+(actual, or actual plus the predicted growth of the next window). */
+static inline bool xb_should_cut(size_t want_heap, size_t max_memory) {
+  if (!xb_frame_aware_cut()) return want_heap > max_memory;
+  return want_heap + xb_frames_needed_bytes() > xb_pool_bytes();
+}
+
+#endif /* XTRABACKUP */
+
+#ifdef XTRABACKUP
+/* Pool state at a batch cut: is LRU flushing keeping any frames free, and
+is anything being evicted one page at a time? During recovery nearly every
+page is dirty the moment it is applied, so freeing a frame needs a write
+first -- the free list can only be refilled as fast as those writes drain. */
+static void xb_pool_state(uint64_t *free_pages, uint64_t *lru_pages,
+                          uint64_t *dirty_pages) {
+  *free_pages = 0;
+  *lru_pages = 0;
+  *dirty_pages = 0;
+  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
+    buf_pool_t *bp = buf_pool_from_array(i);
+    *free_pages += UT_LIST_GET_LEN(bp->free);
+    *lru_pages += UT_LIST_GET_LEN(bp->LRU);
+    *dirty_pages += UT_LIST_GET_LEN(bp->flush_list);
+  }
+}
 #endif /* XTRABACKUP */
 
 /** Adds a new log record to the hash table of log records.
@@ -4644,7 +4723,17 @@ bool meb_scan_log_recs(
     const size_t heap_used = recv_heap_used();
 #endif /* XTRABACKUP */
 #ifdef XTRABACKUP
-    if (heap_used + xb_frames_needed_bytes() > *max_memory) {
+    if (xb_should_cut(heap_used, *max_memory)) {
+      uint64_t fp, lp, dp;
+      xb_pool_state(&fp, &lp, &dp);
+      xb::info() << "XB-CUT serial heap_mb=" << (heap_used >> 20)
+                 << " free=" << fp << " lru=" << lp << " dirty=" << dp
+                 << " evict=" << xb_io_single_flush.load()
+                 << " wait_free=" << (ulint)srv_stats.buf_pool_wait_free
+                 << " frames_mb=" << (xb_frames_needed_bytes() >> 20)
+                 << " n_addrs=" << recv_sys->n_addrs
+                 << " pool_mb=" << (xb_pool_bytes() >> 20) << " dominant="
+                 << (heap_used > xb_frames_needed_bytes() ? "heap" : "frames");
 #else
     if (heap_used > *max_memory) {
 #endif /* XTRABACKUP */
@@ -5353,8 +5442,18 @@ class Parse_pool {
     stop();
     m_stop = false;
     m_threads.reserve(n);
+    /* Stamp the generation here, under the lock, rather than letting each
+    thread sample it whenever it happens to start. A thread that sampled it
+    after run_window() had already bumped the counter would wait for the NEXT
+    window and never take part in the current one, so m_pending would never
+    reach zero and run_window() would wait forever. */
+    uint64_t gen0;
+    {
+      std::unique_lock<std::mutex> lk(m_mutex);
+      gen0 = m_generation;
+    }
     for (size_t i = 0; i < n; ++i) {
-      m_threads.emplace_back([this, i]() { loop(i); });
+      m_threads.emplace_back([this, i, gen0]() { loop(i, gen0); });
     }
   }
 
@@ -5392,18 +5491,7 @@ class Parse_pool {
   ~Parse_pool() { stop(); }
 
  private:
-  void loop(size_t idx) {
-    /* Start from the generation current when this thread was created, not
-    from zero. stop() bumps the generation, so a pool restarted for a later
-    partition would otherwise have its new threads see generation != 0
-    immediately and process a window that no longer exists -- m_ws points at
-    a vector<Worker> destroyed at the end of the previous pass. That is a
-    SIGSEGV on the first window of pass 2, and invisible with one pass. */
-    uint64_t seen;
-    {
-      std::unique_lock<std::mutex> lk0(m_mutex);
-      seen = m_generation;
-    }
+  void loop(size_t idx, uint64_t seen) {
     for (;;) {
       std::unique_lock<std::mutex> lk(m_mutex);
       m_wake.wait(lk,
@@ -5797,9 +5885,54 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
                                : (heap_per_redo_byte * 0.5 + ratio * 0.5);
     }
     const size_t frames_now = xb_frames_needed_bytes();
-    const size_t predicted =
-        used_now + frames_now + (size_t)(heap_per_redo_byte * (double)wbytes);
-    if (used_now + frames_now > *max_memory || predicted > *max_memory) {
+    const size_t predicted_heap =
+        used_now + (size_t)(heap_per_redo_byte * (double)wbytes);
+    const size_t predicted = predicted_heap + frames_now;
+    const size_t limit = xb_frame_aware_cut() ? xb_pool_bytes() : *max_memory;
+
+    /* Under the frame-aware rule, do not cut on the prediction. The two
+    errors are not symmetric: overshooting the pool costs a bounded number
+    of single-page evictions (linear in the overshoot), while cutting early
+    costs batches, and batch count is superlinear in how far the cut falls
+    below the point where the page set saturates -- measured at 2G, dropping
+    the page set only 1.56x (225,795 -> 145,079) took the batch count 3.8x
+    (26 -> 100). The predicted term also predicts the wrong quantity: it
+    extrapolates heap growth, but under the page LSN map the heap shrinks
+    batch over batch (659MB -> 315MB -> 211MB) while frames grow, so it was
+    adding ~400MB of phantom heap and cutting at n_addrs=99,024 with 131,060
+    frames available -- a quarter of the pool left unused. The stock rule
+    keeps its prediction, which is what it was tuned with. */
+    /* XB_CUT_TRACE=1 prints one line per scan window, not just per cut. The
+    page set named by a window against the window's redo bytes is what decides
+    whether any frame-aware cut policy is feasible: the window is the finest
+    granularity a cut can have, so if one window already names more pages than
+    the pool holds, the frames can never be made to fit. */
+    static const bool trace = getenv("XB_CUT_TRACE") != nullptr;
+    if (trace) {
+      xb::info() << "XB-WIN redo_mb=" << (window_redo >> 20)
+                 << " n_addrs=" << recv_sys->n_addrs
+                 << " heap_mb=" << (used_now >> 20);
+    }
+    const bool cut = xb_frame_aware_cut()
+                         ? xb_should_cut(used_now, *max_memory)
+                         : (xb_should_cut(used_now, *max_memory) ||
+                            xb_should_cut(predicted_heap, *max_memory));
+    if (cut) {
+      uint64_t fp, lp, dp;
+      xb_pool_state(&fp, &lp, &dp);
+      xb::info() << "XB-CUT window heap_mb=" << (used_now >> 20)
+                 << " free=" << fp << " lru=" << lp << " dirty=" << dp
+                 << " evict=" << xb_io_single_flush.load()
+                 << " wait_free=" << (ulint)srv_stats.buf_pool_wait_free
+                 << " frames_mb=" << (frames_now >> 20)
+                 << " n_addrs=" << recv_sys->n_addrs
+                 << " predicted_mb=" << (predicted >> 20)
+                 << " pool_mb=" << (limit >> 20)
+                 << " window_redo_mb=" << (window_redo >> 20)
+                 << " dominant=" << (used_now > frames_now ? "heap" : "frames")
+                 << " trigger="
+                 << (xb_should_cut(used_now, *max_memory) ? "actual"
+                                                          : "predicted");
       recv_apply_hashed_log_recs(log, false);
     }
 
