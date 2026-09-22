@@ -932,9 +932,9 @@ struct my_option xb_client_options[] = {
      100, 0, 1, 0},
     {"estimate-memory", OPT_XTRA_ESTIMATE_MEMORY,
      "This option enable/disable the estimation of memory required to prepare "
-     "the backup. The estimation happens during backup. (Default OFF)",
+     "the backup. The estimation happens during backup. (Default ON)",
      (G_PTR *)&xtrabackup_estimate_memory, (G_PTR *)&xtrabackup_estimate_memory,
-     0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
+     0, GET_BOOL, NO_ARG, 1, 0, 0, 0, 0, 0},
     {"page-lsn-map", OPT_XTRA_PAGE_LSN_MAP,
      "Record page LSNs during --backup, and use them during --prepare to skip "
      "pages that need no redo applied. Pass it to both commands: --backup "
