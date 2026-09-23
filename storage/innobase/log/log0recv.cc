@@ -821,46 +821,6 @@ static
 @param[in]      space_id        Tablespace ID for which page map required.
 @param[in]      create          false if lookup only
 @return the space data or null if not found */
-#ifdef XTRABACKUP
-/* Where the recovery heap takes its memory from.
-
-MEM_HEAP_FOR_RECV_SYS is MEM_HEAP_BUFFER, so every heap block comes from
-buf_block_alloc() -- out of the buffer pool. That is why the heap and the
-page frames compete for one budget, and it is the only reason apply runs in
-more than one batch: the batch is cut when the heap fills, not when the work
-is done. The frames a batch needs are bounded by the working set (261,038
-pages, 4.07GB on the measured corpus), but the heap grows without bound with
-redo length, so on a 2G pool 23.2GB of redo takes 26 batches and every batch
-re-reads nearly the whole working set -- 5,870,679 reads for 261,038 distinct
-pages.
-
-With MEM_HEAP_DYNAMIC the heap comes from malloc instead, and the redo budget
-becomes independent of --use-memory. The pool then holds only frames, which is
-what it is for. XB_RECV_HEAP_MB sets the redo budget directly.
-
-XB_RECV_HEAP_DYNAMIC=0 (the default) keeps the stock allocator so both arms
-are measurable from one binary. */
-static uint32_t xb_recv_heap_type() {
-  static const uint32_t t = []() -> uint32_t {
-    const char *e = getenv("XB_RECV_HEAP_DYNAMIC");
-    return (e != nullptr && atoi(e) != 0) ? MEM_HEAP_DYNAMIC
-                                          : MEM_HEAP_FOR_RECV_SYS;
-  }();
-  return t;
-}
-
-/* Redo budget in bytes when the heap is dynamic, 0 when unset. */
-static size_t xb_recv_heap_budget() {
-  static const size_t b = []() -> size_t {
-    const char *e = getenv("XB_RECV_HEAP_MB");
-    const long v = (e == nullptr) ? 0 : atol(e);
-    return (v > 0) ? ((size_t)v << 20) : 0;
-  }();
-  return b;
-}
-#else
-#define xb_recv_heap_type() MEM_HEAP_FOR_RECV_SYS
-#endif /* XTRABACKUP */
 
 static recv_sys_t::Space *recv_get_page_map(space_id_t space_id, bool create) {
   auto it = recv_sys->spaces->find(space_id);
@@ -871,7 +831,7 @@ static recv_sys_t::Space *recv_get_page_map(space_id_t space_id, bool create) {
   } else if (create) {
     mem_heap_t *heap;
 
-    heap = mem_heap_create(256, UT_LOCATION_HERE, xb_recv_heap_type());
+    heap = mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
 
     using Space = recv_sys_t::Space;
     using Value = recv_sys_t::Spaces::value_type;
@@ -3310,100 +3270,6 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
 }
 }  // namespace xtrabackup
 #endif
-
-#ifdef XTRABACKUP
-/* Frames the pages accumulated so far will need when this batch is applied.
-
-The batch is cut on heap bytes alone, which is only half of what the buffer
-pool has to hold: the records AND the pages they will be applied to. Those
-pages are already known during the scan -- recv_sys->n_addrs counts the
-distinct ones -- so the decision does not have to be made blind and then
-discovered during apply.
-
-Ignoring the page side is what produces the eviction storm at small pools. A
-2GB pool cuts the batch when the heap reaches its bound, by which point the
-hash table names ~226,000 pages needing 3.6GB of frames, against a pool that
-no longer has them. Result: 201,903 single page evictions and every page read
-again on the next batch. Counting both terms cuts the batch while its pages
-still fit, so nothing has to be evicted. */
-static inline size_t xb_frames_needed_bytes() {
-  return (size_t)recv_sys->n_addrs * UNIV_PAGE_SIZE;
-}
-
-/* The real ceiling for heap + frames.
-
-Both live in the buffer pool: the recovery heap allocates its blocks with
-MEM_HEAP_FOR_RECV_SYS, which is MEM_HEAP_BUFFER, so mem_heap_create_block()
-takes them from buf_block_alloc(). Pages take frames from the same pool. So
-the constraint is simply
-
-    heap_bytes + pages * page_size  <=  pool_bytes
-
-max_memory must NOT be used for this. It is already the pool minus
-pages_to_be_kept_free, a static reservation for exactly these pages, so
-adding the frame term to it reserves the frames twice. Measured: at 2G that
-cut the first batch at heap 409MB + frames 1128MB against a 1535MB budget --
-while 119,290 of 131,072 frames were free, the LRU list was empty and nothing
-was dirty. 119 batches instead of 26, purely from cutting into an empty
-pool. */
-static inline size_t xb_pool_bytes() {
-  return (size_t)buf_pool_get_n_pages() * UNIV_PAGE_SIZE;
-}
-
-/* OFF by default: measured a loss at every pool size on a 23.2GB redo corpus
-with a 261,038-page working set.
-
-              stock cut                  frame-aware cut
-   2G    26 batches  5,870,679 reads  89s | 100 batches 14,507,910 reads 138s
-   4G    10          2,436,239        85s |  35          7,441,983       131s
-   8G     5          1,252,673        84s |   8          1,927,296        92s
-  16G     3            707,101        83s |   3            763,804        90s
-
-It does what it promises -- single-page evictions fall from 238,105 to 62,136
-at 2G and to ZERO at 4G and above, where the stock rule still forces 72,261
-and 22,236. It loses anyway, because pages per batch is flat at ~235k at every
-pool size (each batch re-reads nearly the whole working set), so reads are
-proportional to batch count, and making the frames fit can only shorten
-batches. Halving the page set costs five sixths of the redo per batch, because
-the page set saturates against redo length while the heap does not.
-
-XB_FRAME_AWARE_CUT=1 re-enables it for measurement. */
-static bool xb_frame_aware_cut() {
-  static const bool on = []() {
-    const char *e = getenv("XB_FRAME_AWARE_CUT");
-    return (e != nullptr) && (atoi(e) != 0);
-  }();
-  return on;
-}
-
-/* True when this window must be cut. want_heap is the heap bytes to test
-(actual, or actual plus the predicted growth of the next window). */
-static inline bool xb_should_cut(size_t want_heap, size_t max_memory) {
-  if (!xb_frame_aware_cut()) return want_heap > max_memory;
-  return want_heap + xb_frames_needed_bytes() > xb_pool_bytes();
-}
-
-#endif /* XTRABACKUP */
-
-#ifdef XTRABACKUP
-/* Pool state at a batch cut: is LRU flushing keeping any frames free, and
-is anything being evicted one page at a time? During recovery nearly every
-page is dirty the moment it is applied, so freeing a frame needs a write
-first -- the free list can only be refilled as fast as those writes drain. */
-static void xb_pool_state(uint64_t *free_pages, uint64_t *lru_pages,
-                          uint64_t *dirty_pages) {
-  *free_pages = 0;
-  *lru_pages = 0;
-  *dirty_pages = 0;
-  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-    buf_pool_t *bp = buf_pool_from_array(i);
-    *free_pages += UT_LIST_GET_LEN(bp->free);
-    *lru_pages += UT_LIST_GET_LEN(bp->LRU);
-    *dirty_pages += UT_LIST_GET_LEN(bp->flush_list);
-  }
-}
-#endif /* XTRABACKUP */
-
 /** Adds a new log record to the hash table of log records.
 @param[in]      type            log record type
 @param[in]      space_id        Tablespace id
@@ -4822,21 +4688,7 @@ bool meb_scan_log_recs(
 #else  /* XTRABACKUP */
     const size_t heap_used = recv_heap_used();
 #endif /* XTRABACKUP */
-#ifdef XTRABACKUP
-    if (xb_should_cut(heap_used, *max_memory)) {
-      uint64_t fp, lp, dp;
-      xb_pool_state(&fp, &lp, &dp);
-      xb::info() << "XB-CUT serial heap_mb=" << (heap_used >> 20)
-                 << " free=" << fp << " lru=" << lp << " dirty=" << dp
-                 << " evict=" << xb_io_single_flush.load()
-                 << " wait_free=" << (ulint)srv_stats.buf_pool_wait_free
-                 << " frames_mb=" << (xb_frames_needed_bytes() >> 20)
-                 << " n_addrs=" << recv_sys->n_addrs
-                 << " pool_mb=" << (xb_pool_bytes() >> 20) << " dominant="
-                 << (heap_used > xb_frames_needed_bytes() ? "heap" : "frames");
-#else
     if (heap_used > *max_memory) {
-#endif /* XTRABACKUP */
       recv_apply_hashed_log_recs(log, false);
     }
 #endif /* !UNIV_HOTBACKUP */
@@ -5125,7 +4977,7 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
   auto it = w.spaces.find(space_id);
   if (it == w.spaces.end()) {
     mem_heap_t *heap =
-        mem_heap_create(256, UT_LOCATION_HERE, xb_recv_heap_type());
+        mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
     it = w.spaces.insert(
         it, recv_sys_t::Spaces::value_type{space_id, recv_sys_t::Space(heap)});
   }
@@ -5457,7 +5309,7 @@ static uint64_t merge_into_recv_sys(std::vector<Worker> &ws) {
         null dereference the moment anything files into it serially --
         which is exactly what happens when a later window falls back. */
         mem_heap_t *h =
-            mem_heap_create(256, UT_LOCATION_HERE, xb_recv_heap_type());
+            mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
         sit = out->insert(sit, recv_sys_t::Spaces::value_type{
                                    skv.first, recv_sys_t::Space(h)});
         sit->second.m_pages = std::move(skv.second.m_pages);
@@ -5986,55 +5838,9 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
                                ? ratio
                                : (heap_per_redo_byte * 0.5 + ratio * 0.5);
     }
-    const size_t frames_now = xb_frames_needed_bytes();
-    const size_t predicted_heap =
+    const size_t predicted =
         used_now + (size_t)(heap_per_redo_byte * (double)wbytes);
-    const size_t predicted = predicted_heap + frames_now;
-    const size_t limit = xb_frame_aware_cut() ? xb_pool_bytes() : *max_memory;
-
-    /* Under the frame-aware rule, do not cut on the prediction. The two
-    errors are not symmetric: overshooting the pool costs a bounded number
-    of single-page evictions (linear in the overshoot), while cutting early
-    costs batches, and batch count is superlinear in how far the cut falls
-    below the point where the page set saturates -- measured at 2G, dropping
-    the page set only 1.56x (225,795 -> 145,079) took the batch count 3.8x
-    (26 -> 100). The predicted term also predicts the wrong quantity: it
-    extrapolates heap growth, but under the page LSN map the heap shrinks
-    batch over batch (659MB -> 315MB -> 211MB) while frames grow, so it was
-    adding ~400MB of phantom heap and cutting at n_addrs=99,024 with 131,060
-    frames available -- a quarter of the pool left unused. The stock rule
-    keeps its prediction, which is what it was tuned with. */
-    /* XB_CUT_TRACE=1 prints one line per scan window, not just per cut. The
-    page set named by a window against the window's redo bytes is what decides
-    whether any frame-aware cut policy is feasible: the window is the finest
-    granularity a cut can have, so if one window already names more pages than
-    the pool holds, the frames can never be made to fit. */
-    static const bool trace = getenv("XB_CUT_TRACE") != nullptr;
-    if (trace) {
-      xb::info() << "XB-WIN redo_mb=" << (window_redo >> 20)
-                 << " n_addrs=" << recv_sys->n_addrs
-                 << " heap_mb=" << (used_now >> 20);
-    }
-    const bool cut = xb_frame_aware_cut()
-                         ? xb_should_cut(used_now, *max_memory)
-                         : (xb_should_cut(used_now, *max_memory) ||
-                            xb_should_cut(predicted_heap, *max_memory));
-    if (cut) {
-      uint64_t fp, lp, dp;
-      xb_pool_state(&fp, &lp, &dp);
-      xb::info() << "XB-CUT window heap_mb=" << (used_now >> 20)
-                 << " free=" << fp << " lru=" << lp << " dirty=" << dp
-                 << " evict=" << xb_io_single_flush.load()
-                 << " wait_free=" << (ulint)srv_stats.buf_pool_wait_free
-                 << " frames_mb=" << (frames_now >> 20)
-                 << " n_addrs=" << recv_sys->n_addrs
-                 << " predicted_mb=" << (predicted >> 20)
-                 << " pool_mb=" << (limit >> 20)
-                 << " window_redo_mb=" << (window_redo >> 20)
-                 << " dominant=" << (used_now > frames_now ? "heap" : "frames")
-                 << " trigger="
-                 << (xb_should_cut(used_now, *max_memory) ? "actual"
-                                                          : "predicted");
+    if (used_now > *max_memory || predicted > *max_memory) {
       recv_apply_hashed_log_recs(log, false);
     }
 
@@ -6129,19 +5935,6 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
 #endif
       size_t delta_hashmap_max_mem =
           UNIV_PAGE_SIZE * (buf_pool_get_n_pages() - pages_to_be_kept_free);
-#ifdef XTRABACKUP
-  /* A dynamic heap does not come out of the buffer pool, so the redo budget
-  is no longer tied to --use-memory. Sized large enough to hold all the redo,
-  the apply runs as a single batch and every page is read exactly once. */
-  if (xb_recv_heap_budget() != 0) {
-    delta_hashmap_max_mem = xb_recv_heap_budget();
-    xb::info() << "XB-HEAP dynamic="
-               << (xb_recv_heap_type() == MEM_HEAP_DYNAMIC)
-               << " redo_budget_mb=" << (delta_hashmap_max_mem >> 20)
-               << " pool_mb="
-               << ((size_t)buf_pool_get_n_pages() * UNIV_PAGE_SIZE >> 20);
-  }
-#endif /* XTRABACKUP */
 
   if (log_test == nullptr) {
     recv_n_frames_for_pages_per_pool_instance =
