@@ -729,8 +729,9 @@ void Archived_Redo_Log_Monitor::thread_func() {
   ready = false;
   xb_has_set_redo_log_arch = false;
 
-  auto mysql = xb_mysql_connect();
-  if (mysql == nullptr) {
+  xb::Connection mysql;
+  if (!xb::Connection_manager::instance().connect(
+          xb::Destination::MAIN, xb::Purpose::REDO_ARCHIVE, mysql)) {
     my_thread_end();
     return;
   }
@@ -764,7 +765,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
     } else {
       xb::info() << "Redo Log Archiving is not set up.";
       free_mysql_variables(vars);
-      mysql_close(mysql);
+      mysql.close();
       my_thread_end();
       return;
     }
@@ -778,7 +779,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
     xb::info() << "Redo Log Archiving directory is empty.";
     archive_error_handle(mysql);
     free_mysql_variables(vars);
-    mysql_close(mysql);
+    mysql.close();
     my_thread_end();
     return;
   }
@@ -826,7 +827,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
   if (res == nullptr) {
     xb::info() << "Redo Log Archiving is not used.";
     archive_error_handle(mysql);
-    mysql_close(mysql);
+    mysql.close();
     my_thread_end();
     return;
   }
@@ -856,7 +857,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
     if (file < 0) {
       xb::error() << "cannot open " << SQUOTE(archive.filename.c_str());
       archive_error_handle(mysql);
-      mysql_close(mysql);
+      mysql.close();
       my_thread_end();
       return;
     }
@@ -871,7 +872,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
       if (n_read == MY_FILE_ERROR) {
         xb::error() << "cannot read from " << SQUOTE(archive.filename.c_str());
         archive_error_handle(mysql);
-        mysql_close(mysql);
+        mysql.close();
         my_thread_end();
         return;
       }
@@ -893,7 +894,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
         if (n_read == MY_FILE_ERROR) {
           xb::error() << "cannot read from " << archive.filename.c_str();
           archive_error_handle(mysql);
-          mysql_close(mysql);
+          mysql.close();
           my_thread_end();
           return;
         }
@@ -909,7 +910,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
         if (n_read == MY_FILE_ERROR) {
           xb::error() << "cannot read from " << archive.filename.c_str();
           archive_error_handle(mysql);
-          mysql_close(mysql);
+          mysql.close();
           my_thread_end();
           return;
         }
@@ -951,7 +952,10 @@ void Archived_Redo_Log_Monitor::thread_func() {
   }
   unlink(archive.filename.c_str());
   rmdir(archive.dir.c_str());
-  mysql_close(mysql);
+  /* Closed on every path out of this thread rather than left to the
+  destructor, which would run after my_thread_end() has released the thread's
+  mysys state. */
+  mysql.close();
   my_thread_end();
 }
 
@@ -968,8 +972,9 @@ bool Redo_Log_Data_Manager::init() {
     if (!redo_log_consumer.check()) {
       xtrabackup_register_redo_log_consumer = false;
     } else {
-      redo_log_consumer_cnx = xb_mysql_connect();
-      if (redo_log_consumer_cnx == nullptr) {
+      if (!xb::Connection_manager::instance().connect(
+              xb::Destination::MAIN, xb::Purpose::REDO_CONSUMER,
+              redo_log_consumer_cnx)) {
         xtrabackup_register_redo_log_consumer = false;
         return (false);
       }
@@ -1205,7 +1210,7 @@ void Redo_Log_Data_Manager::copy_func() {
       if (archived_log_monitor.is_ready() &&
           archived_log_state == ARCHIVED_LOG_POSITIONED) {
         redo_log_consumer.deinit(redo_log_consumer_cnx);
-        mysql_close(redo_log_consumer_cnx);
+        redo_log_consumer_cnx.close();
         xtrabackup_register_redo_log_consumer = false;
       } else {
         if (consumer_lsn != reader.get_scanned_lsn()) {
@@ -1304,7 +1309,7 @@ bool Redo_Log_Data_Manager::stop_at(lsn_t lsn, lsn_t checkpoint_lsn) {
 
   if (xtrabackup_register_redo_log_consumer) {
     redo_log_consumer.deinit(redo_log_consumer_cnx);
-    mysql_close(redo_log_consumer_cnx);
+    redo_log_consumer_cnx.close();
   }
 
   return (true);
