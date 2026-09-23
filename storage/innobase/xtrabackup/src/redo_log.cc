@@ -730,8 +730,8 @@ void Archived_Redo_Log_Monitor::thread_func() {
   xb_has_set_redo_log_arch = false;
 
   xb::Connection mysql;
-  if (!xb::Connection_manager::instance().connect(
-          xb::Destination::MAIN, xb::Purpose::REDO_ARCHIVE, mysql)) {
+  if (!xb::Connection_manager::instance().connect(xb::Purpose::REDO_ARCHIVE,
+                                                  mysql)) {
     my_thread_end();
     return;
   }
@@ -973,8 +973,7 @@ bool Redo_Log_Data_Manager::init() {
       xtrabackup_register_redo_log_consumer = false;
     } else {
       if (!xb::Connection_manager::instance().connect(
-              xb::Destination::MAIN, xb::Purpose::REDO_CONSUMER,
-              redo_log_consumer_cnx)) {
+              xb::Purpose::REDO_CONSUMER, redo_log_consumer_cnx)) {
         xtrabackup_register_redo_log_consumer = false;
         return (false);
       }

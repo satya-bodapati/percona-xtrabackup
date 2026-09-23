@@ -159,13 +159,14 @@ class Connection_manager {
   bool is_configured(Destination destination) const;
 
   /** Open a connection. The caller owns it and decides how long to keep it.
-  @param[in]	destination	server to connect to
+
+  Which server it goes to follows from what it is for, so a purpose belonging
+  to the backup cannot be asked of the history server by mistake.
   @param[in]	purpose		what the connection is for
   @param[in,out]	connection	connection to open, which must not be
   open already
   @return true if the connection could be made */
-  bool connect(Destination destination, Purpose purpose,
-               Connection &connection);
+  bool connect(Purpose purpose, Connection &connection);
 
   /** Open the connections that live for the whole backup.
   @return true if every one of them could be opened */

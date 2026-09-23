@@ -816,8 +816,8 @@ static void kill_query_thread() {
     }
   }
 
-  if (!xb::Connection_manager::instance().connect(
-          xb::Destination::MAIN, xb::Purpose::QUERY_KILLER, mysql)) {
+  if (!xb::Connection_manager::instance().connect(xb::Purpose::QUERY_KILLER,
+                                                  mysql)) {
     xb::error() << "kill query thread failed";
     goto stop_thread;
   }
@@ -2128,8 +2128,7 @@ void mdl_lock_tables() {
   xb::info() << "Initializing MDL on all current tables.";
   MYSQL_RES *mysql_result = NULL;
   MYSQL_ROW row;
-  xb::Connection_manager::instance().connect(xb::Destination::MAIN,
-                                             xb::Purpose::MDL_LOCK, mdl_con);
+  xb::Connection_manager::instance().connect(xb::Purpose::MDL_LOCK, mdl_con);
   if (mdl_con != NULL) {
     xb_mysql_query(mdl_con, "BEGIN", false, true);
     mysql_result = xb_mysql_query(mdl_con,

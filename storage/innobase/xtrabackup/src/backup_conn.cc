@@ -206,8 +206,39 @@ bool Connection_manager::validate_options() const {
   return (true);
 }
 
-bool Connection_manager::connect(Destination destination, Purpose purpose,
-                                 Connection &connection) {
+/*********************************************************************/ /**
+ The server a purpose is served by.
+
+ Storing the history record is the only thing the history server is asked to
+ do. Every other purpose belongs to the server being backed up and would be
+ actively wrong anywhere else: the MDL lock and the query killer would take
+ hold of, and interfere with, a server that is not being backed up at all, and
+ the redo log purposes describe a copy that is not being made there. None of
+ that would be reported either, since the connection would open and the
+ statements would succeed.
+
+ Answering it here rather than at the call sites is what makes those pairings
+ impossible to write. The switch has no default, so a purpose added later does
+ not compile until it says where it belongs.
+ @param[in]	purpose	what a connection is for
+ @return the server that serves it */
+static Destination destination_of(Purpose purpose) {
+  switch (purpose) {
+    case Purpose::BACKUP:
+    case Purpose::MDL_LOCK:
+    case Purpose::QUERY_KILLER:
+    case Purpose::REDO_ARCHIVE:
+    case Purpose::REDO_CONSUMER:
+      return (Destination::MAIN);
+    case Purpose::HISTORY_RECORD:
+      return (Destination::HISTORY);
+  }
+
+  ut_error;
+}
+
+bool Connection_manager::connect(Purpose purpose, Connection &connection) {
+  const Destination destination = destination_of(purpose);
   const Dsn dsn = resolve(destination);
   char mysql_port_str[std::numeric_limits<int>::digits10 + 3];
 
@@ -278,7 +309,7 @@ bool Connection_manager::connect(Destination destination, Purpose purpose,
 }
 
 bool Connection_manager::open_shared() {
-  if (!connect(Destination::MAIN, Purpose::BACKUP, m_main)) {
+  if (!connect(Purpose::BACKUP, m_main)) {
     return (false);
   }
 
@@ -287,7 +318,7 @@ bool Connection_manager::open_shared() {
   it, fails the backup before any data is copied instead of after it has all
   been written. */
   if (is_configured(Destination::HISTORY) &&
-      !connect(Destination::HISTORY, Purpose::HISTORY_RECORD, m_history)) {
+      !connect(Purpose::HISTORY_RECORD, m_history)) {
     return (false);
   }
 
