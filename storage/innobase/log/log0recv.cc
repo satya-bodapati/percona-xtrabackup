@@ -5894,18 +5894,73 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
   livelocks in buf_LRU_get_free_block. It also sets recv_needed_recovery,
   which recv_recover_page_func() asserts on. */
   {
-    byte first[OS_FILE_LOG_BLOCK_SIZE];
-    const lsn_t blk_lsn =
-        ut_uint64_align_down(start_lsn, OS_FILE_LOG_BLOCK_SIZE);
-    if (recv_read_log_seg(log, first, blk_lsn,
-                          blk_lsn + OS_FILE_LOG_BLOCK_SIZE) == 0) {
+    /* Anchor on the first block that actually starts an mtr.
+
+    first_rec_group is documented as "0 if no mtr starts in that log block",
+    which is a normal condition, not corruption: it happens whenever the
+    preceding mtr is long enough to fill the block. The serial scan handles
+    it by walking forward - its
+
+        if (!recv_sys->parse_start_lsn && block_header.m_first_rec_group > 0)
+
+    test sits inside the per-block loop - and this must do the same.
+
+    Testing only the first block and giving up disabled the parallel parse
+    outright on any workload whose records span blocks. On a 4KB-payload
+    corpus it fired on the very first block, so all 53GB was parsed
+    serially while still reporting success: scan_ms 67,453 with
+    win_read_ms and win_parse_ms both zero.
+
+    Blocks are validated exactly as the serial loop validates them, via
+    valid_block_prefix(): header number against the LSN, checksum, and a
+    partially filled block ending the log. The walk is bounded because an
+    mtr cannot exceed the log buffer; past that the log is malformed and
+    falling back to the serial scan is the right answer anyway. */
+    const size_t ANCHOR_CHUNK = 1u << 20;
+    const size_t ANCHOR_MAX = 64u << 20;
+    std::vector<byte> probe(ANCHOR_CHUNK);
+    lsn_t blk_lsn = ut_uint64_align_down(start_lsn, OS_FILE_LOG_BLOCK_SIZE);
+    lsn_t anchor_lsn = 0;
+    uint32_t anchor_frg = 0;
+    size_t anchor_scanned = 0;
+
+    while (anchor_frg == 0 && anchor_scanned < ANCHOR_MAX) {
+      const lsn_t got =
+          recv_read_log_seg(log, probe.data(), blk_lsn, blk_lsn + ANCHOR_CHUNK);
+      if (got == 0 || got <= blk_lsn) break;
+
+      const uint64_t have = (got - blk_lsn) / OS_FILE_LOG_BLOCK_SIZE;
+      const uint64_t ok = valid_block_prefix(probe.data(), blk_lsn, have);
+
+      for (uint64_t i = 0; i < ok; ++i) {
+        const uint32_t frg =
+            blk_first_rec_group(probe.data() + i * OS_FILE_LOG_BLOCK_SIZE);
+        if (frg > 0) {
+          anchor_lsn = blk_lsn + (lsn_t)i * OS_FILE_LOG_BLOCK_SIZE;
+          anchor_frg = frg;
+          break;
+        }
+      }
+      if (anchor_frg != 0 || ok < have) break;
+
+      blk_lsn += (lsn_t)have * OS_FILE_LOG_BLOCK_SIZE;
+      anchor_scanned += (size_t)have * OS_FILE_LOG_BLOCK_SIZE;
+    }
+
+    if (anchor_frg == 0) {
+      xb::info() << "XB-PARSCAN exit=no_rec_group_within "
+                 << (anchor_scanned >> 20) << "MB from lsn=" << start_lsn;
       return false;
     }
-    Log_data_block_header hdr;
-    log_data_block_header_deserialize(first, hdr);
-    if (hdr.m_first_rec_group == 0) return false;
+    if (anchor_lsn != ut_uint64_align_down(start_lsn, OS_FILE_LOG_BLOCK_SIZE)) {
+      xb::info() << "XB-PARSCAN anchor walked forward "
+                 << (anchor_lsn -
+                     ut_uint64_align_down(start_lsn, OS_FILE_LOG_BLOCK_SIZE))
+                 << " bytes to lsn=" << anchor_lsn;
+    }
+    blk_lsn = anchor_lsn;
 
-    recv_sys->parse_start_lsn = blk_lsn + hdr.m_first_rec_group;
+    recv_sys->parse_start_lsn = blk_lsn + anchor_frg;
     if (recv_sys->parse_start_lsn < recv_sys->checkpoint_lsn) {
       /* Normal, not exceptional: recovery starts at the beginning of the
       block holding checkpoint_lsn, so the first group in that block
@@ -6111,7 +6166,25 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
                  << " filed_through=" << filed_through << " exit=seam";
       return false;
     }
-    if (done_lsn <= start_lsn) break;
+    if (done_lsn <= start_lsn) {
+      /* No worker found an mtr start anywhere in the window, so one mtr
+      spans the whole of it and nothing could be parsed.
+
+      Breaking out here left the loop and returned true, which tells the
+      caller recovery FINISHED and skips the serial fallback entirely -
+      silently leaving the rest of the redo unparsed rather than failing.
+      Fall back instead, exactly as the seam failure above does. Unreachable
+      at the default 128MB window because an mtr cannot exceed the log
+      buffer, but XB_PARSCAN_WINDOW_MB is tunable and large-record workloads
+      make large mtrs ordinary. */
+      *io_start_lsn =
+          (filed_through != 0)
+              ? ut_uint64_align_down(filed_through, OS_FILE_LOG_BLOCK_SIZE)
+              : start_lsn;
+      xb::info() << "XB-PARSCAN windows=" << windows
+                 << " filed_through=" << filed_through << " exit=no_progress";
+      return false;
+    }
 
     /* Reaching to_lsn ends recovery. Clamp and stop: leaving the loop to
     notice on its own would spin, because start_lsn for the next window is
