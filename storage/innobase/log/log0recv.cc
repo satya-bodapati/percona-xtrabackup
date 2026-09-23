@@ -109,6 +109,77 @@ into the buffer pool, so the struct and its inline body together must
 still fit one buffer-backed allocation. */
 #define RECV_INLINE_BODY_MAX (MEM_MAX_ALLOC_IN_BUF - sizeof(recv_t))
 
+static void recv_data_copy_to_buf(byte *buf, recv_t *recv);
+
+/** The redo records recovery holds for one page, in ascending LSN order.
+
+Every reader of a page's records goes through this, so how they are stored
+is in one place. Today it walks the UT_LIST of recv_t threaded through
+recv_addr_t::rec_list, which is the representation this class exists to
+replace: 40 bytes of recv_t around a ~24-byte payload, 16 of them the
+prev/next pointers of a list that is only ever appended to in order and
+walked forward once.
+
+body() always returns a contiguous buffer. A body too long to ride inline
+after its recv_t is stored as a recv_data_t chain; the iterator materialises
+it into scratch it owns, so callers never see the difference. The scratch is
+reused across records rather than malloc/free'd per record, which is what the
+open-coded loop did.
+
+The iterator is single-pass and non-owning: it is valid only while the batch
+that allocated the records is alive, which is the whole of one
+recv_apply_hashed_log_recs() call. */
+class Page_recs {
+ public:
+  explicit Page_recs(const recv_addr_t *addr)
+      : m_next(addr == nullptr ? nullptr : UT_LIST_GET_FIRST(addr->rec_list)) {}
+
+  /** @return true when this page has no records at all */
+  static bool empty(const recv_addr_t *addr) {
+    return addr == nullptr || UT_LIST_GET_FIRST(addr->rec_list) == nullptr;
+  }
+
+  /** @return true when the first record re-initialises the whole page, so
+  its previous contents are irrelevant. Both callers of this ask exactly
+  that question, so they do not need the type itself. */
+  static bool first_is_page_init(const recv_addr_t *addr) {
+    if (addr == nullptr) return false;
+    const recv_t *f = UT_LIST_GET_FIRST(addr->rec_list);
+    if (f == nullptr) return false;
+    return f->type() == MLOG_INIT_FILE_PAGE2 ||
+           f->type() == MLOG_INIT_FILE_PAGE;
+  }
+
+  /** Advance to the next record. @return false when there are none left. */
+  bool next() {
+    m_cur = m_next;
+    if (m_cur == nullptr) return false;
+    m_next = UT_LIST_GET_NEXT(rec_list, m_cur);
+    return true;
+  }
+
+  lsn_t start_lsn() const { return m_cur->start_lsn; }
+  lsn_t end_lsn() const { return m_cur->end_lsn(); }
+  mlog_id_t type() const { return m_cur->type(); }
+  uint32_t len() const { return m_cur->len; }
+
+  /** @return the record body, contiguous, or nullptr when it has none.
+  Valid until the next next(). */
+  const byte *body() {
+    recv_t *r = const_cast<recv_t *>(m_cur);
+    if (r->len == 0) return nullptr;
+    if (r->body_inline) return r->inline_body();
+    if (m_scratch.size() < r->len) m_scratch.resize(r->len);
+    recv_data_copy_to_buf(m_scratch.data(), r);
+    return m_scratch.data();
+  }
+
+ private:
+  const recv_t *m_cur{nullptr};
+  const recv_t *m_next{nullptr};
+  std::vector<byte> m_scratch;
+};
+
 /** Read-ahead area in applying log records to file pages */
 static const size_t RECV_READ_AHEAD_AREA = 32;
 
@@ -1280,12 +1351,8 @@ static ulint recv_read_in_area(const page_id_t &page_id) {
         /* If the first record initialises the whole page, its previous
         contents are irrelevant -- we read 16KB off disk and then overwrite
         every byte. Count them to size the opportunity before acting on it. */
-        {
-          const recv_t *first = UT_LIST_GET_FIRST(recv_addr->rec_list);
-          if (first != nullptr && (first->type() == MLOG_INIT_FILE_PAGE2 ||
-                                   first->type() == MLOG_INIT_FILE_PAGE)) {
-            xb_io_brand_new_reads.fetch_add(1, std::memory_order_relaxed);
-          }
+        if (Page_recs::first_is_page_init(recv_addr)) {
+          xb_io_brand_new_reads.fetch_add(1, std::memory_order_relaxed);
         }
 #endif /* XTRABACKUP */
 
@@ -3481,19 +3548,16 @@ bool recv_page_is_brand_new(buf_block_t *block) {
     return true;
   }
 
-  auto recv = UT_LIST_GET_FIRST(recv_addr->rec_list);
-  if (recv == nullptr) {
-    /* no redo log treated as brand new */
-    mutex_exit(&recv_sys->mutex);
-    return true;
-  }
-  if (recv->type() == MLOG_INIT_FILE_PAGE2 ||
-      recv->type() == MLOG_INIT_FILE_PAGE) {
-    mutex_exit(&recv_sys->mutex);
-    return true;
-  }
+  /* No records at all is treated as brand new, as is a page whose first
+  record re-initialises it. */
+  const bool brand_new =
+      Page_recs::empty(recv_addr) || Page_recs::first_is_page_init(recv_addr);
 
   mutex_exit(&recv_sys->mutex);
+
+  if (brand_new) {
+    return true;
+  }
   return false;
 }
 
@@ -3681,41 +3745,35 @@ void recv_recover_page_func(
   later ones already advanced. */
   lsn_t xb_prev_lsn = 0;
 #endif /* XTRABACKUP */
-  for (auto recv : recv_addr->rec_list) {
+  Page_recs recs(recv_addr);
+  while (recs.next()) {
 #ifdef XTRABACKUP
     ++xb_total;
-    ut_a(recv->start_lsn >= xb_prev_lsn);
+    ut_a(recs.start_lsn() >= xb_prev_lsn);
     if (xb_prev_lsn != 0 && xb_recv_census_on()) {
       unsigned gb = 0;
-      uint64_t gv = recv->start_lsn - xb_prev_lsn;
+      uint64_t gv = recs.start_lsn() - xb_prev_lsn;
       while (gv >>= 1) {
         if (++gb == 15) break;
       }
       xb_recv_stats.lsn_gap_hist[gb].fetch_add(1, std::memory_order_relaxed);
     }
-    xb_prev_lsn = recv->start_lsn;
+    xb_prev_lsn = recs.start_lsn();
 #endif /* XTRABACKUP */
-    end_lsn = recv->end_lsn();
+    end_lsn = recs.end_lsn();
 #ifndef UNIV_HOTBACKUP
     ut_ad(end_lsn <= log_sys->m_scanned_lsn);
 #endif /* !UNIV_HOTBACKUP */
 
-    byte *buf = nullptr;
-
-    if (!recv->body_inline) {
-      /* Too long to have ridden along with the recv_t, so it is a chain of
-      chunks and has to be copied out to a contiguous buffer. Rare. */
-      buf = static_cast<byte *>(
-          ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, recv->len));
-      recv_data_copy_to_buf(buf, recv);
-    } else if (recv->len > 0) {
-      buf = recv->inline_body();
-    }
+    /* Contiguous either way: a body too long to ride inline is materialised
+    into scratch the iterator owns and reuses, instead of a malloc and free
+    per record. */
+    byte *buf = const_cast<byte *>(recs.body());
     /* Otherwise a redo record with no payload at all, such as
     MLOG_UNDO_ERASE_END, MLOG_COMP_PAGE_CREATE or MLOG_INIT_FILE_PAGE2, and
     buf stays null. */
 
-    if (recv->type() == MLOG_INIT_FILE_PAGE) {
+    if (recs.type() == MLOG_INIT_FILE_PAGE) {
       page_lsn = page_newest_lsn;
 
       memset(FIL_PAGE_LSN + page, 0, 8);
@@ -3735,7 +3793,7 @@ void recv_recover_page_func(
     redo will have action recorded on page before tablespace
     was re-inited and that would lead to a problem later. */
 
-    if (xb_redo_record_applies(recv->start_lsn, page_lsn)
+    if (xb_redo_record_applies(recs.start_lsn(), page_lsn)
 #ifndef UNIV_HOTBACKUP
         && xb_space_is_active
 #endif /* !UNIV_HOTBACKUP */
@@ -3746,23 +3804,23 @@ void recv_recover_page_func(
         ut_a(recv_needed_recovery);
 #endif /* !UNIV_HOTBACKUP */
         modification_to_page = true;
-        start_lsn = recv->start_lsn;
+        start_lsn = recs.start_lsn();
       }
 
       DBUG_PRINT("ib_log",
                  ("apply " LSN_PF ":"
                   " %s len " ULINTPF " page %u:%u",
-                  recv->start_lsn, get_mlog_string(recv->type()),
-                  ulint{recv->len}, recv_addr->space, recv_addr->page_no));
+                  recs.start_lsn(), get_mlog_string(recs.type()),
+                  ulint{recs.len()}, recv_addr->space, recv_addr->page_no));
       /* Since buf can be a nullptr for record types without a payload we can
-      end up with nullptr + 0 if we calc buf + recv->len. This is undefined
+      end up with nullptr + 0 if we calc buf + recs.len(). This is undefined
       behaviour. Avoid this by only calculating the end_ptr when there's
       actual data to work with, otherwise set it to nullptr. */
       unsigned char *buf_end = nullptr;
       if (buf != nullptr) {
-        buf_end = buf + recv->len;
+        buf_end = buf + recs.len();
       }
-      recv_parse_or_apply_log_rec_body(recv->type(), buf, buf_end,
+      recv_parse_or_apply_log_rec_body(recs.type(), buf, buf_end,
                                        recv_addr->space, recv_addr->page_no,
                                        block, &mtr, ULINT_UNDEFINED, LSN_MAX);
 
@@ -3774,10 +3832,6 @@ void recv_recover_page_func(
     } else {
       ++skipped_recs;
 #endif /* UNIV_HOTBACKUP */
-    }
-
-    if (!recv->body_inline) {
-      ut::free(buf);
     }
   }
 
