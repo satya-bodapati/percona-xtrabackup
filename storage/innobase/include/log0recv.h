@@ -893,6 +893,10 @@ struct xb_recv_stats_t {
   /* Time in recv_sys_empty_hash(): the per-batch teardown of every space
   heap, the parscan staging heaps and both Spaces maps. */
   std::atomic<uint64_t> empty_hash_ns{0};
+  /* Inside the scan: time filling the window from disk vs time parsing it.
+  These alternate today, so scan_ms is their sum. */
+  std::atomic<uint64_t> win_read_ns{0};
+  std::atomic<uint64_t> win_parse_ns{0};
   /* Field-width census for the packed recv_t work. log2 buckets of the mtr
   LSN span (end_lsn - start_lsn), and a count of bodies too long to ride
   inline, which are the records that force the wide encoding. */

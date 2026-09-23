@@ -7339,6 +7339,8 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
       << " flush_list_ms=" << (xb_recv_stats.flush_list_ns.load() / 1000000)
       << " invalidate_ms=" << (xb_recv_stats.invalidate_ns.load() / 1000000)
       << " empty_hash_ms=" << (xb_recv_stats.empty_hash_ns.load() / 1000000)
+      << " win_read_ms=" << (xb_recv_stats.win_read_ns.load() / 1000000)
+      << " win_parse_ms=" << (xb_recv_stats.win_parse_ns.load() / 1000000)
       << " delta_merge_ms=" << xb_delta_merge_ms << " total_ms=" << total_ms
       << " use_memory=" << srv_buf_pool_size
       << " buf_pool_pages=" << buf_pool_get_n_pages()

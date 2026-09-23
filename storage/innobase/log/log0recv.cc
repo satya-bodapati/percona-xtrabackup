@@ -4911,6 +4911,17 @@ struct Worker {
   uint64_t mtrs{0};
   uint64_t pages{0};
   uint64_t serialized{0}; /* records parsed under the global mutex */
+  /* Records the page LSN map dropped, counted locally.
+
+  This used to bump xb_recv_stats.recs_dropped_by_map directly, which is one
+  global atomic incremented 607,986,636 times -- once per dropped record --
+  by every parse worker at once. std::memory_order_relaxed does not help:
+  the increment still needs exclusive ownership of that cache line, so the
+  workers serialise on it. perf c2c attributed a whole cache line's HITM
+  traffic to parse_one_mtr through it, and it is why win_parse_ms barely
+  moved between 16 and 96 workers (22,540 -> 18,482 for 6x the threads).
+  Counted per worker and folded in once per window instead. */
+  uint64_t dropped_by_map{0};
   lsn_t start_lsn{0};
   lsn_t stop_lsn{0};
   /* Byte budget of pre-checkpoint record data still to be ignored, the
@@ -5027,7 +5038,7 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
       type != MLOG_INIT_FILE_PAGE2) {
     const lsn_t copy_lsn = page_lsn_map::lookup(space_id, page_no);
     if (copy_lsn != 0 && !xb_redo_record_applies(start_lsn, copy_lsn)) {
-      xb_recv_stats.recs_dropped_by_map.fetch_add(1, std::memory_order_relaxed);
+      ++w.dropped_by_map;
       return;
     }
   }
@@ -5628,6 +5639,16 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
                << " last_filed_mtr=" << last_filed;
   }
 
+  /* One atomic per window instead of one per dropped record. */
+  {
+    uint64_t dropped = 0;
+    for (auto &w : ws) dropped += w.dropped_by_map;
+    if (dropped != 0) {
+      xb_recv_stats.recs_dropped_by_map.fetch_add(dropped,
+                                                  std::memory_order_relaxed);
+    }
+  }
+
   *out_new_pages = merge_into_recv_sys(ws);
   free_workers(ws);
   return done_lsn;
@@ -5797,6 +5818,7 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
       if (readers > blocks_total) readers = blocks_total ? blocks_total : 1;
     }
 
+    const auto xb_rd_t0 = std::chrono::steady_clock::now();
     if (readers > 1) {
       const size_t blocks_total = wbytes / OS_FILE_LOG_BLOCK_SIZE;
       const size_t per = blocks_total / readers;
@@ -5882,6 +5904,11 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
       read_lsn = got;
     }
   window_filled:
+    xb_recv_stats.win_read_ns.fetch_add(
+        (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - xb_rd_t0)
+            .count(),
+        std::memory_order_relaxed);
     if (filled == 0) break;
 
     const uint64_t blocks = valid_block_prefix(window.data(), start_lsn,
@@ -5891,9 +5918,15 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     const size_t used_before = recv_heap_used();
     const lsn_t window_start = start_lsn;
     uint64_t new_pages = 0;
+    const auto xb_ps_t0 = std::chrono::steady_clock::now();
     lsn_t done_lsn = parse_window(window.data(), start_lsn,
                                   (size_t)blocks * OS_FILE_LOG_BLOCK_SIZE,
                                   resume_lsn, ignore_bytes, to_lsn, &new_pages);
+    xb_recv_stats.win_parse_ns.fetch_add(
+        (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - xb_ps_t0)
+            .count(),
+        std::memory_order_relaxed);
     ignore_bytes = 0; /* consumed by the first window */
     if (done_lsn == 0) {
       /* Nothing from THIS window was filed, but earlier windows were, so
