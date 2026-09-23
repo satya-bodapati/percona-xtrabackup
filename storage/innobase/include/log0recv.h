@@ -399,9 +399,35 @@ enum recv_addr_state {
 };
 
 /** Hashed page file address struct */
-struct recv_addr_t {
-  using List = UT_LIST_BASE_NODE_T(recv_t, rec_list);
+/** A run of packed redo records for one page.
 
+Records are appended in ascending LSN order and read back once, forward, so
+they are stored byte-packed one after another rather than as a linked list of
+structs. See Page_recs in log0recv.cc for the encoding; nothing outside it
+may read data().
+
+A chunk is self-contained: the first record's LSN is base_lsn and every
+record stores its LSN as a delta from the one before it in THIS chunk. That
+is what lets the parallel merge concatenate chunk lists from different
+workers without rewriting anything. */
+struct Rec_chunk {
+  /** Next chunk of the same page, or nullptr. */
+  Rec_chunk *next;
+
+  /** start_lsn of the first record in this chunk. */
+  lsn_t base_lsn;
+
+  /** Bytes of data() in use. */
+  uint32_t used;
+
+  /** Bytes of data() available. */
+  uint32_t cap;
+
+  byte *data() { return reinterpret_cast<byte *>(this + 1); }
+  const byte *data() const { return reinterpret_cast<const byte *>(this + 1); }
+};
+
+struct recv_addr_t {
   /** recovery state of the page */
   recv_addr_state state;
 
@@ -411,8 +437,16 @@ struct recv_addr_t {
   /** Page number */
   page_no_t page_no;
 
-  /** List of log records for this page */
-  List rec_list;
+  /** Packed log records for this page, oldest chunk first. */
+  Rec_chunk *chunk_head;
+
+  /** Last chunk, so append and the merge are O(1). */
+  Rec_chunk *chunk_tail;
+
+  /** start_lsn of the last record appended, so the next append can store a
+  delta and so the ascending-LSN invariant the encoding depends on can be
+  asserted rather than assumed. */
+  lsn_t last_lsn;
 };
 
 // Forward declaration
@@ -897,6 +931,12 @@ struct xb_recv_stats_t {
   These alternate today, so scan_ms is their sum. */
   std::atomic<uint64_t> win_read_ns{0};
   std::atomic<uint64_t> win_parse_ns{0};
+  /* Packed-record chunk accounting: bytes handed out by the heap versus
+  bytes actually holding records. The difference is slack in the last chunk
+  of each page. */
+  std::atomic<uint64_t> chunk_bytes_alloc{0};
+  std::atomic<uint64_t> chunk_bytes_used{0};
+  std::atomic<uint64_t> chunks_made{0};
   /* Field-width census for the packed recv_t work. log2 buckets of the mtr
   LSN span (end_lsn - start_lsn), and a count of bodies too long to ride
   inline, which are the records that force the wide encoding. */

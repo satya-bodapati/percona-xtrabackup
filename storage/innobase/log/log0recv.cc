@@ -100,101 +100,281 @@ std::list<space_id_t> recv_encr_ts_list;
 this must be less than UNIV_PAGE_SIZE as it is stored in the buffer pool */
 #define RECV_DATA_BLOCK_SIZE (MEM_MAX_ALLOC_IN_BUF - sizeof(recv_data_t))
 
-/* The packing is the point, so pin it: a regression here silently costs
-apply batches rather than failing anything. */
-static_assert(sizeof(recv_t) == 40, "recv_t must stay 40 bytes");
+static void recv_data_copy_to_buf(byte *buf, recv_data_t *chain, uint32_t len);
 
-/** Largest body that can be stored inline after a recv_t. The heap grows
-into the buffer pool, so the struct and its inline body together must
-still fit one buffer-backed allocation. */
-#define RECV_INLINE_BODY_MAX (MEM_MAX_ALLOC_IN_BUF - sizeof(recv_t))
+/** Variable-length integer, 7 bits per byte, low group first.
 
-static void recv_data_copy_to_buf(byte *buf, recv_t *recv);
+Chosen over mach_write_compressed() because that dispatches on a global
+format flag on every call, which is a branch we do not want on a path that
+runs 490 million times, and because this never reaches disk so no format
+needs pinning. The sizes match what the field census measured: 1 byte for
+values under 128, which covers 79.8% of same-page LSN gaps, 81.4% of mtr
+spans and 90.8% of body lengths. */
+static inline byte *leb_write(byte *p, uint64_t v) {
+  while (v >= 0x80) {
+    *p++ = (byte)(v | 0x80);
+    v >>= 7;
+  }
+  *p++ = (byte)v;
+  return p;
+}
+
+static inline const byte *leb_read(const byte *p, uint64_t *out) {
+  uint64_t v = 0;
+  unsigned shift = 0;
+  byte b;
+  do {
+    b = *p++;
+    v |= (uint64_t)(b & 0x7f) << shift;
+    shift += 7;
+  } while ((b & 0x80) != 0);
+  *out = v;
+  return p;
+}
+
+static inline size_t leb_size(uint64_t v) {
+  size_t n = 1;
+  while (v >= 0x80) {
+    v >>= 7;
+    ++n;
+  }
+  return n;
+}
+
+/** Largest chunk obtainable from a buffer-backed heap in one allocation.
+Not constexpr: MEM_MAX_ALLOC_IN_BUF derives from srv_page_size, which is set
+at startup. */
+static inline size_t rec_chunk_max() {
+  static const size_t cap = []() -> size_t {
+    const char *e = getenv("XB_CHUNK_CAP");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    const size_t hard = MEM_MAX_ALLOC_IN_BUF - sizeof(Rec_chunk);
+    if (v > 0 && (size_t)v < hard) return (size_t)v;
+    /* Doubling all the way to a full heap chunk leaves every page's last
+    chunk up to 16KB empty: measured 27% of allocated bytes wasted against
+    17% at 2KB, and 13 apply batches against 11. Beyond that the header
+    count starts to tell -- 512 bytes allocates 44.2M chunks for the same
+    11 batches, 256 bytes allocates 56.9M. */
+    return (v == 0) ? (size_t)2048 : hard;
+  }();
+  return cap;
+}
+
+/** Worst case packed header: type 1, LSN delta 10, mtr span 5, length 5.
+The LSN delta needs the full 10 because it is unbounded -- the gap between
+two records of one page is bounded only by the batch, and batch 1 of the
+measured corpus spans 8.5GB, well past 2^32. The mtr span needs 5 because
+recv_add_to_hash_table() asserts it fits uint32_t but nothing narrower. */
+static constexpr size_t REC_HDR_MAX = 1 + 10 + 5 + 5;
+
+/** A body longer than this cannot be packed inline in any chunk, so it is
+stored as a recv_data_t chain and the chunk holds the 8-byte head pointer.
+Writer and reader both derive inline-ness from the length alone, so there is
+no flag that could disagree with the data. */
+static inline size_t recv_packed_inline_max() {
+  return rec_chunk_max() - REC_HDR_MAX;
+}
 
 /** The redo records recovery holds for one page, in ascending LSN order.
 
-Every reader of a page's records goes through this, so how they are stored
-is in one place. Today it walks the UT_LIST of recv_t threaded through
-recv_addr_t::rec_list, which is the representation this class exists to
-replace: 40 bytes of recv_t around a ~24-byte payload, 16 of them the
-prev/next pointers of a list that is only ever appended to in order and
-walked forward once.
+Every reader and the two writers go through this, so the encoding lives in
+one place. Records are packed one after another into Rec_chunks:
 
-body() always returns a contiguous buffer. A body too long to ride inline
-after its recv_t is stored as a recv_data_t chain; the iterator materialises
-it into scratch it owns, so callers never see the difference. The scratch is
-reused across records rather than malloc/free'd per record, which is what the
-open-coded loop did.
+    [type 1][lsn delta varint][mtr span varint][len varint][body | chain ptr]
 
-The iterator is single-pass and non-owning: it is valid only while the batch
-that allocated the records is alive, which is the whole of one
-recv_apply_hashed_log_recs() call. */
+replacing a UT_LIST of recv_t, which cost 40 bytes of struct around a ~24
+byte payload -- 16 of them the prev/next of a list only ever appended to in
+order and walked forward once. Measured 67.8 bytes of buffer pool per record
+over 491,241,827 records; this targets ~23.
+
+That matters for time, not just footprint: apply is device bound at 250,000
+IOPS and 4.0-4.2 GB/s, its duration is linear in pages_read at 150-180k
+pages/s, and pages_read is set by how many batches the heap forces.
+
+Chunks start at 64 bytes and double to rec_chunk_max(), because the record
+count per page is extremely skewed: 5.4M of 5.87M pages hold 1 to 7 records
+while a 28k-page tail holds 8192 or more each. A fixed large chunk would
+spend more on the small pages than the packing saves. */
 class Page_recs {
  public:
   explicit Page_recs(const recv_addr_t *addr)
-      : m_next(addr == nullptr ? nullptr : UT_LIST_GET_FIRST(addr->rec_list)) {}
+      : m_chunk(addr == nullptr ? nullptr : addr->chunk_head) {
+    if (m_chunk != nullptr) m_prev_lsn = m_chunk->base_lsn;
+  }
 
   /** @return true when this page has no records at all */
   static bool empty(const recv_addr_t *addr) {
-    return addr == nullptr || UT_LIST_GET_FIRST(addr->rec_list) == nullptr;
+    return addr == nullptr || addr->chunk_head == nullptr;
   }
 
   /** @return true when the first record re-initialises the whole page, so
-  its previous contents are irrelevant. Both callers of this ask exactly
-  that question, so they do not need the type itself. */
+  its previous contents are irrelevant. Both callers ask exactly that, so
+  they never need the type itself. The type is the first byte of the first
+  chunk, so this decodes nothing. */
   static bool first_is_page_init(const recv_addr_t *addr) {
-    if (addr == nullptr) return false;
-    const recv_t *f = UT_LIST_GET_FIRST(addr->rec_list);
-    if (f == nullptr) return false;
-    return f->type() == MLOG_INIT_FILE_PAGE2 ||
-           f->type() == MLOG_INIT_FILE_PAGE;
+    if (empty(addr)) return false;
+    const mlog_id_t t = (mlog_id_t)addr->chunk_head->data()[0];
+    return t == MLOG_INIT_FILE_PAGE2 || t == MLOG_INIT_FILE_PAGE;
   }
 
   /** Advance to the next record. @return false when there are none left. */
   bool next() {
-    m_cur = m_next;
-    if (m_cur == nullptr) return false;
-    m_next = UT_LIST_GET_NEXT(rec_list, m_cur);
+    while (m_chunk != nullptr && m_off >= m_chunk->used) {
+      m_chunk = m_chunk->next;
+      m_off = 0;
+      if (m_chunk != nullptr) m_prev_lsn = m_chunk->base_lsn;
+    }
+    if (m_chunk == nullptr) return false;
+
+    const byte *p = m_chunk->data() + m_off;
+    m_type = *p++;
+    uint64_t v;
+    p = leb_read(p, &v);
+    m_start_lsn = m_prev_lsn + v;
+    m_prev_lsn = m_start_lsn;
+    p = leb_read(p, &v);
+    m_end_delta = (uint32_t)v;
+    p = leb_read(p, &v);
+    m_len = (uint32_t)v;
+
+    if (m_len > recv_packed_inline_max()) {
+      memcpy(&m_chain, p, sizeof(m_chain));
+      m_body = nullptr;
+      p += sizeof(m_chain);
+    } else {
+      m_chain = nullptr;
+      m_body = (m_len == 0) ? nullptr : p;
+      p += m_len;
+    }
+    m_off = (uint32_t)(p - m_chunk->data());
     return true;
   }
 
-  lsn_t start_lsn() const { return m_cur->start_lsn; }
-  lsn_t end_lsn() const { return m_cur->end_lsn(); }
-  mlog_id_t type() const { return m_cur->type(); }
-  uint32_t len() const { return m_cur->len; }
+  lsn_t start_lsn() const { return m_start_lsn; }
+  lsn_t end_lsn() const { return m_start_lsn + m_end_delta; }
+  mlog_id_t type() const { return (mlog_id_t)m_type; }
+  uint32_t len() const { return m_len; }
 
   /** @return the record body, contiguous, or nullptr when it has none.
-  Valid until the next next() or the next chained record on this thread.
-
-  The scratch for chained bodies is deliberately NOT a member. Held as one,
-  it is constructed and destroyed once per page -- 4,943,035 times on the
-  measured corpus -- and being non-trivially destructible it forces the
-  iterator to stay addressable rather than living in registers, which cost
-  3-5% on every configuration measured. It lives out of line and thread
-  local instead, so the hot path here is two branches and a pointer. */
+  Valid until the next next(), or until the next chained record on this
+  thread. */
   const byte *body() const {
-    recv_t *r = const_cast<recv_t *>(m_cur);
-    if (r->len == 0) return nullptr;
-    if (r->body_inline) return r->inline_body();
-    return chained_body(r);
+    if (m_chain == nullptr) return m_body;
+    return chained_body(m_chain, m_len);
   }
 
- private:
-  /** Cold: a body too long to ride inline after its recv_t. recs_chained was
-  0 over 491,241,827 records on the measured corpus, so this never runs
-  there, but it must stay correct for the bodies that do exceed
-  RECV_INLINE_BODY_MAX. */
-  static const byte *chained_body(recv_t *r);
+  /** Append one record. start_lsn must not go backwards for a page: the
+  delta encoding depends on it, and the apply path already asserted it. */
+  static void append(mem_heap_t *heap, recv_addr_t *addr, mlog_id_t type,
+                     lsn_t start_lsn, lsn_t end_lsn, const byte *body,
+                     const byte *rec_end);
 
-  const recv_t *m_cur{nullptr};
-  const recv_t *m_next{nullptr};
+ private:
+  static const byte *chained_body(recv_data_t *chain, uint32_t len);
+
+  const Rec_chunk *m_chunk;
+  uint32_t m_off{0};
+  lsn_t m_prev_lsn{0};
+  lsn_t m_start_lsn{0};
+  uint32_t m_end_delta{0};
+  uint32_t m_len{0};
+  const byte *m_body{nullptr};
+  recv_data_t *m_chain{nullptr};
+  uint8_t m_type{0};
 };
 
-const byte *Page_recs::chained_body(recv_t *r) {
+const byte *Page_recs::chained_body(recv_data_t *chain, uint32_t len) {
   static thread_local std::vector<byte> scratch;
-  if (scratch.size() < r->len) scratch.resize(r->len);
-  recv_data_copy_to_buf(scratch.data(), r);
+  if (scratch.size() < len) scratch.resize(len);
+  recv_data_copy_to_buf(scratch.data(), chain, len);
   return scratch.data();
+}
+
+void Page_recs::append(mem_heap_t *heap, recv_addr_t *addr, mlog_id_t type,
+                       lsn_t start_lsn, lsn_t end_lsn, const byte *body,
+                       const byte *rec_end) {
+  const size_t len = (size_t)(rec_end - body);
+  const bool inln = len <= recv_packed_inline_max();
+
+  ut_a(end_lsn >= start_lsn &&
+       end_lsn - start_lsn <= std::numeric_limits<uint32_t>::max());
+  ut_a(addr->chunk_head == nullptr || start_lsn >= addr->last_lsn);
+
+  /* A body too long for any chunk keeps the old chain, in pieces a
+  buffer-backed heap can actually allocate. */
+  recv_data_t *chain = nullptr;
+  if (!inln) {
+    recv_data_t **prev_field = &chain;
+    const byte *b = body;
+    while (rec_end > b) {
+      size_t n = (size_t)(rec_end - b);
+      if (n > RECV_DATA_BLOCK_SIZE) n = RECV_DATA_BLOCK_SIZE;
+      recv_data_t *rd =
+          static_cast<recv_data_t *>(mem_heap_alloc(heap, sizeof(*rd) + n));
+      *prev_field = rd;
+      memcpy(rd + 1, b, n);
+      prev_field = &rd->next;
+      b += n;
+    }
+    *prev_field = nullptr;
+  }
+
+  const lsn_t delta =
+      (addr->chunk_head == nullptr) ? 0 : start_lsn - addr->last_lsn;
+  const size_t need = 1 + leb_size(delta) + leb_size(end_lsn - start_lsn) +
+                      leb_size(len) + (inln ? len : sizeof(chain));
+
+  Rec_chunk *c = addr->chunk_tail;
+  if (c == nullptr || c->used + need > c->cap) {
+    size_t cap = (c == nullptr) ? 64 : (size_t)c->cap * 2;
+    if (cap > rec_chunk_max()) cap = rec_chunk_max();
+    if (cap < need) cap = need;
+    ut_a(cap <= rec_chunk_max());
+
+    Rec_chunk *nc =
+        static_cast<Rec_chunk *>(mem_heap_alloc(heap, sizeof(Rec_chunk) + cap));
+    nc->next = nullptr;
+    nc->base_lsn = start_lsn;
+    nc->used = 0;
+    nc->cap = (uint32_t)cap;
+    if (c == nullptr) {
+      addr->chunk_head = nc;
+    } else {
+      c->next = nc;
+    }
+    addr->chunk_tail = nc;
+    c = nc;
+    if (xb_recv_census_on()) {
+      xb_recv_stats.chunk_bytes_alloc.fetch_add(sizeof(Rec_chunk) + cap,
+                                                std::memory_order_relaxed);
+      xb_recv_stats.chunks_made.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  /* The first record of a chunk is stored as a zero delta from base_lsn, so
+  decoding is uniform and a chunk never depends on the chunk before it. */
+  const lsn_t enc_delta = (c->used == 0) ? (start_lsn - c->base_lsn) : delta;
+
+  byte *w = c->data() + c->used;
+  *w++ = (byte)type;
+  w = leb_write(w, enc_delta);
+  w = leb_write(w, end_lsn - start_lsn);
+  w = leb_write(w, len);
+  if (inln) {
+    if (len > 0) memcpy(w, body, len);
+    w += len;
+  } else {
+    memcpy(w, &chain, sizeof(chain));
+    w += sizeof(chain);
+  }
+  c->used = (uint32_t)(w - c->data());
+  ut_a(c->used <= c->cap);
+  /* Per record, so it must stay behind the census: one global atomic bumped
+  490,608,190 times cost 10s when it was left on. */
+  if (xb_recv_census_on()) {
+    xb_recv_stats.chunk_bytes_used.fetch_add(need, std::memory_order_relaxed);
+  }
+  addr->last_lsn = start_lsn;
 }
 
 /** Read-ahead area in applying log records to file pages */
@@ -3314,13 +3494,20 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
   /* check if we already have a Heap for this space id */
   auto space = xtrabackup::recv_get_page_map(space_id);
 
-  /* Mirror recv_add_to_hash_table()'s allocation exactly: descriptor plus
-  an inline body when it fits one chunk, otherwise descriptor plus the
-  chain head pointer and then the chunks below. */
+  /* Mirror what Page_recs::append() will actually store, or --prepare's
+  memory need is over-predicted by roughly 3x.
+
+  It cannot mirror it exactly: the LSN delta depends on the previous record
+  of the same page, which this pass does not track, and records land in
+  shared chunks rather than one allocation each. Both are deliberately
+  over-estimated rather than under: the LSN delta is charged its worst case
+  of 10 bytes, and every record is charged as if it started a chunk. An
+  estimate that is too low would have --prepare run out of the memory it was
+  promised, which is far worse than reserving a little too much. */
   const size_t est_body_len = (size_t)(rec_end - body);
-  const bool est_inline = est_body_len <= RECV_INLINE_BODY_MAX;
+  const bool est_inline = est_body_len <= recv_packed_inline_max();
   const size_t est_recv_size =
-      sizeof(recv_t) + (est_inline ? est_body_len : sizeof(recv_data_t *));
+      REC_HDR_MAX + (est_inline ? est_body_len : sizeof(recv_data_t *));
 
   pxb_mem_block *last_block = space->m_blocks.back();
   if (last_block->len < (last_block->free + MEM_SPACE_NEEDED(est_recv_size))) {
@@ -3329,11 +3516,13 @@ static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
   last_block->free = last_block->free + MEM_SPACE_NEEDED(est_recv_size);
 
   if (space->m_pages.find(page_no) == space->m_pages.end()) {
+    /* A new page costs its recv_addr_t and its first chunk header. */
+    const size_t est_page_size = sizeof(recv_addr_t) + sizeof(Rec_chunk);
     if (last_block->len <
-        (last_block->free + MEM_SPACE_NEEDED(sizeof(recv_addr_t)))) {
-      last_block = xtrabackup::add_new_block(space, sizeof(recv_addr_t));
+        (last_block->free + MEM_SPACE_NEEDED(est_page_size))) {
+      last_block = xtrabackup::add_new_block(space, est_page_size);
     }
-    last_block->free = last_block->free + MEM_SPACE_NEEDED(sizeof(recv_addr_t));
+    last_block->free = last_block->free + MEM_SPACE_NEEDED(est_page_size);
     space->m_pages.insert(page_no);
   }
 
@@ -3405,8 +3594,8 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
 #ifdef XTRABACKUP
   xb_recv_stats_note_body((uint64_t)(rec_end - body));
-  xb_recv_stats_note_widths(end_lsn - start_lsn,
-                            (size_t)(rec_end - body) > RECV_INLINE_BODY_MAX);
+  xb_recv_stats_note_widths(
+      end_lsn - start_lsn, (size_t)(rec_end - body) > recv_packed_inline_max());
   if (xb_scan_digest) {
     xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
                        (uint32_t)(rec_end - body), body);
@@ -3416,30 +3605,6 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
   recv_sys_t::Space *space;
 
   space = recv_get_page_map(space_id, true);
-
-  /* Carry the body in the same allocation as the descriptor whenever it
-  fits one buffer-backed chunk, which is every ordinary OLTP record. That
-  removes both the recv_data_t header and a pointer chase, and it is the
-  whole point of the packing: less heap per record means fewer apply
-  batches, and a batch costs a full buffer pool invalidation. Records too
-  long for one chunk keep the old chain, with its head stored in the same
-  trailing slot. */
-  const size_t rec_body_len = (size_t)(rec_end - body);
-  const bool body_is_inline = rec_body_len <= RECV_INLINE_BODY_MAX;
-
-  recv_t *recv;
-
-  recv = static_cast<recv_t *>(mem_heap_alloc(
-      space->m_heap,
-      sizeof(*recv) + (body_is_inline ? rec_body_len : sizeof(recv_data_t *))));
-
-  ut_a(end_lsn >= start_lsn &&
-       end_lsn - start_lsn <= std::numeric_limits<uint32_t>::max());
-  recv->type_id = static_cast<uint8_t>(type);
-  recv->end_delta = static_cast<uint32_t>(end_lsn - start_lsn);
-  recv->len = static_cast<uint32_t>(rec_end - body);
-  recv->start_lsn = start_lsn;
-  recv->body_inline = body_is_inline ? 1 : 0;
 
   auto it = space->m_pages.find(page_no);
 
@@ -3471,7 +3636,9 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
     recv_addr->page_no = page_no;
     recv_addr->state = RECV_NOT_PROCESSED;
 
-    UT_LIST_INIT(recv_addr->rec_list);
+    recv_addr->chunk_head = nullptr;
+    recv_addr->chunk_tail = nullptr;
+    recv_addr->last_lsn = 0;
 
     using Value = recv_sys_t::Pages::value_type;
 
@@ -3480,58 +3647,16 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
     ++recv_sys->n_addrs;
   }
 
-  UT_LIST_ADD_LAST(recv_addr->rec_list, recv);
-
-  if (body_is_inline) {
-    /* The common case by a wide margin: the body rode along in the same
-    allocation as the recv_t, so there is nothing to chain and no
-    recv_data_t header to pay for. */
-    if (recv->len > 0) {
-      memcpy(recv->inline_body(), body, recv->len);
-    }
-    return;
-  }
-
-  recv_data_t **prev_field;
-
-  recv_data_t *chain_head = nullptr;
-  prev_field = &chain_head;
-
-  /* Store the log record body in chunks of less than UNIV_PAGE_SIZE:
-  the heap grows into the buffer pool, and bigger chunks could not
-  be allocated */
-
-  while (rec_end > body) {
-    ulint len = rec_end - body;
-
-    if (len > RECV_DATA_BLOCK_SIZE) {
-      len = RECV_DATA_BLOCK_SIZE;
-    }
-
-    recv_data_t *recv_data;
-
-    recv_data = static_cast<recv_data_t *>(
-        mem_heap_alloc(space->m_heap, sizeof(*recv_data) + len));
-
-    *prev_field = recv_data;
-
-    memcpy(recv_data + 1, body, len);
-
-    prev_field = &recv_data->next;
-
-    body += len;
-  }
-
-  *prev_field = nullptr;
-  recv->set_chain(chain_head);
+  Page_recs::append(space->m_heap, recv_addr, type, start_lsn, end_lsn, body,
+                    rec_end);
 }
 
 /** Copies the log record body from recv to buf.
 @param[in]      buf             Buffer of length at least recv->len
 @param[in]      recv            Log record */
-static void recv_data_copy_to_buf(byte *buf, recv_t *recv) {
-  ulint len = recv->len;
-  recv_data_t *recv_data = recv->chain();
+static void recv_data_copy_to_buf(byte *buf, recv_data_t *recv_data,
+                                  uint32_t total) {
+  ulint len = total;
 
   while (len > 0) {
     ulint part_len;
@@ -5115,24 +5240,13 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
   }
 
   const size_t body_len = (size_t)(rec_end - body);
-  const bool body_is_inline = body_len <= RECV_INLINE_BODY_MAX;
+  const bool body_is_inline = body_len <= recv_packed_inline_max();
   xb_recv_stats_note_body((uint64_t)body_len);
   xb_recv_stats_note_widths(end_lsn - start_lsn, !body_is_inline);
   if (xb_scan_digest) {
     xb_worker_note_filed(w, space_id, page_no, start_lsn, end_lsn, (int)type,
                          (uint32_t)body_len, body);
   }
-
-  recv_t *recv = static_cast<recv_t *>(mem_heap_alloc(
-      space->m_heap,
-      sizeof(*recv) + (body_is_inline ? body_len : sizeof(recv_data_t *))));
-  ut_a(end_lsn >= start_lsn &&
-       end_lsn - start_lsn <= std::numeric_limits<uint32_t>::max());
-  recv->type_id = static_cast<uint8_t>(type);
-  recv->end_delta = static_cast<uint32_t>(end_lsn - start_lsn);
-  recv->len = static_cast<uint32_t>(body_len);
-  recv->start_lsn = start_lsn;
-  recv->body_inline = body_is_inline ? 1 : 0;
 
   auto pit = space->m_pages.find(page_no);
   recv_addr_t *recv_addr;
@@ -5144,37 +5258,15 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
     recv_addr->space = space_id;
     recv_addr->page_no = page_no;
     recv_addr->state = RECV_NOT_PROCESSED;
-    UT_LIST_INIT(recv_addr->rec_list);
+    recv_addr->chunk_head = nullptr;
+    recv_addr->chunk_tail = nullptr;
+    recv_addr->last_lsn = 0;
     space->m_pages.insert(pit,
                           recv_sys_t::Pages::value_type{page_no, recv_addr});
     ++w.pages;
   }
-  UT_LIST_ADD_LAST(recv_addr->rec_list, recv);
-
-  if (body_is_inline) {
-    if (recv->len > 0) {
-      memcpy(recv->inline_body(), body, recv->len);
-    }
-    ++w.recs;
-    return;
-  }
-
-  recv_data_t *chain_head = nullptr;
-  recv_data_t **prev_field = &chain_head;
-  while (rec_end > body) {
-    ulint len = rec_end - body;
-    if (len > RECV_DATA_BLOCK_SIZE) {
-      len = RECV_DATA_BLOCK_SIZE;
-    }
-    recv_data_t *recv_data = static_cast<recv_data_t *>(
-        mem_heap_alloc(space->m_heap, sizeof(*recv_data) + len));
-    *prev_field = recv_data;
-    memcpy(recv_data + 1, body, len);
-    prev_field = &recv_data->next;
-    body += len;
-  }
-  *prev_field = nullptr;
-  recv->set_chain(chain_head);
+  Page_recs::append(space->m_heap, recv_addr, type, start_lsn, end_lsn, body,
+                    rec_end);
   ++w.recs;
 }
 
@@ -5356,19 +5448,18 @@ contiguous LSN range below worker i+1's, so concatenating the per-worker lists
 for one page in worker order yields exactly the LSN order the serial parse
 would have produced. Measured at 766 ms for 8,022,819 splices at 32 workers,
 against 5,518 ms of parse. */
-static void splice_rec_list(recv_addr_t::List &dst, recv_addr_t::List &src) {
-  const size_t n = src.get_length();
-  if (n == 0) return;
-  if (dst.get_length() == 0) {
-    dst.first_element = src.first_element;
-    dst.last_element = src.last_element;
+static void splice_rec_list(recv_addr_t *dst, recv_addr_t *src) {
+  if (src->chunk_head == nullptr) return;
+  if (dst->chunk_head == nullptr) {
+    dst->chunk_head = src->chunk_head;
   } else {
-    recv_addr_t::List::get_node(*dst.last_element).next = src.first_element;
-    recv_addr_t::List::get_node(*src.first_element).prev = dst.last_element;
-    dst.last_element = src.last_element;
+    ut_a(src->chunk_head->base_lsn >= dst->last_lsn);
+    dst->chunk_tail->next = src->chunk_head;
   }
-  dst.update_length(static_cast<int>(n));
-  src.clear();
+  dst->chunk_tail = src->chunk_tail;
+  dst->last_lsn = src->last_lsn;
+  src->chunk_head = nullptr;
+  src->chunk_tail = nullptr;
 }
 
 /* Worker heaps adopted after a merge. The recv_t and its body stay where the
@@ -5435,7 +5526,7 @@ static uint64_t merge_into_recv_sys(std::vector<Worker> &ws) {
                       recv_sys_t::Pages::value_type{pkv.first, pkv.second});
           ++n_new;
         } else {
-          splice_rec_list(pit->second->rec_list, pkv.second->rec_list);
+          splice_rec_list(pit->second, pkv.second);
         }
       }
     }
