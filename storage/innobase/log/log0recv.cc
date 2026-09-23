@@ -5128,6 +5128,10 @@ struct Worker {
   moved between 16 and 96 workers (22,540 -> 18,482 for 6x the threads).
   Counted per worker and folded in once per window instead. */
   uint64_t dropped_by_map{0};
+  /* Wall time this worker spent inside run_worker(), so the spread across
+  workers can be measured. They are partitioned by equal byte ranges, but
+  record density is not uniform, so the join waits on the slowest. */
+  uint64_t busy_ns{0};
   lsn_t start_lsn{0};
   lsn_t stop_lsn{0};
   /* Byte budget of pre-checkpoint record data still to be ignored, the
@@ -5393,6 +5397,7 @@ static size_t parse_one_mtr(Worker &w, const byte *ptr, const byte *end,
 
 static void run_worker(const Image &im, uint64_t blo, uint64_t bhi, Worker *w,
                        lsn_t force_start_lsn) {
+  const auto xb_w_t0 = std::chrono::steady_clock::now();
   w->meta = ut::new_withkey<MetadataRecover>(UT_NEW_THIS_FILE_PSI_KEY);
   lsn_t cur;
   if (force_start_lsn != 0) {
@@ -5451,6 +5456,9 @@ static void run_worker(const Image &im, uint64_t blo, uint64_t bhi, Worker *w,
     ++w->mtrs;
   }
   w->stop_lsn = cur;
+  w->busy_ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now() - xb_w_t0)
+                   .count();
 }
 
 /* Splice src onto the end of dst in O(1). Legal because worker i owns a
@@ -5809,6 +5817,18 @@ lsn_t parse_window(const byte *buf, lsn_t window_lsn, size_t len,
     records nobody filed. */
     xb::info() << "XB-PARSCAN window done_lsn=" << done_lsn
                << " last_filed_mtr=" << last_filed;
+  }
+
+  /* Parse worker balance, one atomic set per window. */
+  {
+    uint64_t busy = 0, span = 0;
+    for (auto &w : ws) {
+      busy += w.busy_ns;
+      if (w.busy_ns > span) span = w.busy_ns;
+    }
+    xb_recv_stats.worker_busy_ns.fetch_add(busy, std::memory_order_relaxed);
+    xb_recv_stats.worker_span_ns.fetch_add(span, std::memory_order_relaxed);
+    xb_recv_stats.worker_windows.fetch_add(1, std::memory_order_relaxed);
   }
 
   /* One atomic per window instead of one per dropped record. */

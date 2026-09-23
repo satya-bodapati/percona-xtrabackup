@@ -937,6 +937,12 @@ struct xb_recv_stats_t {
   std::atomic<uint64_t> chunk_bytes_alloc{0};
   std::atomic<uint64_t> chunk_bytes_used{0};
   std::atomic<uint64_t> chunks_made{0};
+  /* Parse worker balance. worker_busy_ns is the sum of all workers' time;
+  worker_span_ns is the sum over windows of the SLOWEST worker, which is what
+  the join actually waits for. Perfect balance makes busy == span * workers. */
+  std::atomic<uint64_t> worker_busy_ns{0};
+  std::atomic<uint64_t> worker_span_ns{0};
+  std::atomic<uint64_t> worker_windows{0};
   /* Field-width census for the packed recv_t work. log2 buckets of the mtr
   LSN span (end_lsn - start_lsn), and a count of bodies too long to ride
   inline, which are the records that force the wide encoding. */

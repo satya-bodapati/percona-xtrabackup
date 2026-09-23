@@ -7344,6 +7344,9 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
       << " chunk_alloc=" << xb_recv_stats.chunk_bytes_alloc.load()
       << " chunk_used=" << xb_recv_stats.chunk_bytes_used.load()
       << " chunks=" << xb_recv_stats.chunks_made.load()
+      << " worker_busy_ms=" << (xb_recv_stats.worker_busy_ns.load() / 1000000)
+      << " worker_span_ms=" << (xb_recv_stats.worker_span_ns.load() / 1000000)
+      << " worker_windows=" << xb_recv_stats.worker_windows.load()
       << " delta_merge_ms=" << xb_delta_merge_ms << " total_ms=" << total_ms
       << " use_memory=" << srv_buf_pool_size
       << " buf_pool_pages=" << buf_pool_get_n_pages()
