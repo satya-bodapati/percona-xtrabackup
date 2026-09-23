@@ -171,6 +171,16 @@ static constexpr size_t REC_HDR_MAX = 1 + 10 + 5 + 5;
 stored as a recv_data_t chain and the chunk holds the 8-byte head pointer.
 Writer and reader both derive inline-ness from the length alone, so there is
 no flag that could disagree with the data. */
+/** Size of a page's first chunk, before doubling. */
+static inline size_t rec_chunk_min() {
+  static const size_t n = []() -> size_t {
+    const char *e = getenv("XB_CHUNK_MIN");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    return (v > 0) ? (size_t)v : 64;
+  }();
+  return n;
+}
+
 static inline size_t recv_packed_inline_max() {
   return rec_chunk_max() - REC_HDR_MAX;
 }
@@ -326,7 +336,7 @@ void Page_recs::append(mem_heap_t *heap, recv_addr_t *addr, mlog_id_t type,
 
   Rec_chunk *c = addr->chunk_tail;
   if (c == nullptr || c->used + need > c->cap) {
-    size_t cap = (c == nullptr) ? 64 : (size_t)c->cap * 2;
+    size_t cap = (c == nullptr) ? rec_chunk_min() : (size_t)c->cap * 2;
     if (cap > rec_chunk_max()) cap = rec_chunk_max();
     if (cap < need) cap = need;
     ut_a(cap <= rec_chunk_max());
