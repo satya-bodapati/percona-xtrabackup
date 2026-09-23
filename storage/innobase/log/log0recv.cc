@@ -164,21 +164,38 @@ class Page_recs {
   uint32_t len() const { return m_cur->len; }
 
   /** @return the record body, contiguous, or nullptr when it has none.
-  Valid until the next next(). */
-  const byte *body() {
+  Valid until the next next() or the next chained record on this thread.
+
+  The scratch for chained bodies is deliberately NOT a member. Held as one,
+  it is constructed and destroyed once per page -- 4,943,035 times on the
+  measured corpus -- and being non-trivially destructible it forces the
+  iterator to stay addressable rather than living in registers, which cost
+  3-5% on every configuration measured. It lives out of line and thread
+  local instead, so the hot path here is two branches and a pointer. */
+  const byte *body() const {
     recv_t *r = const_cast<recv_t *>(m_cur);
     if (r->len == 0) return nullptr;
     if (r->body_inline) return r->inline_body();
-    if (m_scratch.size() < r->len) m_scratch.resize(r->len);
-    recv_data_copy_to_buf(m_scratch.data(), r);
-    return m_scratch.data();
+    return chained_body(r);
   }
 
  private:
+  /** Cold: a body too long to ride inline after its recv_t. recs_chained was
+  0 over 491,241,827 records on the measured corpus, so this never runs
+  there, but it must stay correct for the bodies that do exceed
+  RECV_INLINE_BODY_MAX. */
+  static const byte *chained_body(recv_t *r);
+
   const recv_t *m_cur{nullptr};
   const recv_t *m_next{nullptr};
-  std::vector<byte> m_scratch;
 };
+
+const byte *Page_recs::chained_body(recv_t *r) {
+  static thread_local std::vector<byte> scratch;
+  if (scratch.size() < r->len) scratch.resize(r->len);
+  recv_data_copy_to_buf(scratch.data(), r);
+  return scratch.data();
+}
 
 /** Read-ahead area in applying log records to file pages */
 static const size_t RECV_READ_AHEAD_AREA = 32;
