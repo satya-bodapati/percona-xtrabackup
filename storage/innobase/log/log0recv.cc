@@ -3637,6 +3637,29 @@ void recv_recover_page_func(
   lsn_t start_lsn = 0;
   bool modification_to_page = false;
 
+#ifndef UNIV_HOTBACKUP
+  /* Hoisted out of the record loop below.
+
+  This asks whether recv_addr->space is an active undo tablespace, and
+  recv_addr->space does not change for the whole loop -- it is the page's
+  tablespace. Asking per record asked the same question ~83 times per page
+  (490,608,190 records over 5,870,679 page applies), and it is not a cheap
+  question: for an undo tablespace undo::is_active() takes the global
+  undo::spaces latch and then that space's m_rsegs latch.
+
+  Neither is contended in the sense of waiting -- nothing holds X during
+  apply -- but rw_lock_s_lock() writes the lock object four times on every
+  acquisition (lock_word via lock cmpxchg, last_s_file_name, last_s_line,
+  and the reader_thread XOR accumulator via lock xor), all inside one cache
+  line. With 64 apply threads that line is transferred core to core for each
+  acquisition. perf c2c measured one cache line carrying 84.19% of all HITM
+  traffic in the process, 90.8% of the remote HITMs landing on the
+  reader_thread offset. Evaluating once per page instead of once per record
+  took apply_ms from 50,794 to 25,377 and the run from 90s to 64s, with
+  pages_read byte-identical at 4,943,035. */
+  const bool xb_space_is_active = undo::is_active(recv_addr->space);
+#endif /* !UNIV_HOTBACKUP */
+
 #ifdef XTRABACKUP
   /* Per-page tallies. A page for which xb_applied stays 0 was read purely to
   discover that every record it held was already contained in it -- that read
@@ -3708,7 +3731,7 @@ void recv_recover_page_func(
 
     if (xb_redo_record_applies(recv->start_lsn, page_lsn)
 #ifndef UNIV_HOTBACKUP
-        && undo::is_active(recv_addr->space)
+        && xb_space_is_active
 #endif /* !UNIV_HOTBACKUP */
     ) {
 
@@ -5731,6 +5754,95 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
     default, means the whole window in one call. */
     size_t filled = 0;
     lsn_t read_lsn = start_lsn;
+
+    /* Fill the window with several reads in flight instead of one.
+
+    The single blocking read above is why the producer starves: iostat during
+    the scan shows the device at aqu-sz 0.55 and 20-27% util while mpstat
+    shows 93% idle CPU -- one thread waits on a 128MB pread while all 16
+    parse workers have nothing to do. 22GB at the ~600MB/s that depth-1
+    sustains is 36s, which is the whole of scan_ms; the same device wrote at
+    2.2GB/s during the apply phase of the same run.
+
+    The fix costs no memory, which matters because --use-memory is a bound:
+    the window buffer is malloc'd, so a second buffer would be memory the
+    user did not ask for. Instead the SAME buffer is filled by N threads
+    reading disjoint block-aligned slices of it, so queue depth becomes N at
+    an unchanged footprint.
+
+    Slices are cut on OS_FILE_LOG_BLOCK_SIZE so no reader straddles a block,
+    and each reader calls recv_read_log_seg() exactly as the serial path did,
+    including its internal loop across a redo file boundary. A reader that
+    stops short marks the end of usable log; only the contiguous prefix over
+    all readers is handed on, so a short read in the middle can never let a
+    later slice's bytes be mistaken for valid data.
+
+    XB_PARSCAN_READ_THREADS=1 restores the single-reader behaviour. */
+    const size_t nrd = []() -> size_t {
+      const char *e = getenv("XB_PARSCAN_READ_THREADS");
+      const long v = (e == nullptr) ? 0 : atol(e);
+      if (v > 0) return (size_t)v;
+      return 0; /* 0 = follow the parse thread count */
+    }();
+    size_t readers = (nrd != 0) ? nrd : threads();
+    if (readers == 0) readers = 1;
+    {
+      const size_t blocks_total = wbytes / OS_FILE_LOG_BLOCK_SIZE;
+      if (readers > blocks_total) readers = blocks_total ? blocks_total : 1;
+    }
+
+    if (readers > 1) {
+      const size_t blocks_total = wbytes / OS_FILE_LOG_BLOCK_SIZE;
+      const size_t per = blocks_total / readers;
+      std::vector<size_t> got_bytes(readers, 0);
+      std::vector<bool> hard_fail(readers, false);
+      std::vector<std::thread> rd;
+      rd.reserve(readers);
+      for (size_t i = 0; i < readers; ++i) {
+        const size_t blo = i * per;
+        const size_t bhi = (i == readers - 1) ? blocks_total : blo + per;
+        rd.emplace_back([&, i, blo, bhi]() {
+          const size_t off = blo * OS_FILE_LOG_BLOCK_SIZE;
+          const lsn_t s_lsn = start_lsn + (lsn_t)off;
+          const lsn_t e_lsn = start_lsn + (lsn_t)(bhi * OS_FILE_LOG_BLOCK_SIZE);
+          lsn_t cur = s_lsn;
+          while (cur < e_lsn) {
+            const lsn_t g = recv_read_log_seg(
+                log, window.data() + off + (size_t)(cur - s_lsn), cur, e_lsn);
+            if (g == 0) {
+              hard_fail[i] = true;
+              break;
+            }
+            if (g <= cur) break; /* end of the log inside this slice */
+            cur = g;
+          }
+          got_bytes[i] = (size_t)(cur - s_lsn);
+        });
+      }
+      for (auto &t : rd) t.join();
+
+      /* Only the contiguous prefix is usable. */
+      bool any_hard_fail = hard_fail[0];
+      for (size_t i = 0; i < readers; ++i) {
+        const size_t blo = i * per;
+        const size_t bhi = (i == readers - 1) ? blocks_total : blo + per;
+        const size_t want_i = (bhi - blo) * OS_FILE_LOG_BLOCK_SIZE;
+        filled += got_bytes[i];
+        if (got_bytes[i] != want_i) break; /* short: stop the prefix here */
+      }
+      if (filled == 0 && any_hard_fail) {
+        *io_start_lsn =
+            (filed_through != 0)
+                ? ut_uint64_align_down(filed_through, OS_FILE_LOG_BLOCK_SIZE)
+                : start_lsn;
+        xb::info() << "XB-PARSCAN windows=" << windows
+                   << " filed_through=" << filed_through << " exit=read_eof";
+        return false;
+      }
+      read_lsn = start_lsn + (lsn_t)filled;
+      goto window_filled;
+    }
+
     static const size_t read_cap = []() -> size_t {
       const char *e = getenv("XB_PARSCAN_READ_KB");
       const long v = (e == nullptr) ? 0 : atol(e);
@@ -5763,6 +5875,7 @@ bool drive(log_t &log, size_t *max_memory, lsn_t *io_start_lsn, lsn_t to_lsn) {
       filled += (size_t)(got - read_lsn);
       read_lsn = got;
     }
+  window_filled:
     if (filled == 0) break;
 
     const uint64_t blocks = valid_block_prefix(window.data(), start_lsn,
