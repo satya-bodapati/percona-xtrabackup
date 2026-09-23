@@ -3655,8 +3655,14 @@ void recv_recover_page_func(
   acquisition. perf c2c measured one cache line carrying 84.19% of all HITM
   traffic in the process, 90.8% of the remote HITMs landing on the
   reader_thread offset. Evaluating once per page instead of once per record
-  took apply_ms from 50,794 to 25,377 and the run from 90s to 64s, with
-  pages_read byte-identical at 4,943,035. */
+  took apply_ms from 50,794 to 28,154 and the run from 90s to 68s, with
+  pages_read byte-identical at 4,943,035.
+
+  Skipping the two latches outright (undo::is_active(space, false), which
+  exists for exactly this) measured apply_ms 25,377 instead of 28,154, since
+  once per page still takes them 5,870,679 times. That is not done here: it
+  needs an argument that no undo truncation can run concurrently with apply,
+  and the gap is close to this benchmark's run to run spread of about 2s. */
   const bool xb_space_is_active = undo::is_active(recv_addr->space);
 #endif /* !UNIV_HOTBACKUP */
 
