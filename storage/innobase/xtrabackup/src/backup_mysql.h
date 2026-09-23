@@ -201,7 +201,7 @@ char *get_xtrabackup_info(MYSQL *connection);
 
 bool write_xtrabackup_info(MYSQL *connection);
 
-void write_history_record(MYSQL *connection);
+void write_history_record(MYSQL *connection, MYSQL *history);
 
 bool write_backup_config_file();
 

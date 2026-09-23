@@ -63,10 +63,24 @@ static const char *purpose_name(Purpose purpose) {
       return ("redo log archive");
     case Purpose::REDO_CONSUMER:
       return ("redo log consumer");
+    case Purpose::HISTORY_RECORD:
+      return ("history record");
   }
 
   ut_error;
 }
+
+/** The options that describe where the history record is kept. Naming any of
+them is what asks for a connection of its own. */
+static const char *history_dsn_options[] = {"history-host", "history-port",
+                                            "history-socket", "history-user",
+                                            "history-password"};
+
+/** The options that describe how the history connection is secured. They are
+inherited from --ssl-* as a group: naming one of them replaces all five. */
+static const char *history_tls_options[] = {
+    "history-ssl-mode", "history-ssl-ca", "history-ssl-capath",
+    "history-ssl-cert", "history-ssl-key"};
 
 /*********************************************************************/ /**
  Whether any of a set of options was named, on the command line or in a
@@ -109,15 +123,87 @@ int Dsn::apply_tls(MYSQL *mysql) const {
 }
 
 bool Connection_manager::is_configured(Destination destination) const {
-  /* The server being backed up is always described: --host and the options
-  beside it describe it, with the client library's defaults behind them. */
-  return (destination == Destination::MAIN);
+  if (destination == Destination::MAIN) {
+    return (true);
+  }
+
+  return (any_param_set(history_dsn_options) ||
+          any_param_set(history_tls_options));
 }
 
 Dsn Connection_manager::resolve(Destination destination) const {
-  ut_a(destination == Destination::MAIN);
+  Dsn dsn{opt_host, opt_user, opt_password, opt_port, opt_socket, {}};
 
-  return (Dsn{opt_host, opt_user, opt_password, opt_port, opt_socket, {}});
+  if (destination == Destination::MAIN) {
+    return (dsn);
+  }
+
+  /* The history destination starts from the backup one and takes whatever was
+  named for it. */
+  if (check_if_param_set("history-host")) {
+    dsn.host = opt_history_host;
+    /* The socket belongs to the server being backed up, so it is not carried
+    over to another host. */
+    dsn.socket = nullptr;
+  }
+  if (check_if_param_set("history-port")) {
+    dsn.port = opt_history_port;
+  }
+  if (check_if_param_set("history-socket")) {
+    dsn.socket = opt_history_socket;
+  }
+  if (check_if_param_set("history-user")) {
+    dsn.user = opt_history_user;
+    /* The password belongs to the backup account, so it is inherited only
+    together with the user it authenticates. */
+    dsn.password = nullptr;
+  }
+  if (check_if_param_set("history-password")) {
+    dsn.password = opt_history_password;
+  }
+
+  if (any_param_set(history_tls_options)) {
+    dsn.tls.present = true;
+    dsn.tls.ca = opt_history_ssl_ca;
+    dsn.tls.capath = opt_history_ssl_capath;
+    dsn.tls.cert = opt_history_ssl_cert;
+    dsn.tls.key = opt_history_ssl_key;
+
+    if (check_if_param_set("history-ssl-mode")) {
+      dsn.tls.mode = opt_history_ssl_mode;
+    } else if (opt_history_ssl_ca != nullptr ||
+               opt_history_ssl_capath != nullptr) {
+      /* Verify the history server against the CA that was named for it, the
+      way --ssl-ca does for the backup server. */
+      dsn.tls.mode = SSL_MODE_VERIFY_CA;
+    }
+  }
+
+  return (dsn);
+}
+
+bool Connection_manager::validate_options() const {
+  if (!xtrabackup_backup || !is_configured(Destination::HISTORY)) {
+    return (true);
+  }
+
+  if (opt_history == nullptr && opt_incremental_history_name == nullptr &&
+      opt_incremental_history_uuid == nullptr) {
+    xb::error() << "The options describing the connection to the history "
+                   "server require --history, --incremental-history-name or "
+                   "--incremental-history-uuid to be set.";
+    return (false);
+  }
+
+  if (check_if_param_set("history-ssl-mode") &&
+      opt_history_ssl_mode < SSL_MODE_VERIFY_CA &&
+      (opt_history_ssl_ca != nullptr || opt_history_ssl_capath != nullptr)) {
+    xb::warn() << "--history-ssl-ca and --history-ssl-capath have no effect "
+                  "because --history-ssl-mode is below VERIFY_CA. The "
+                  "certificate of the history server will not be verified.";
+  }
+
+  return (true);
 }
 
 bool Connection_manager::connect(Destination destination, Purpose purpose,
@@ -192,10 +278,26 @@ bool Connection_manager::connect(Destination destination, Purpose purpose,
 }
 
 bool Connection_manager::open_shared() {
-  return (connect(Destination::MAIN, Purpose::BACKUP, m_main));
+  if (!connect(Destination::MAIN, Purpose::BACKUP, m_main)) {
+    return (false);
+  }
+
+  /* Opened here rather than when the record is read or written, so that a
+  history server that cannot be reached, or an account that cannot log in to
+  it, fails the backup before any data is copied instead of after it has all
+  been written. */
+  if (is_configured(Destination::HISTORY) &&
+      !connect(Destination::HISTORY, Purpose::HISTORY_RECORD, m_history)) {
+    return (false);
+  }
+
+  return (true);
 }
 
-void Connection_manager::close_shared() { m_main.close(); }
+void Connection_manager::close_shared() {
+  m_history.close();
+  m_main.close();
+}
 
 const std::list<std::string> &Connection::granted_privileges() {
   if (!m_granted_privileges) {

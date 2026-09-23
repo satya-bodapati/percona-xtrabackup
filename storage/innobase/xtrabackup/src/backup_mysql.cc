@@ -607,7 +607,7 @@ static bool select_incremental_lsn_from_history(lsn_t *incremental_lsn) {
   char buf[100];
 
   if (opt_incremental_history_name) {
-    mysql_real_escape_string(main_conn(), buf, opt_incremental_history_name,
+    mysql_real_escape_string(history_conn(), buf, opt_incremental_history_name,
                              strlen(opt_incremental_history_name));
     snprintf(query, sizeof(query),
              "SELECT innodb_to_lsn "
@@ -619,7 +619,7 @@ static bool select_incremental_lsn_from_history(lsn_t *incremental_lsn) {
   }
 
   if (opt_incremental_history_uuid) {
-    mysql_real_escape_string(main_conn(), buf, opt_incremental_history_uuid,
+    mysql_real_escape_string(history_conn(), buf, opt_incremental_history_uuid,
                              strlen(opt_incremental_history_uuid));
     snprintf(query, sizeof(query),
              "SELECT innodb_to_lsn "
@@ -630,7 +630,7 @@ static bool select_incremental_lsn_from_history(lsn_t *incremental_lsn) {
              buf);
   }
 
-  mysql_result = xb_mysql_query(main_conn(), query, true);
+  mysql_result = xb_mysql_query(history_conn(), query, true);
 
   ut_ad(mysql_num_fields(mysql_result) == 1);
   if (!(row = mysql_fetch_row(mysql_result))) {
@@ -1995,15 +1995,19 @@ bool write_xtrabackup_info(MYSQL *connection) {
 }
 
 /*********************************************************************/ /**
- Records the backup in PERCONA_SCHEMA.xtrabackup_history. Everything the
- record says is read from the server that was backed up before the server
- keeping the history is touched.
- @param[in]	connection	the server that was backed up */
-void write_history_record(MYSQL *connection) {
+ Records the backup in PERCONA_SCHEMA.xtrabackup_history.
+
+ The record describes the server that was backed up and is stored on the
+ server that keeps the history, which are the same server unless a history
+ destination was described. This is the one place that needs both of them, and
+ only to carry two values from the first to the second.
+ @param[in]	connection	the server that was backed up
+ @param[in]	history		the server the record is stored on */
+void write_history_record(MYSQL *connection, MYSQL *history) {
   const char *uuid = get_backup_uuid(connection);
   char *server_version = read_mysql_one_value(connection, "SELECT VERSION()");
 
-  insert_history_record(connection, uuid, server_version);
+  insert_history_record(history, uuid, server_version);
 
   free(server_version);
 }
@@ -2062,6 +2066,14 @@ static char *make_argv(char *buf, size_t len, int argc, char **argv) {
     }
     if (strncmp(*argv, "-p", strlen("-p")) == 0) {
       arg = "-p=...";
+    }
+    if (strncmp(*argv, "--history-password", strlen("--history-password")) ==
+        0) {
+      arg = "--history-password=...";
+    }
+    if (strncmp(*argv, "--history_password", strlen("--history_password")) ==
+        0) {
+      arg = "--history_password=...";
     }
     if (strncmp(*argv, "--encrypt-key", strlen("--encrypt-key")) == 0) {
       arg = "--encrypt-key=...";

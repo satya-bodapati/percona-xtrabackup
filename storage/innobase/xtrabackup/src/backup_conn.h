@@ -32,18 +32,20 @@ namespace xb {
 
 /** The server a connection is made to. */
 enum class Destination {
-  MAIN /** the server being backed up */
+  MAIN,   /** the server being backed up */
+  HISTORY /** the server holding PERCONA_SCHEMA.xtrabackup_history */
 };
 
 /** What a connection is for. It is named at the end of the line a connection
 announces itself with, so that the several connections a backup opens can be
 told apart in the log. */
 enum class Purpose {
-  BACKUP,       /** the main connection the backup runs on */
-  MDL_LOCK,     /** holds the MDL of --lock-ddl-per-table */
-  QUERY_KILLER, /** kills queries older than --kill-long-queries-timeout */
-  REDO_ARCHIVE, /** drives innodb_redo_log_archive_* */
-  REDO_CONSUMER /** registers the redo log consumer */
+  BACKUP,        /** the main connection the backup runs on */
+  MDL_LOCK,      /** holds the MDL of --lock-ddl-per-table */
+  QUERY_KILLER,  /** kills queries older than --kill-long-queries-timeout */
+  REDO_ARCHIVE,  /** drives innodb_redo_log_archive_* */
+  REDO_CONSUMER, /** registers the redo log consumer */
+  HISTORY_RECORD /** reads and writes PERCONA_SCHEMA.xtrabackup_history */
 };
 
 /** The TLS settings of a destination.
@@ -145,8 +147,13 @@ class Connection_manager {
  public:
   static Connection_manager &instance();
 
-  /** Whether the user described this destination, that is, whether any of the
-  options that describe it was named.
+  /** Reject the option combinations that cannot be served. Called before
+  anything is copied.
+  @return true if the options are usable */
+  bool validate_options() const;
+
+  /** Whether the user described this destination. MAIN always; HISTORY only
+  when at least one of the --history-* options was named.
   @param[in]	destination	server to ask about
   @return true if it was described */
   bool is_configured(Destination destination) const;
@@ -170,6 +177,11 @@ class Connection_manager {
   /** The connection the backup runs on. */
   Connection &main() { return m_main; }
 
+  /** The connection the history record is read and written over. It is the
+  backup connection itself unless a history destination was described, which is
+  the only place in the code where that distinction is made. */
+  Connection &history() { return m_history.is_open() ? m_history : m_main; }
+
  private:
   /** Describe a destination from the options in force. It is read when the
   connection is made rather than at startup, so that a password taken from the
@@ -179,6 +191,7 @@ class Connection_manager {
   Dsn resolve(Destination destination) const;
 
   Connection m_main{};
+  Connection m_history{}; /** not opened unless HISTORY is described */
 };
 
 }  // namespace xb
@@ -186,6 +199,11 @@ class Connection_manager {
 /** The connection the backup runs on. */
 inline xb::Connection &main_conn() {
   return xb::Connection_manager::instance().main();
+}
+
+/** The connection the backup history record is read and written over. */
+inline xb::Connection &history_conn() {
+  return xb::Connection_manager::instance().history();
 }
 
 /** A server variable to read and the place to put its value. */

@@ -1769,7 +1769,7 @@ bool backup_finish(Backup_context &context) {
   }
 
   if (opt_history != nullptr) {
-    write_history_record(main_conn());
+    write_history_record(main_conn(), history_conn());
   }
 
   report_backup_size();
