@@ -254,6 +254,7 @@ void xb_recv_note_filed(uint32_t space_id, uint32_t page_no, uint64_t start_lsn,
 }
 
 void xb_recv_stats_note_body(uint64_t len) {
+  if (!xb_recv_census_on()) return;
   xb_recv_stats.recs_filed.fetch_add(1, std::memory_order_relaxed);
   xb_recv_stats.body_bytes_filed.fetch_add(len, std::memory_order_relaxed);
   unsigned b = 0;
@@ -262,6 +263,28 @@ void xb_recv_stats_note_body(uint64_t len) {
     if (++b == 15) break;
   }
   xb_recv_stats.body_size_hist[b].fetch_add(1, std::memory_order_relaxed);
+}
+
+/* The field-width census costs two atomic RMWs per record on the parallel
+filing path, which took scan_ms from 32,389 to 57,252 and apply_ms from
+53,651 to 81,478 -- it must not be on for a timing run. XB_RECV_CENSUS=1
+turns it on. */
+bool xb_recv_census_on() {
+  static const bool on = getenv("XB_RECV_CENSUS") != nullptr;
+  return on;
+}
+
+void xb_recv_stats_note_widths(uint64_t end_delta, bool chained) {
+  if (!xb_recv_census_on()) return;
+  unsigned b = 0;
+  uint64_t v = end_delta;
+  while (v >>= 1) {
+    if (++b == 15) break;
+  }
+  xb_recv_stats.end_delta_hist[b].fetch_add(1, std::memory_order_relaxed);
+  if (chained) {
+    xb_recv_stats.recs_chained.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 void xb_recv_stats_note_page(uint64_t n_recs) {
@@ -735,6 +758,9 @@ void recv_sys_init() {
 /** Empties the hash table when it has been fully processed. */
 static void recv_sys_empty_hash() {
   ut_ad(mutex_own(&recv_sys->mutex));
+#ifdef XTRABACKUP
+  const auto xb_eh_t0 = std::chrono::steady_clock::now();
+#endif /* XTRABACKUP */
 
   if (recv_sys->n_addrs != 0) {
     ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_699, ulonglong{recv_sys->n_addrs});
@@ -769,6 +795,13 @@ static void recv_sys_empty_hash() {
       ut::new_withkey<xtrabackup::recv_sys_t::Spaces>(UT_NEW_THIS_FILE_PSI_KEY);
 
 #endif
+#ifdef XTRABACKUP
+  xb_recv_stats.empty_hash_ns.fetch_add(
+      (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - xb_eh_t0)
+          .count(),
+      std::memory_order_relaxed);
+#endif /* XTRABACKUP */
 }
 
 /** Check the 4-byte checksum to the trailer checksum field of a log
@@ -788,6 +821,47 @@ static
 @param[in]      space_id        Tablespace ID for which page map required.
 @param[in]      create          false if lookup only
 @return the space data or null if not found */
+#ifdef XTRABACKUP
+/* Where the recovery heap takes its memory from.
+
+MEM_HEAP_FOR_RECV_SYS is MEM_HEAP_BUFFER, so every heap block comes from
+buf_block_alloc() -- out of the buffer pool. That is why the heap and the
+page frames compete for one budget, and it is the only reason apply runs in
+more than one batch: the batch is cut when the heap fills, not when the work
+is done. The frames a batch needs are bounded by the working set (261,038
+pages, 4.07GB on the measured corpus), but the heap grows without bound with
+redo length, so on a 2G pool 23.2GB of redo takes 26 batches and every batch
+re-reads nearly the whole working set -- 5,870,679 reads for 261,038 distinct
+pages.
+
+With MEM_HEAP_DYNAMIC the heap comes from malloc instead, and the redo budget
+becomes independent of --use-memory. The pool then holds only frames, which is
+what it is for. XB_RECV_HEAP_MB sets the redo budget directly.
+
+XB_RECV_HEAP_DYNAMIC=0 (the default) keeps the stock allocator so both arms
+are measurable from one binary. */
+static uint32_t xb_recv_heap_type() {
+  static const uint32_t t = []() -> uint32_t {
+    const char *e = getenv("XB_RECV_HEAP_DYNAMIC");
+    return (e != nullptr && atoi(e) != 0) ? MEM_HEAP_DYNAMIC
+                                          : MEM_HEAP_FOR_RECV_SYS;
+  }();
+  return t;
+}
+
+/* Redo budget in bytes when the heap is dynamic, 0 when unset. */
+static size_t xb_recv_heap_budget() {
+  static const size_t b = []() -> size_t {
+    const char *e = getenv("XB_RECV_HEAP_MB");
+    const long v = (e == nullptr) ? 0 : atol(e);
+    return (v > 0) ? ((size_t)v << 20) : 0;
+  }();
+  return b;
+}
+#else
+#define xb_recv_heap_type() MEM_HEAP_FOR_RECV_SYS
+#endif /* XTRABACKUP */
+
 static recv_sys_t::Space *recv_get_page_map(space_id_t space_id, bool create) {
   auto it = recv_sys->spaces->find(space_id);
 
@@ -797,7 +871,7 @@ static recv_sys_t::Space *recv_get_page_map(space_id_t space_id, bool create) {
   } else if (create) {
     mem_heap_t *heap;
 
-    heap = mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
+    heap = mem_heap_create(256, UT_LOCATION_HERE, xb_recv_heap_type());
 
     using Space = recv_sys_t::Space;
     using Value = recv_sys_t::Spaces::value_type;
@@ -3276,12 +3350,28 @@ static inline size_t xb_pool_bytes() {
   return (size_t)buf_pool_get_n_pages() * UNIV_PAGE_SIZE;
 }
 
-/* XB_FRAME_AWARE_CUT=0 restores the stock rule (heap alone against
-max_memory) so both arms can be measured with one binary. */
+/* OFF by default: measured a loss at every pool size on a 23.2GB redo corpus
+with a 261,038-page working set.
+
+              stock cut                  frame-aware cut
+   2G    26 batches  5,870,679 reads  89s | 100 batches 14,507,910 reads 138s
+   4G    10          2,436,239        85s |  35          7,441,983       131s
+   8G     5          1,252,673        84s |   8          1,927,296        92s
+  16G     3            707,101        83s |   3            763,804        90s
+
+It does what it promises -- single-page evictions fall from 238,105 to 62,136
+at 2G and to ZERO at 4G and above, where the stock rule still forces 72,261
+and 22,236. It loses anyway, because pages per batch is flat at ~235k at every
+pool size (each batch re-reads nearly the whole working set), so reads are
+proportional to batch count, and making the frames fit can only shorten
+batches. Halving the page set costs five sixths of the redo per batch, because
+the page set saturates against redo length while the heap does not.
+
+XB_FRAME_AWARE_CUT=1 re-enables it for measurement. */
 static bool xb_frame_aware_cut() {
   static const bool on = []() {
     const char *e = getenv("XB_FRAME_AWARE_CUT");
-    return (e == nullptr) || (atoi(e) != 0);
+    return (e != nullptr) && (atoi(e) != 0);
   }();
   return on;
 }
@@ -3365,6 +3455,8 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
 
 #ifdef XTRABACKUP
   xb_recv_stats_note_body((uint64_t)(rec_end - body));
+  xb_recv_stats_note_widths(end_lsn - start_lsn,
+                            (size_t)(rec_end - body) > RECV_INLINE_BODY_MAX);
   if (xb_scan_digest) {
     xb_recv_note_filed(space_id, page_no, start_lsn, end_lsn, (int)type,
                        (uint32_t)(rec_end - body), body);
@@ -3698,6 +3790,14 @@ void recv_recover_page_func(
 #ifdef XTRABACKUP
     ++xb_total;
     ut_a(recv->start_lsn >= xb_prev_lsn);
+    if (xb_prev_lsn != 0 && xb_recv_census_on()) {
+      unsigned gb = 0;
+      uint64_t gv = recv->start_lsn - xb_prev_lsn;
+      while (gv >>= 1) {
+        if (++gb == 15) break;
+      }
+      xb_recv_stats.lsn_gap_hist[gb].fetch_add(1, std::memory_order_relaxed);
+    }
     xb_prev_lsn = recv->start_lsn;
 #endif /* XTRABACKUP */
     end_lsn = recv->end_lsn();
@@ -5025,7 +5125,7 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
   auto it = w.spaces.find(space_id);
   if (it == w.spaces.end()) {
     mem_heap_t *heap =
-        mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
+        mem_heap_create(256, UT_LOCATION_HERE, xb_recv_heap_type());
     it = w.spaces.insert(
         it, recv_sys_t::Spaces::value_type{space_id, recv_sys_t::Space(heap)});
   }
@@ -5053,6 +5153,8 @@ static void file_record(Worker &w, mlog_id_t type, space_id_t space_id,
 
   const size_t body_len = (size_t)(rec_end - body);
   const bool body_is_inline = body_len <= RECV_INLINE_BODY_MAX;
+  xb_recv_stats_note_body((uint64_t)body_len);
+  xb_recv_stats_note_widths(end_lsn - start_lsn, !body_is_inline);
   if (xb_scan_digest) {
     xb_worker_note_filed(w, space_id, page_no, start_lsn, end_lsn, (int)type,
                          (uint32_t)body_len, body);
@@ -5355,7 +5457,7 @@ static uint64_t merge_into_recv_sys(std::vector<Worker> &ws) {
         null dereference the moment anything files into it serially --
         which is exactly what happens when a later window falls back. */
         mem_heap_t *h =
-            mem_heap_create(256, UT_LOCATION_HERE, MEM_HEAP_FOR_RECV_SYS);
+            mem_heap_create(256, UT_LOCATION_HERE, xb_recv_heap_type());
         sit = out->insert(sit, recv_sys_t::Spaces::value_type{
                                    skv.first, recv_sys_t::Space(h)});
         sit->second.m_pages = std::move(skv.second.m_pages);
@@ -6027,6 +6129,19 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn,
 #endif
       size_t delta_hashmap_max_mem =
           UNIV_PAGE_SIZE * (buf_pool_get_n_pages() - pages_to_be_kept_free);
+#ifdef XTRABACKUP
+  /* A dynamic heap does not come out of the buffer pool, so the redo budget
+  is no longer tied to --use-memory. Sized large enough to hold all the redo,
+  the apply runs as a single batch and every page is read exactly once. */
+  if (xb_recv_heap_budget() != 0) {
+    delta_hashmap_max_mem = xb_recv_heap_budget();
+    xb::info() << "XB-HEAP dynamic="
+               << (xb_recv_heap_type() == MEM_HEAP_DYNAMIC)
+               << " redo_budget_mb=" << (delta_hashmap_max_mem >> 20)
+               << " pool_mb="
+               << ((size_t)buf_pool_get_n_pages() * UNIV_PAGE_SIZE >> 20);
+  }
+#endif /* XTRABACKUP */
 
   if (log_test == nullptr) {
     recv_n_frames_for_pages_per_pool_instance =

@@ -7264,9 +7264,15 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
   }
 
   std::ostringstream bhist;
+  std::ostringstream ehist;
+  std::ostringstream ghist;
   for (int i = 0; i < 16; i++) {
     if (i) bhist << ",";
     bhist << st.body_size_hist[i].load();
+    if (i) ehist << ",";
+    ehist << st.end_delta_hist[i].load();
+    if (i) ghist << ",";
+    ghist << st.lsn_gap_hist[i].load();
   }
 
   struct rusage ru;
@@ -7332,6 +7338,7 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
       << (xb_recv_stats.await_no_flush_ns.load() / 1000000)
       << " flush_list_ms=" << (xb_recv_stats.flush_list_ns.load() / 1000000)
       << " invalidate_ms=" << (xb_recv_stats.invalidate_ns.load() / 1000000)
+      << " empty_hash_ms=" << (xb_recv_stats.empty_hash_ns.load() / 1000000)
       << " delta_merge_ms=" << xb_delta_merge_ms << " total_ms=" << total_ms
       << " use_memory=" << srv_buf_pool_size
       << " buf_pool_pages=" << buf_pool_get_n_pages()
@@ -7339,7 +7346,9 @@ static void xb_print_prepare_stats(uint64_t total_ms) {
       << " recs_filed=" << st.recs_filed.load()
       << " body_bytes_filed=" << st.body_bytes_filed.load()
       << " recs_per_page_hist=" << hist.str()
-      << " body_size_hist=" << bhist.str();
+      << " body_size_hist=" << bhist.str()
+      << " recs_chained=" << st.recs_chained.load()
+      << " end_delta_hist=" << ehist.str() << " lsn_gap_hist=" << ghist.str();
 
   /* Free-frame starvation is what the off-CPU profile showed during apply:
   every thread blocked in buf_LRU_get_free_block -> buf_flush_single_page_

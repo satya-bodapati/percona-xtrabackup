@@ -890,6 +890,18 @@ struct xb_recv_stats_t {
   std::atomic<uint64_t> await_no_flush_ns{0};
   std::atomic<uint64_t> flush_list_ns{0};
   std::atomic<uint64_t> invalidate_ns{0};
+  /* Time in recv_sys_empty_hash(): the per-batch teardown of every space
+  heap, the parscan staging heaps and both Spaces maps. */
+  std::atomic<uint64_t> empty_hash_ns{0};
+  /* Field-width census for the packed recv_t work. log2 buckets of the mtr
+  LSN span (end_lsn - start_lsn), and a count of bodies too long to ride
+  inline, which are the records that force the wide encoding. */
+  std::atomic<uint64_t> end_delta_hist[16]{};
+  std::atomic<uint64_t> recs_chained{0};
+  /* log2 buckets of the LSN gap between consecutive records of the SAME
+  page, sampled where apply walks them in order. This is the width of the
+  only field of a packed recv_t that cannot be bounded a priori. */
+  std::atomic<uint64_t> lsn_gap_hist[16]{};
 };
 
 extern xb_recv_stats_t xb_recv_stats;
@@ -899,6 +911,8 @@ void xb_recv_stats_note_page(uint64_t n_recs);
 
 /** Record one filed record's body length. */
 void xb_recv_stats_note_body(uint64_t len);
+void xb_recv_stats_note_widths(uint64_t end_delta, bool chained);
+bool xb_recv_census_on();
 
 /** Fold one filed record into the scan digest. Called from both the serial
 and the parallel filing paths, which is the whole point. */
