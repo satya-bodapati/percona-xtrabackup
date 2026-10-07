@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -172,6 +173,7 @@ class Http_request {
   void append_payload(const char *begin, size_t size) {
     payload_.append(begin, size);
   }
+  const std::string &host() const { return host_; }
   std::string url() const {
     std::string qs = query_string();
     return (protocol_ == HTTP ? "http://" : "https://") + host_ + path_ +
@@ -195,6 +197,7 @@ class Http_request {
 class Http_response {
  private:
   long code{0};
+  CURLcode curl_code_{CURLE_OK};
   Http_buffer body_;
   std::map<std::string, std::string> headers_;
 
@@ -211,6 +214,9 @@ class Http_response {
   }
   long http_code() const { return code; }
   void set_http_code(long http_code) { code = http_code; }
+  /* Result of the transfer when no HTTP response was received */
+  CURLcode curl_code() const { return curl_code_; }
+  void set_curl_code(CURLcode curl_code) { curl_code_ = curl_code; }
   static size_t header_appender(char *ptr, size_t size, size_t nmemb,
                                 void *data);
   static size_t body_appender(char *ptr, size_t size, size_t nmemb,
@@ -220,6 +226,12 @@ class Http_response {
     return size * nmemb;
   }
   void reset_body() { body_.clear(); }
+  void reset() {
+    code = 0;
+    curl_code_ = CURLE_OK;
+    body_.clear();
+    headers_.clear();
+  }
 };
 
 class Http_connection {
@@ -355,6 +367,12 @@ class Http_client {
   std::vector<long> http_retriable_errors{503, 500, 504, 408};
   ulong timeout = 0;
   mutable curl_easy_unique_ptr curl{nullptr, curl_easy_cleanup};
+  /* Hosts that answered a synchronous request at least once. Requests to a
+  host that never answered are not retried, so that a wrong endpoint is
+  reported at once. */
+  mutable std::set<std::string> answered_hosts;
+  /* Resolve the host name again for the next synchronous request */
+  mutable bool fresh_dns{false};
 
   static void async_result_callback(async_callback_t user_callback,
                                     Event_handler *h, CURLcode rc,
@@ -378,6 +396,20 @@ class Http_client {
                                   Http_response &response, Event_handler *h,
                                   async_callback_t callback = {},
                                   bool nowait = false) const;
+  /* Whether a failed request should be retried: a retriable curl or HTTP
+  error, or a provider specific error found by CLIENT::retry_error() */
+  template <typename CLIENT>
+  bool should_retry(CLIENT *client, CURLcode rc, Http_response *resp) const;
+
+  /* Make a synchronous request and retry it like asynchronous requests:
+  same errors, --max-retries and --max-backoff. sign() signs the request
+  again before each retry. Returns what make_request() returned for the
+  last attempt. */
+  template <typename CLIENT>
+  bool make_request_with_retry(
+      CLIENT *client, Http_request &req, Http_response &resp,
+      const std::function<void(Http_request &)> &sign) const;
+
   template <typename CLIENT, typename CALLBACK>
   void callback(CLIENT *client, std::string container, std::string name,
                 Http_request *req, Http_response *resp,

@@ -229,7 +229,10 @@ bool Azure_client::delete_object(const std::string &container,
   signer->sign_request(container, name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(container, name, r, time(0));
+          })) {
     return false;
   }
 
@@ -279,29 +282,19 @@ bool Azure_client::async_delete_object(const std::string &container,
     return false;
   }
 
-  auto f = [callback, container, name, req, resp](
-               CURLcode rc, const Http_connection *conn) mutable -> void {
-    if (rc == CURLE_OK && !resp->ok()) {
-      Azure_response azure_resp;
-      if (!azure_resp.parse_http_response(*resp)) {
-        msg_ts(
-            "%s: Failed to delete object %s/%s. Failed to parse XML "
-            "response.\n",
-            my_progname, container.c_str(), name.c_str());
-      } else if (azure_resp.error()) {
-        msg_ts("%s: Failed to delete object %s/%s. Error message: %s\n",
-               my_progname, container.c_str(), name.c_str(),
-               azure_resp.error_message().c_str());
-      }
-    }
+  /* Retried like uploads and downloads */
+  async_download_callback_t retried_callback = [callback](bool success,
+                                                          const Http_buffer &) {
     if (callback) {
-      callback(rc == CURLE_OK && resp->ok());
+      callback(success);
     }
-    delete req;
-    delete resp;
   };
-
-  http_client->make_async_request(*req, *resp, h, f);
+  http_client->make_async_request(
+      *req, *resp, h,
+      std::bind(&Http_client::callback<Azure_client, async_download_callback_t>,
+                http_client, this, container, name, req, resp, http_client, h,
+                retried_callback, std::placeholders::_1, std::placeholders::_2,
+                1));
 
   return true;
 }
@@ -313,7 +306,10 @@ Http_buffer Azure_client::download_object(const std::string &container,
   signer->sign_request(container, name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(container, name, r, time(0));
+          })) {
     success = false;
     return Http_buffer();
   }
@@ -333,7 +329,10 @@ bool Azure_client::create_container(const std::string &name) {
   signer->sign_request(name, "", req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(name, "", r, time(0));
+          })) {
     return false;
   }
 
@@ -364,7 +363,10 @@ bool Azure_client::container_exists(const std::string &name, bool &exists) {
   signer->sign_request(name, "", req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(name, "", r, time(0));
+          })) {
     return false;
   }
 
@@ -392,7 +394,9 @@ bool Azure_client::is_hns_enabled() {
   signer->sign_request("", "", req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp,
+          [&](Http_request &r) { signer->sign_request("", "", r, time(0)); })) {
     hns_enabled = false;
     return false;
   }
@@ -418,7 +422,10 @@ bool Azure_client::upload_object(const std::string &container,
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(container, name, r, time(0));
+          })) {
     return false;
   }
 
@@ -581,7 +588,10 @@ bool Azure_client::list_objects_common(const std::string &container,
     signer->sign_request(container, "", req, time(0));
 
     Http_response resp;
-    if (!http_client->make_request(req, resp)) {
+    if (!http_client->make_request_with_retry(
+            this, req, resp, [&](Http_request &r) {
+              signer->sign_request(container, "", r, time(0));
+            })) {
       return false;
     }
 
