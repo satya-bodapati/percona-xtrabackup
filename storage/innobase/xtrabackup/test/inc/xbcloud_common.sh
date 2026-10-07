@@ -71,3 +71,49 @@ xbcloud_cleanup() {
      xbcloud --defaults-file=$topdir/xbcloud.cnf delete --parallel=10 ${inc_backup_name}
      xbcloud --defaults-file=$topdir/xbcloud.cnf delete --parallel=10 ${inc2_backup_name}
 }
+
+# Print host:port of the plain http S3 endpoint of XBCLOUD_CREDENTIALS, for
+# inc/xbcloud_fault_proxy.py to forward to. Prints nothing without one.
+function fault_proxy_upstream() {
+  local endpoint
+  endpoint=$(echo ${XBCLOUD_CREDENTIALS} | awk -F's3-endpoint=' '{print $2}' | \
+    awk '{print $1}' | tr -d "'" | tr -d '\\')
+  python3 -c "
+import sys, urllib.parse
+u = urllib.parse.urlparse(sys.argv[1])
+if u.scheme == 'http' and u.hostname:
+    print('%s:%d' % (u.hostname, u.port or 80))
+" "$endpoint"
+}
+
+# Start inc/xbcloud_fault_proxy.py with the given options between xbcloud and
+# the S3 endpoint of XBCLOUD_CREDENTIALS. A proxy started earlier is stopped
+# first. Pass --s3-endpoint=$fault_proxy_endpoint to xbcloud to go through it.
+# Skips the test without a plain http S3 endpoint.
+function start_fault_proxy() {
+  local upstream
+
+  if [ -n "${fault_proxy_pid:-}" ]; then
+    kill $fault_proxy_pid 2>/dev/null
+    wait $fault_proxy_pid 2>/dev/null || true
+  fi
+
+  upstream=$(fault_proxy_upstream)
+  if [ -z "$upstream" ]; then
+    skip_test "Requires a plain http --s3-endpoint in XBCLOUD_CREDENTIALS"
+  fi
+
+  rm -f $topdir/fault_proxy_port
+  python3 "$(dirname "${BASH_SOURCE[0]}")/xbcloud_fault_proxy.py" \
+    --upstream $upstream --port-file $topdir/fault_proxy_port "$@" \
+    > $topdir/fault_proxy.log 2>&1 &
+  fault_proxy_pid=$!
+  trap "kill $fault_proxy_pid 2>/dev/null || true" EXIT
+  for i in $(seq 1 50); do
+    [ -s $topdir/fault_proxy_port ] && break
+    sleep 0.1
+  done
+  [ -s $topdir/fault_proxy_port ] || die "fault proxy did not start"
+  fault_proxy_endpoint="http://127.0.0.1:$(cat $topdir/fault_proxy_port)/"
+  vlog "Fault proxy at $fault_proxy_endpoint: $*"
+}
