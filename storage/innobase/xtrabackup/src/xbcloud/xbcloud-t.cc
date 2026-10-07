@@ -1,6 +1,10 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <fstream>
+#include <map>
+
 #include "azure.h"
 #include "http.h"
 #include "s3.h"
@@ -13,6 +17,50 @@ class Mock_http_client : public xbcloud::Http_client {
  public:
   MOCK_CONST_METHOD2(make_request, bool(const Http_request &, Http_response &));
 };
+
+/* With XBCLOUD_DUMP_SIGNED=<file> the signer tests append each request they
+signed to <file>, one JSON object per line: method, URL, every header
+including Authorization, payload and the test credentials.
+expected_signatures.py signs the same requests with the providers' own
+code to check the expected signatures, see UNIT_TESTS.md. */
+static std::string json_string(const std::string &s) {
+  std::string r = "\"";
+  for (char c : s) {
+    if (c == '"' || c == '\\') r += '\\';
+    r += c;
+  }
+  return r + "\"";
+}
+
+static std::string json_object(const std::map<std::string, std::string> &m) {
+  std::string r = "{";
+  for (const auto &kv : m) {
+    if (r.size() > 1) r += ", ";
+    r += json_string(kv.first) + ": " + json_string(kv.second);
+  }
+  return r + "}";
+}
+
+static void dump_signed(const std::string &scheme, const Http_request &req,
+                        const std::map<std::string, std::string> &credentials) {
+  const char *file = getenv("XBCLOUD_DUMP_SIGNED");
+  if (file == nullptr) return;
+  static const char *methods[] = {"GET", "PUT", "POST", "DELETE", "HEAD"};
+  const auto *info = ::testing::UnitTest::GetInstance()->current_test_info();
+  std::map<std::string, std::string> headers(req.headers().begin(),
+                                             req.headers().end());
+  std::string payload(req.payload().size() ? &req.payload()[0] : "",
+                      req.payload().size());
+  std::ofstream out(file, std::ios::app);
+  out << "{\"test\": "
+      << json_string(std::string(info->test_suite_name()) + "." + info->name())
+      << ", \"scheme\": " << json_string(scheme)
+      << ", \"method\": " << json_string(methods[req.method()])
+      << ", \"url\": " << json_string(req.url())
+      << ", \"payload_base64\": " << json_string(base64_encode(payload))
+      << ", \"headers\": " << json_object(headers)
+      << ", \"credentials\": " << json_object(credentials) << "}\n";
+}
 
 MATCHER_P3(Response, code, body, headers, "") {
   arg.set_http_code(code);
@@ -156,8 +204,8 @@ TEST(s3_client, basicEndpoint) {
 }
 
 TEST(s3v4_signer, basicDNS) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "mybucket.hyhost",
-                   "myobject/");
+  Http_request req(Http_request::GET, Http_request::HTTPS, "mybucket.myhost",
+                   "/myobject/");
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload("test", 4);
@@ -165,20 +213,24 @@ TEST(s3v4_signer, basicDNS) {
   S3_signerV4 signer(LOOKUP_DNS, "example-region", "access_key", "secret_key");
 
   signer.sign_request("mybucket.myhost", "", req, 1555892546);
+  dump_signed("s3v4", req,
+              {{"access_key", "access_key"},
+               {"secret_key", "secret_key"},
+               {"region", "example-region"}});
 
-  ASSERT_STREQ(req.headers().at("Authorization").c_str(),
-               "AWS4-HMAC-SHA256 "
-               "Credential=access_key/20190422/example-region/s3/aws4_request, "
-               "SignedHeaders=content-length;content-type;host;x-amz-content-"
-               "sha256;x-amz-date, "
-               "Signature="
-               "b1b7e962059c0ea4a02dcf05c81c8890d07c4d488e5f261dc20307c3264c821"
-               "1");
+  ASSERT_STREQ(
+      req.headers().at("Authorization").c_str(),
+      "AWS4-HMAC-SHA256 "
+      "Credential=access_key/20190422/example-region/s3/aws4_request, "
+      "SignedHeaders=content-length;content-md5;content-type;host;x-amz-"
+      "content-sha256;x-amz-date, "
+      "Signature="
+      "6ce7c639e8c2ade546450ba4c6395196954ad61ce03f31afb959b5b477736158");
 }
 
 TEST(s3v4_signer, basicPATH) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "hyhost",
-                   "mybucket/myobject/");
+  Http_request req(Http_request::GET, Http_request::HTTPS, "myhost",
+                   "/mybucket/myobject/");
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload("test", 4);
@@ -186,20 +238,24 @@ TEST(s3v4_signer, basicPATH) {
   S3_signerV4 signer(LOOKUP_PATH, "example-region", "access_key", "secret_key");
 
   signer.sign_request("myhost", "mybucket", req, 1555892546);
+  dump_signed("s3v4", req,
+              {{"access_key", "access_key"},
+               {"secret_key", "secret_key"},
+               {"region", "example-region"}});
 
-  ASSERT_STREQ(req.headers().at("Authorization").c_str(),
-               "AWS4-HMAC-SHA256 "
-               "Credential=access_key/20190422/example-region/s3/aws4_request, "
-               "SignedHeaders=content-length;content-type;host;x-amz-content-"
-               "sha256;x-amz-date, "
-               "Signature="
-               "0360d081e45c1407a9b6a43aa5d40389b7a277562c4087f2579f37c7b1a8137"
-               "f");
+  ASSERT_STREQ(
+      req.headers().at("Authorization").c_str(),
+      "AWS4-HMAC-SHA256 "
+      "Credential=access_key/20190422/example-region/s3/aws4_request, "
+      "SignedHeaders=content-length;content-md5;content-type;host;x-amz-"
+      "content-sha256;x-amz-date, "
+      "Signature="
+      "15e7abce844df6ed0550bed339aae95b8c2102e5183329d89af6c94c07912b1d");
 }
 
 TEST(s3v4_signer, sessionToken) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "hyhost",
-                   "mybucket/myobject/");
+  Http_request req(Http_request::GET, Http_request::HTTPS, "myhost",
+                   "/mybucket/myobject/");
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload("test", 4);
@@ -208,20 +264,24 @@ TEST(s3v4_signer, sessionToken) {
                      "session_token");
 
   signer.sign_request("myhost", "mybucket", req, 1555892546);
+  dump_signed("s3v4", req,
+              {{"access_key", "access_key"},
+               {"secret_key", "secret_key"},
+               {"region", "example-region"}});
 
-  ASSERT_STREQ(req.headers().at("Authorization").c_str(),
-               "AWS4-HMAC-SHA256 "
-               "Credential=access_key/20190422/example-region/s3/aws4_request, "
-               "SignedHeaders=content-length;content-type;host;x-amz-content-"
-               "sha256;x-amz-date;x-amz-security-token, "
-               "Signature="
-               "891034a3bd13729689a54d363380ad1849b26bf2b9e461d4c2bdeeca32e0c1c"
-               "e");
+  ASSERT_STREQ(
+      req.headers().at("Authorization").c_str(),
+      "AWS4-HMAC-SHA256 "
+      "Credential=access_key/20190422/example-region/s3/aws4_request, "
+      "SignedHeaders=content-length;content-md5;content-type;host;x-amz-"
+      "content-sha256;x-amz-date;x-amz-security-token, "
+      "Signature="
+      "d77ff1c43559ec89f8a05568edd22857ed9fd08792e812a8b18c69e6df0e11fd");
 }
 
 TEST(s3v4_signer, storageClass) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "hyhost",
-                   "mybucket/myobject/");
+  Http_request req(Http_request::GET, Http_request::HTTPS, "myhost",
+                   "/mybucket/myobject/");
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload("test", 4);
@@ -230,35 +290,43 @@ TEST(s3v4_signer, storageClass) {
                      "session_token", "storage_class");
 
   signer.sign_request("myhost", "mybucket", req, 1555892546);
+  dump_signed("s3v4", req,
+              {{"access_key", "access_key"},
+               {"secret_key", "secret_key"},
+               {"region", "example-region"}});
 
   ASSERT_STREQ(
       req.headers().at("Authorization").c_str(),
       "AWS4-HMAC-SHA256 "
       "Credential=access_key/20190422/example-region/s3/aws4_request, "
-      "SignedHeaders=content-length;content-type;host;x-amz-content-"
-      "sha256;x-amz-date;x-amz-security-token;x-amz-storage-class, "
+      "SignedHeaders=content-length;content-md5;content-type;host;x-amz-"
+      "content-sha256;x-amz-date;x-amz-security-token;x-amz-storage-class, "
       "Signature="
-      "fe6c888f22fb23a7a3fe6f663013b5df3cc761c3777ed4368b325114c885320f");
+      "5963605334276ef5d7ba91149282f808c445603ba0cbebecdd98c95c6cd2bcc9");
 }
 
 TEST(s3v2_signer, basicDNS) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "mybucket.hyhost",
-                   "myobject/");
+  Http_request req(Http_request::GET, Http_request::HTTPS, "mybucket.myhost",
+                   "/myobject/");
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload("test", 4);
 
   S3_signerV2 signer(LOOKUP_DNS, "example-region", "access_key", "secret_key");
 
-  signer.sign_request("mybucket.myhost", "", req, 1555892546);
+  signer.sign_request("mybucket.myhost", "mybucket", req, 1555892546);
+  dump_signed("s3v2", req,
+              {{"access_key", "access_key"},
+               {"secret_key", "secret_key"},
+               {"bucket", "mybucket"}});
 
   ASSERT_STREQ(req.headers().at("Authorization").c_str(),
-               "AWS access_key:0oalADiTB2mEnSgKkj5mFXEJZU4=");
+               "AWS access_key:D/7aWvbtEcfdfKDyeL4meGPyg18=");
 }
 
 TEST(s3v2_signer, basicPATH) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "hyhost",
-                   "mybucket/myobject/");
+  Http_request req(Http_request::GET, Http_request::HTTPS, "myhost",
+                   "/mybucket/myobject/");
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
   req.append_payload("test", 4);
@@ -266,9 +334,11 @@ TEST(s3v2_signer, basicPATH) {
   S3_signerV2 signer(LOOKUP_PATH, "example-region", "access_key", "secret_key");
 
   signer.sign_request("myhost", "mybucket", req, 1555892546);
+  dump_signed("s3v2", req,
+              {{"access_key", "access_key"}, {"secret_key", "secret_key"}});
 
   ASSERT_STREQ(req.headers().at("Authorization").c_str(),
-               "AWS access_key:VQ+0g9rlqRH9SMeRubHF2FW9jeI=");
+               "AWS access_key:D/7aWvbtEcfdfKDyeL4meGPyg18=");
 }
 
 const char *keystone_v3_resp =
@@ -549,8 +619,9 @@ TEST(azure_client, basicEndpoint) {
 }
 
 TEST(azure_signer, basicDNS) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "my_host",
-                   "my_container/my_object");
+  Http_request req(Http_request::GET, Http_request::HTTPS,
+                   "my-storage-account.blob.core.windows.net",
+                   "/mycontainer/myblob");
 
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
@@ -562,16 +633,23 @@ TEST(azure_signer, basicDNS) {
       "Kk7wxQ8V4TPXIuZ53qFwJNtpLUEjYdBe9iGTkMgwUGFHVfFgn2qkgoqDP/b3OAg==",
       0);
   signer.sign_request("mycontainer", "myblob", req, 1555892546);
+  dump_signed(
+      "azure", req,
+      {{"account", "my-storage-account"},
+       {"key",
+        "zUfvsKXc6+2RMJCwvnElnG/"
+        "Kk7wxQ8V4TPXIuZ53qFwJNtpLUEjYdBe9iGTkMgwUGFHVfFgn2qkgoqDP/b3OAg=="}});
 
   ASSERT_STREQ(
       req.headers().at("Authorization").c_str(),
       "SharedKey "
-      "my-storage-account:uZABJWDbfXO/SuDZbxrJnd00kCDV61cevqi423k21A4=");
+      "my-storage-account:YNrOrIc5S0E5u/3cQ2VE1Kg8U2qqfADS1Yd4EHzJsT0=");
 }
 
 TEST(azure_signer, storageClass) {
-  Http_request req(Http_request::GET, Http_request::HTTPS, "my_host",
-                   "my_container/my_object");
+  Http_request req(Http_request::GET, Http_request::HTTPS,
+                   "my-storage-account.blob.core.windows.net",
+                   "/mycontainer/myblob");
 
   req.add_header("Content-Length", "4");
   req.add_header("Content-Type", "application/octet-stream");
@@ -583,9 +661,15 @@ TEST(azure_signer, storageClass) {
       "Kk7wxQ8V4TPXIuZ53qFwJNtpLUEjYdBe9iGTkMgwUGFHVfFgn2qkgoqDP/i3OAg==",
       0, "storage_class");
   signer.sign_request("mycontainer", "myblob", req, 1555892546);
+  dump_signed(
+      "azure", req,
+      {{"account", "my-storage-account"},
+       {"key",
+        "zUfvsKXc6+2RMJCwvnElnG/"
+        "Kk7wxQ8V4TPXIuZ53qFwJNtpLUEjYdBe9iGTkMgwUGFHVfFgn2qkgoqDP/i3OAg=="}});
 
   ASSERT_STREQ(
       req.headers().at("Authorization").c_str(),
       "SharedKey "
-      "my-storage-account:vq5FiJaSj9mrTxeEyp3RRfptEFug4PEozawQG5A+ZHs=");
+      "my-storage-account:3n/W/dj0OZQip5nYl+C2SxJfpl54ieXoUA9IDAYayao=");
 }
