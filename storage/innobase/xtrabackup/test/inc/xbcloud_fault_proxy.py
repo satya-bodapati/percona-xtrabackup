@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Proxy for xbcloud tests that breaks requests to the object storage.
 
-The proxy listens on a free local port, writes that port to PORT_FILE and
-forwards to UPSTREAM (host:port of the object storage). Faults:
+The proxy listens on BIND (127.0.0.1 by default) and PORT (a free one by
+default), writes the port to PORT_FILE and forwards to UPSTREAM (host:port of
+the object storage). Without --match or --duration it only forwards. Faults:
 
   --mode http (default)
       Requests are forwarded one by one, except those the proxy answers
@@ -43,7 +44,7 @@ class Proxy:
         self.sent = 0
         self.fault_start = None
         self.server = None
-        self.port = 0
+        self.port = args.port
         self.writers = set()
 
     def fault_due(self):
@@ -55,6 +56,8 @@ class Proxy:
         return False
 
     def inject(self, request_line):
+        if not self.args.match and self.args.duration <= 0:
+            return False
         if self.args.match:
             if not re.search(self.args.match, request_line):
                 return False
@@ -181,7 +184,7 @@ class Proxy:
     async def listen(self):
         handler = (self.handle_refuse if self.args.mode == 'refuse' else
                    self.handle_http)
-        self.server = await asyncio.start_server(handler, '127.0.0.1',
+        self.server = await asyncio.start_server(handler, self.args.bind,
                                                  self.port)
         self.port = self.server.sockets[0].getsockname()[1]
 
@@ -189,7 +192,8 @@ class Proxy:
         await self.listen()
         with open(self.args.port_file, 'w') as f:
             f.write(str(self.port))
-        log('listening on %d, upstream %s' % (self.port, self.args.upstream))
+        log('listening on %s:%d, upstream %s' %
+            (self.args.bind, self.port, self.args.upstream))
         while True:
             await asyncio.sleep(3600)
 
@@ -198,6 +202,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--upstream', required=True, help='host:port')
     parser.add_argument('--port-file', required=True)
+    parser.add_argument('--bind', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=0)
     parser.add_argument('--mode', choices=('http', 'refuse'), default='http')
     parser.add_argument('--status', type=int, default=503)
     parser.add_argument('--match', default='')
