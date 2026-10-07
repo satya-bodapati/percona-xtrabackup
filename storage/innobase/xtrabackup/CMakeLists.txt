@@ -23,6 +23,31 @@ INSTALL_SCRIPT(${CMAKE_CURRENT_BINARY_DIR}/xbcloud_osenv
   COMPONENT Server
   )
 
+# Build an XtraBackup unit test against the bundled googletest and
+# googlemock, so that no system GTest is needed. The server's unittest tree
+# is disabled in XtraBackup builds (the top-level CMakeLists.txt gates it on
+# "WITH_UNIT_TESTS AND NOT WITH_XTRABACKUP").
+#
+#   XB_ADD_UNIT_TEST(<name> SOURCES <files...> [LIBRARIES <libraries...>])
+FUNCTION(XB_ADD_UNIT_TEST name)
+  CMAKE_PARSE_ARGUMENTS(ARG "" "" "SOURCES;LIBRARIES" ${ARGN})
+  FILE(GLOB GTEST_ROOT
+    ${CMAKE_SOURCE_DIR}/extra/googletest/googletest-release-*)
+  ADD_EXECUTABLE(${name} ${ARG_SOURCES}
+    ${GTEST_ROOT}/googletest/src/gtest-all.cc
+    ${GTEST_ROOT}/googlemock/src/gmock-all.cc
+    ${GTEST_ROOT}/googlemock/src/gmock_main.cc)
+  TARGET_INCLUDE_DIRECTORIES(${name} PRIVATE ${CMAKE_SOURCE_DIR}
+    ${GTEST_ROOT}/googletest/include ${GTEST_ROOT}/googletest
+    ${GTEST_ROOT}/googlemock/include ${GTEST_ROOT}/googlemock)
+  SET_TARGET_PROPERTIES(${name} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory)
+  TARGET_COMPILE_OPTIONS(${name} PRIVATE -Wno-undef)
+  FIND_PACKAGE(Threads REQUIRED)
+  TARGET_LINK_LIBRARIES(${name} ${ARG_LIBRARIES} Threads::Threads)
+  ADD_TEST(NAME ${name} COMMAND ${name})
+ENDFUNCTION()
+
 ADD_SUBDIRECTORY(src)
 ADD_SUBDIRECTORY(doc/source)
 
@@ -45,24 +70,10 @@ ENDIF()
 ADD_CUSTOM_TARGET(link_test_dir ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/test" "${CMAKE_CURRENT_BINARY_DIR}/test")
 
-# PXB-3862: the server's unittest tree is disabled in XtraBackup builds
-# (top-level gates on "WITH_UNIT_TESTS AND NOT WITH_XTRABACKUP"), so build
-# the page-grouping / storage-probe unit tests here, self-contained
-# against the bundled googletest. The tested code is header-only
-# (xb_page_group.h, xb_io_probe.h), so no server libraries are needed.
+# The page-grouping / storage-probe unit tests (PXB-3862). The tested code
+# is header-only (xb_page_group.h, xb_io_probe.h), so no server libraries
+# are needed.
 IF(WITH_UNIT_TESTS)
-  FILE(GLOB XB_GTEST_ROOT
-    ${CMAKE_SOURCE_DIR}/extra/googletest/googletest-release-*/googletest)
-  ADD_EXECUTABLE(xb_page_group-t
-    ${CMAKE_SOURCE_DIR}/unittest/gunit/innodb/xb_page_group-t.cc
-    ${XB_GTEST_ROOT}/src/gtest-all.cc
-    ${XB_GTEST_ROOT}/src/gtest_main.cc)
-  TARGET_INCLUDE_DIRECTORIES(xb_page_group-t PRIVATE
-    ${CMAKE_SOURCE_DIR} ${XB_GTEST_ROOT}/include ${XB_GTEST_ROOT})
-  SET_TARGET_PROPERTIES(xb_page_group-t PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory)
-  TARGET_COMPILE_OPTIONS(xb_page_group-t PRIVATE -Wno-undef)
-  FIND_PACKAGE(Threads REQUIRED)
-  TARGET_LINK_LIBRARIES(xb_page_group-t Threads::Threads)
-  ADD_TEST(NAME xb_page_group COMMAND xb_page_group-t)
+  XB_ADD_UNIT_TEST(xb_page_group-t SOURCES
+    ${CMAKE_SOURCE_DIR}/unittest/gunit/innodb/xb_page_group-t.cc)
 ENDIF()
