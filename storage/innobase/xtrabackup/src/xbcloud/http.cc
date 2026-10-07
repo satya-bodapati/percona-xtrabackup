@@ -578,8 +578,8 @@ bool Http_client::make_request(const Http_request &request,
 
 bool Http_client::make_async_request(const Http_request &request,
                                      Http_response &response, Event_handler *h,
-                                     async_callback_t callback,
-                                     bool nowait) const {
+                                     async_callback_t callback, bool nowait,
+                                     bool retry) const {
   curl_slist *headers = nullptr;
 
   auto curl = make_curl_easy();
@@ -596,6 +596,13 @@ bool Http_client::make_async_request(const Http_request &request,
   auto conn = new Http_connection(std::move(curl), request, response, cb);
   setup_request(conn->curl_easy(), request, response, headers,
                 conn->upload_state());
+  if (retry) {
+    /* The failure may be a host that moved to a new address, for example a
+    proxy or load balancer behind a DNS name. Look the name up again instead
+    of using the address that curl cached, for up to 60 seconds, from before
+    the failure. */
+    curl_easy_setopt(conn->curl_easy(), CURLOPT_DNS_CACHE_TIMEOUT, 0L);
+  }
 
   conn->set_headers(headers);
   h->add_connection(conn, nowait);
@@ -684,7 +691,7 @@ void Http_client::callback(CLIENT *client, std::string container,
         std::bind(&Http_client::callback<CLIENT, CALLBACK>, this, client,
                   container, name, req, resp, http_client, h, callback,
                   std::placeholders::_1, std::placeholders::_2, count + 1),
-        true);
+        true, true);
     return;
   } else if (retry_error && count > client->get_max_retries())
     msg_ts("%s: No more retries for %s\n", my_progname, name.c_str());

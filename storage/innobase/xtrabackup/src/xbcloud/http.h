@@ -358,13 +358,25 @@ class Http_client {
   /*
    * CURLcode::CURLE_OBSOLETE16 is used as backwards compatible error.
    * On newer versions of curl library it translates to CURLcode::CURLE_HTTP2.
+   *
+   * Resolve and connect errors are retried because a proxy, load balancer or
+   * DNS server in the path can be away for a moment. A wrong endpoint still
+   * fails at once: requests to a host that never answered are not retried.
    */
   std::vector<CURLcode> curl_retriable_errors{
-      CURLcode::CURLE_GOT_NOTHING,       CURLcode::CURLE_OPERATION_TIMEDOUT,
-      CURLcode::CURLE_RECV_ERROR,        CURLcode::CURLE_SEND_ERROR,
-      CURLcode::CURLE_SEND_FAIL_REWIND,  CURLcode::CURLE_PARTIAL_FILE,
-      CURLcode::CURLE_SSL_CONNECT_ERROR, CURLcode::CURLE_OBSOLETE16};
-  std::vector<long> http_retriable_errors{503, 500, 504, 408};
+      CURLcode::CURLE_GOT_NOTHING,
+      CURLcode::CURLE_OPERATION_TIMEDOUT,
+      CURLcode::CURLE_RECV_ERROR,
+      CURLcode::CURLE_SEND_ERROR,
+      CURLcode::CURLE_SEND_FAIL_REWIND,
+      CURLcode::CURLE_PARTIAL_FILE,
+      CURLcode::CURLE_SSL_CONNECT_ERROR,
+      CURLcode::CURLE_OBSOLETE16,
+      CURLcode::CURLE_COULDNT_RESOLVE_PROXY,
+      CURLcode::CURLE_COULDNT_RESOLVE_HOST,
+      CURLcode::CURLE_COULDNT_CONNECT};
+  /* 502 comes from a proxy whose backend is down, 429 is throttling. */
+  std::vector<long> http_retriable_errors{503, 500, 504, 408, 502, 429};
   ulong timeout = 0;
   mutable curl_easy_unique_ptr curl{nullptr, curl_easy_cleanup};
   /* Hosts that answered a synchronous request at least once. Requests to a
@@ -395,7 +407,8 @@ class Http_client {
   virtual bool make_async_request(const Http_request &request,
                                   Http_response &response, Event_handler *h,
                                   async_callback_t callback = {},
-                                  bool nowait = false) const;
+                                  bool nowait = false,
+                                  bool retry = false) const;
   /* Whether a failed request should be retried: a retriable curl or HTTP
   error, or a provider specific error found by CLIENT::retry_error() */
   template <typename CLIENT>
