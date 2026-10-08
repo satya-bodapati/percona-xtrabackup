@@ -552,11 +552,17 @@ bool Http_client::make_request(const Http_request &request,
   }
 
   setup_request(curl.get(), request, response, headers, &upload_state);
+  if (fresh_dns) {
+    curl_easy_setopt(curl.get(), CURLOPT_DNS_CACHE_TIMEOUT, 0L);
+    fresh_dns = false;
+  }
 
   auto res = curl_easy_perform(curl.get());
   if (res != CURLE_OK) {
     msg("error: http request failed: %s\n", curl_easy_strerror(res));
     curl_slist_free_all(headers);
+    curl_easy_reset(curl.get());
+    response.set_curl_code(res);
     return false;
   }
 
@@ -597,36 +603,73 @@ bool Http_client::make_async_request(const Http_request &request,
   return true;
 }
 
-template <typename CLIENT, typename CALLBACK>
-void Http_client::callback(CLIENT *client, std::string container,
-                           std::string name, Http_request *req,
-                           Http_response *resp, const Http_client *http_client,
-                           Event_handler *h, CALLBACK callback, CURLcode rc,
-                           const Http_connection *conn, ulong count) const {
-  bool retry_error = false;
+template <typename CLIENT>
+bool Http_client::should_retry(CLIENT *client, CURLcode rc,
+                               Http_response *resp) const {
+  bool retry = false;
 
-  if (http_client->retriable_curl_error(rc)) {
-    retry_error = true;
-  } else if (!retry_error && rc != CURLE_OK && http_client->get_verbose()) {
+  if (retriable_curl_error(rc)) {
+    retry = true;
+  } else if (rc != CURLE_OK && get_verbose()) {
     msg_ts(
         "%s: Curl error (%d) %s is not configured as retriable. You can allow "
         "it by "
         "adding --curl-retriable-errors=%d parameter\n",
         my_progname, rc, curl_easy_strerror(rc), rc);
   }
-  if (http_client->retriable_http_error(conn->response().http_code())) {
-    retry_error = true;
-  } else if (!retry_error && rc != CURLE_OK && http_client->get_verbose()) {
+  if (retriable_http_error(resp->http_code())) {
+    retry = true;
+  } else if (!retry && rc != CURLE_OK && get_verbose()) {
     msg_ts(
         "%s: http error (%lu) is not configured as retriable. You can allow it "
         "by "
         "adding --http-retriable-errors=%lu parameter\n",
-        my_progname, conn->response().http_code(),
-        conn->response().http_code());
+        my_progname, resp->http_code(), resp->http_code());
   }
   if (rc == CURLE_OK && !resp->ok()) {
-    client->retry_error(resp, &retry_error);
+    client->retry_error(resp, &retry);
   }
+  return retry;
+}
+
+template <typename CLIENT>
+bool Http_client::make_request_with_retry(
+    CLIENT *client, Http_request &req, Http_response &resp,
+    const std::function<void(Http_request &)> &sign) const {
+  for (ulong count = 1;; count++) {
+    bool sent = make_request(req, resp);
+    if (sent) {
+      answered_hosts.insert(req.host());
+    }
+    CURLcode rc = sent ? CURLE_OK : resp.curl_code();
+    if (answered_hosts.count(req.host()) == 0 ||
+        !should_retry(client, rc, &resp)) {
+      return sent;
+    }
+    if (count > client->get_max_retries()) {
+      msg_ts("%s: No more retries for %s\n", my_progname, req.url().c_str());
+      return sent;
+    }
+    ulong delay = get_exponential_backoff(count, client->get_max_backoff());
+    msg_ts("%s: Sleeping for %lu ms before retrying %s [%lu]\n", my_progname,
+           delay, req.url().c_str(), count);
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    resp.reset();
+    if (sign) {
+      sign(req);
+    }
+    /* The host may have moved to a new address */
+    fresh_dns = true;
+  }
+}
+
+template <typename CLIENT, typename CALLBACK>
+void Http_client::callback(CLIENT *client, std::string container,
+                           std::string name, Http_request *req,
+                           Http_response *resp, const Http_client *http_client,
+                           Event_handler *h, CALLBACK callback, CURLcode rc,
+                           const Http_connection *conn, ulong count) const {
+  bool retry_error = http_client->should_retry(client, rc, resp);
 
   if (retry_error && count <= client->get_max_retries()) {
     ulong delay = get_exponential_backoff(count, client->get_max_backoff());
@@ -652,6 +695,18 @@ void Http_client::callback(CLIENT *client, std::string container,
   delete req;
   delete resp;
 }
+
+template bool Http_client::make_request_with_retry<S3_client>(
+    S3_client *client, Http_request &req, Http_response &resp,
+    const std::function<void(Http_request &)> &sign) const;
+
+template bool Http_client::make_request_with_retry<Swift_client>(
+    Swift_client *client, Http_request &req, Http_response &resp,
+    const std::function<void(Http_request &)> &sign) const;
+
+template bool Http_client::make_request_with_retry<Azure_client>(
+    Azure_client *client, Http_request &req, Http_response &resp,
+    const std::function<void(Http_request &)> &sign) const;
 
 /* async_download_callback_t and async_upload_callback_t are been resolved as
  * the same function by the compiler, thus no need to re-declare the function
