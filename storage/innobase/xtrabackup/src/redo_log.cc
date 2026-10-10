@@ -665,10 +665,10 @@ uint32_t Archived_Redo_Log_Monitor::get_first_log_block_checksum() const {
   return first_log_block_checksum;
 }
 
-void Archived_Redo_Log_Monitor::skip_for_block(lsn_t lsn,
+bool Archived_Redo_Log_Monitor::skip_for_block(lsn_t lsn,
                                                const byte *redo_buf) {
   bool finished = false;
-  lsn_t bytes_read = OS_FILE_LOG_BLOCK_SIZE;
+  lsn_t &bytes_read = skip_bytes_read;
 
   auto redo_block_no = log_block_get_hdr_no(redo_buf);
   auto redo_block_checksum = log_block_get_checksum(redo_buf);
@@ -691,12 +691,14 @@ void Archived_Redo_Log_Monitor::skip_for_block(lsn_t lsn,
     reader.set_start_lsn(lsn - bytes_read);
     xb::info() << "Archived redo log has caught up at lsn "
                << reader.get_start_lsn();
-    return;
+    return true;
       }
     }
     if (finished) {
+      /* The server archives redo in chunks of several blocks, so the
+      newest blocks may not be archived yet. Try again on the next read. */
       xb::info() << "Finished reading archive, did not find a matching block";
-      return;
+      return false;
     }
   }
 }
@@ -1089,7 +1091,9 @@ void Redo_Log_Data_Manager::track_archived_log(lsn_t start_lsn, const byte *buf,
   if (archived_log_state == ARCHIVED_LOG_NONE) {
     auto no = log_block_get_hdr_no(buf);
     if (no > archived_log_monitor.get_first_log_block_no()) {
-      archived_log_monitor.skip_for_block(start_lsn, buf);
+      if (!archived_log_monitor.skip_for_block(start_lsn, buf)) {
+        return;
+      }
       archived_log_state = ARCHIVED_LOG_MATCHED;
     }
   }
