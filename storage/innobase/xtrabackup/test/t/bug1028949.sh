@@ -64,11 +64,11 @@ function test_bug_1028949()
       --target-dir=$FULL_DIR
   vlog "Log applied to backup"
 
-  xtrabackup --datadir=$mysql_datadir --prepare --apply-log-only \
+  # Apply the last incremental without --apply-log-only. --apply-log-only
+  # skips the persistent dynamic metadata (e.g. AUTO_INCREMENT of mysql.tables)
+  # in the redo, so a separate final --prepare would restore stale counters.
+  xtrabackup --datadir=$mysql_datadir --prepare \
       --target-dir=$FULL_DIR --incremental-dir=$DELTA_DIR
-  vlog "Delta applied to backup"
-
-  xtrabackup --datadir=$mysql_datadir --prepare --target-dir=$FULL_DIR
   vlog "Data prepared for restore"
 
   # removing rows

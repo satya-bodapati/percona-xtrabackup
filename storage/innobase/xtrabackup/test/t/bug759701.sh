@@ -36,11 +36,11 @@ vlog "Preparing backup"
 xtrabackup --prepare --apply-log-only --target-dir=$full_backup_dir
 vlog "Log applied to full backup"
 
-xtrabackup --prepare --apply-log-only --incremental-dir=$inc_backup_dir \
+# Apply the last incremental without --apply-log-only. --apply-log-only
+# skips the persistent dynamic metadata (e.g. AUTO_INCREMENT of mysql.tables)
+# in the redo, so a separate final --prepare would restore stale counters.
+xtrabackup --prepare --incremental-dir=$inc_backup_dir \
     --target-dir=$full_backup_dir
-vlog "Delta applied to full backup"
-
-xtrabackup --prepare --target-dir=$full_backup_dir
 vlog "Data prepared for restore"
 
 # Destroying mysql data
