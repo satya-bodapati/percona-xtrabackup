@@ -238,7 +238,21 @@ function keyring_extra_tests()
     run_cmd $MYSQL $MYSQL_ARGS test -e "INSERT INTO tb1 VALUES (${i})"
   done
   run_cmd $MYSQL $MYSQL_ARGS test -e "CREATE TABLE tb2 (ID INT PRIMARY KEY) ENCRYPTION='Y'"
+  # Prepare reports an encryption header it cannot decrypt only when redo
+  # touches the tablespace. Write to tb2 while the backup runs, so that the
+  # backup has redo for tb2 even when a checkpoint follows the CREATE TABLE.
+  # Roll back, so that the data does not change.
+  stop_file=$topdir/stop_tb2_writes
+  (
+    while [ ! -f $stop_file ]; do
+      $MYSQL $MYSQL_ARGS test -e "BEGIN; INSERT INTO tb2 VALUES (1); ROLLBACK"
+    done
+  ) &
+  writes_pid=$!
   xtrabackup --backup --target-dir=$topdir/backup1
+  touch $stop_file
+  run_cmd wait $writes_pid
+  rm -f $stop_file
   record_db_state test
   stop_server
   rm -rf $mysql_datadir
