@@ -231,8 +231,17 @@ lsn_t Redo_Log_Reader::read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
 
       file = next_file;
 
+      DBUG_EXECUTE_IF("xtrabackup_redo_vanish_on_switch",
+                      xb_redo_vanish_point = 2;);
       file_handle = file->open(Log_file_access_mode::READ_ONLY);
-      ut_a(file_handle.is_open());
+      if (!file_handle.is_open()) {
+        /* The redo consumer keeps the server from removing a file that was
+        not read yet, but if the file is gone the backup cannot continue. */
+        xb::error() << "Cannot open redo log file " << file->m_id
+                    << " that has not been copied yet";
+        m_error = true;
+        return 0;
+      }
     }
 
   } while (start_lsn != end_lsn);
@@ -1069,6 +1078,8 @@ bool Redo_Log_Data_Manager::start() {
                   const char *key = "log_files_find_and_analyze";
                   *const_cast<const char **>(&xtrabackup_debug_sync) = key;
                   force_reopen = true;);
+  DBUG_EXECUTE_IF("xtrabackup_redo_vanish_on_check", xb_redo_vanish_point = 1;);
+  DBUG_EXECUTE_IF("xtrabackup_redo_vanish_on_open", xb_redo_vanish_point = 2;);
 
   thread.start();
 
