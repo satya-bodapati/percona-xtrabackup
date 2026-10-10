@@ -1112,8 +1112,10 @@ void Redo_Log_Data_Manager::track_archived_log(lsn_t start_lsn, const byte *buf,
   }
 
   if (archived_log_state == ARCHIVED_LOG_MATCHED) {
-    if (archived_log_monitor.get_reader().seek_logfile(
-            reader.get_contiguous_lsn())) {
+    bool positioned = archived_log_monitor.get_reader().seek_logfile(
+        reader.get_contiguous_lsn());
+    DBUG_EXECUTE_IF("simulate_archive_behind", positioned = false;);
+    if (positioned) {
       xb::info() << "Switched to archived redo log starting with LSN "
                  << reader.get_contiguous_lsn();
       archived_log_state = ARCHIVED_LOG_POSITIONED;
@@ -1133,6 +1135,16 @@ bool Redo_Log_Data_Manager::has_parsed_lsn(lsn_t lsn) const {
 
 bool Redo_Log_Data_Manager::copy_once(bool is_last, bool *finished) {
   auto start_lsn = reader.get_contiguous_lsn();
+
+  /* When the archive matched, but had not reached the redo read so far, try
+  again before reading live redo, which the server may have removed
+  meanwhile. */
+  if (archived_log_state == ARCHIVED_LOG_MATCHED &&
+      archived_log_monitor.get_reader().seek_logfile(start_lsn)) {
+    xb::info() << "Switched to archived redo log starting with LSN "
+               << start_lsn;
+    archived_log_state = ARCHIVED_LOG_POSITIONED;
+  }
 
   if (archived_log_state == ARCHIVED_LOG_POSITIONED) {
     auto &archive_reader = archived_log_monitor.get_reader();
