@@ -54,7 +54,14 @@ function run_test() {
   vlog "Resuming xtrabackup"
   kill -SIGCONT $xb_pid
 
+  # The server archives redo in chunks of several blocks, so the newest
+  # blocks are not in the archive yet. Keep writing redo so xtrabackup finds
+  # an archived block to switch to.
+  run_inserts &
+  insert_pid=$!
+
   run_cmd wait $job_pid
+  run_cmd wait $insert_pid
 
   if ! grep -q "Switched to archived redo log starting with LSN" $topdir/backup.log ; then
       die "Archived logs were not used"
