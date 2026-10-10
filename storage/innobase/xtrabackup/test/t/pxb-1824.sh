@@ -62,9 +62,11 @@ stop_server
 xtrabackup --prepare --apply-log-only --target-dir=$topdir/backup
 xtrabackup --prepare --apply-log-only --incremental-dir=$topdir/inc \
 	   --target-dir=$topdir/backup
-xtrabackup --prepare --apply-log-only --incremental-dir=$topdir/inc1 \
+# Apply the last incremental without --apply-log-only. --apply-log-only
+# skips the persistent dynamic metadata (e.g. AUTO_INCREMENT of mysql.tables)
+# in the redo, so a separate final --prepare would restore stale counters.
+xtrabackup --prepare --incremental-dir=$topdir/inc1 \
 	   --target-dir=$topdir/backup
-xtrabackup --prepare --target-dir=$topdir/backup
 
 lsn1=$(grep -q flushed_lsn $topdir/backup/xtrabackup_checkpoints)
 lsn2=$(grep -q flushed_lsn $topdir/inc1/xtrabackup_checkpoints)

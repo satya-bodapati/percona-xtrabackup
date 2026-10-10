@@ -130,7 +130,10 @@ rm -r $mysql_datadir
 
 vlog "Applying log"
 xtrabackup --prepare --apply-log-only --target-dir=$topdir/full_backup --parallel=$num_threads
-xtrabackup --prepare --apply-log-only --incremental-dir=$topdir/inc_backup --parallel=$num_threads \
+# Apply the last incremental without --apply-log-only. --apply-log-only
+# skips the persistent dynamic metadata (e.g. AUTO_INCREMENT of mysql.tables)
+# in the redo, so a separate final --prepare would restore stale counters.
+xtrabackup --prepare --incremental-dir=$topdir/inc_backup --parallel=$num_threads \
     --target-dir=$topdir/full_backup 2> $topdir/inc.log
 
 check_pattern_numbers() {
@@ -158,8 +161,6 @@ check_pattern_numbers() {
 }
 
 run_cmd check_pattern_numbers $topdir/inc.log $num_threads
-
-xtrabackup --prepare --target-dir=$topdir/full_backup --parallel=$num_threads
 
 vlog "Restoring MySQL datadir"
 mkdir -p $mysql_datadir
