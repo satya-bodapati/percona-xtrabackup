@@ -648,4 +648,10 @@ inline bool log_data_block_header_deserialize(const byte *buf,
 
 /** @} */
 
+#if defined(XTRABACKUP) && defined(UNIV_DEBUG)
+/** Debug: 1 or 2 makes the next redo file open in log_check_file() or
+Log_file_handle::open() fail as if the server had just removed the file. */
+extern std::atomic<int> xb_redo_vanish_point;
+#endif /* XTRABACKUP && UNIV_DEBUG */
+
 #endif /* !log0files_io_h */
