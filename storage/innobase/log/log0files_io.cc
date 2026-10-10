@@ -257,6 +257,22 @@ Log_file_handle::~Log_file_handle() {
 
 const std::string &Log_file_handle::file_path() const { return m_file_path; }
 
+#if defined(XTRABACKUP) && defined(UNIV_DEBUG)
+std::atomic<int> xb_redo_vanish_point{0};
+
+/** Debug: return the path to open in place of file_path. When point is
+armed, the path names a file that does not exist, as if the server had
+removed the file after its existence was checked. */
+static std::string xb_redo_vanish_path(const std::string &file_path,
+                                       int point) {
+  int expected = point;
+  if (xb_redo_vanish_point.compare_exchange_strong(expected, 0)) {
+    return file_path + ".vanished";
+  }
+  return file_path;
+}
+#endif /* XTRABACKUP && UNIV_DEBUG */
+
 dberr_t Log_file_handle::open() {
   const bool read_only = m_access_mode == Log_file_access_mode::READ_ONLY;
   os_file_stat_t stat_info;
@@ -273,14 +289,36 @@ dberr_t Log_file_handle::open() {
 
   ut_ad(s_n_open.fetch_add(1) + 1 <= LOG_MAX_OPEN_FILES);
 
+#ifdef XTRABACKUP
+  /* The server may remove the file after os_file_get_status() above. */
+#ifdef UNIV_DEBUG
+  const std::string open_path = xb_redo_vanish_path(m_file_path, 2);
+#else
+  const std::string &open_path = m_file_path;
+#endif /* UNIV_DEBUG */
+  m_raw_handle =
+      os_file_create(innodb_log_file_key, open_path.c_str(),
+                     read_only ? OS_FILE_OPEN | OS_FILE_ON_ERROR_NO_EXIT |
+                                     OS_FILE_ON_ERROR_SILENT
+                               : OS_FILE_OPEN,
+                     OS_LOG_FILE, read_only, &m_is_open);
+#else
   m_raw_handle =
       os_file_create(innodb_log_file_key, m_file_path.c_str(), OS_FILE_OPEN,
                      OS_LOG_FILE, read_only, &m_is_open);
+#endif /* XTRABACKUP */
   if (m_is_open) {
     return DB_SUCCESS;
   }
 
   ut_ad(s_n_open.fetch_sub(1) > 0);
+#ifdef XTRABACKUP
+  if (read_only && !os_file_exists(open_path.c_str())) {
+    ib::info() << "Redo log file " << m_file_path
+               << " was removed before it could be opened";
+    return DB_NOT_FOUND;
+  }
+#endif /* XTRABACKUP */
   return DB_ERROR;
 }
 
@@ -1131,8 +1169,26 @@ static dberr_t log_check_file(const Log_files_context &ctx, Log_file_id file_id,
   }
 
   bool ret;
+#ifdef XTRABACKUP
+  /* The server may remove the file after os_file_exists() above. */
+#ifdef UNIV_DEBUG
+  const std::string open_path = xb_redo_vanish_path(file_path, 1);
+#else
+  const std::string &open_path = file_path;
+#endif /* UNIV_DEBUG */
+  auto file = os_file_create(
+      innodb_log_file_key, open_path.c_str(),
+      OS_FILE_OPEN | OS_FILE_ON_ERROR_NO_EXIT | OS_FILE_ON_ERROR_SILENT,
+      OS_LOG_FILE, read_only, &ret);
+  if (!ret && !os_file_exists(open_path.c_str())) {
+    ib::info() << "Redo log file " << file_path
+               << " was removed before it could be opened";
+    return DB_NOT_FOUND;
+  }
+#else
   auto file = os_file_create(innodb_log_file_key, file_path.c_str(),
                              OS_FILE_OPEN, OS_LOG_FILE, read_only, &ret);
+#endif /* XTRABACKUP */
   if (!ret) {
     ib::error(ER_IB_MSG_LOG_FILE_OPEN_FAILED, file_path.c_str(),
               static_cast<int>(DB_ERROR));
