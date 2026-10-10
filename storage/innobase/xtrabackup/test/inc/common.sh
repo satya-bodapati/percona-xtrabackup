@@ -583,6 +583,7 @@ EOF
         fi
 
         # Start the server
+        touch "$MYSQLD_VARDIR/.start_marker"
         if [ -z ${WITH_RR+x} ]; then
           echo "Starting ${MYSQLD} ${MYSQLD_ARGS} $* "
           ${MYSQLD} ${MYSQLD_ARGS} $* &
@@ -599,6 +600,15 @@ EOF
                 then
                     vlog "Made $attempts attempts to find a free port"
                     free_reserved_port $MYSQLD_PORT
+                    if [ $new_instance = yes ]
+                    then
+                      # The failed start already wrote to the new instance,
+                      # e.g. opened a binary log. Retry from a clean install
+                      # so that the files match those of a first start.
+                      find "$MYSQLD_VARDIR" -newer "$MYSQLD_VARDIR/.start_marker" \
+                           -type f ! -path "$MYSQLD_DATADIR/*" -delete
+                      rm -rf "$MYSQLD_DATADIR"
+                    fi
                     if [[ "${type}" = "gr" ]];
                     then
                       # GR variables are set once by bulk_init_gr_variables
