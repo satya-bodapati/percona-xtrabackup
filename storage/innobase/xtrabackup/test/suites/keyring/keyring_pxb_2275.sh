@@ -20,10 +20,14 @@ load_dbase_schema sakila
 load_dbase_data sakila
 mkdir $topdir/backup
 
+# The backups below pause while the server writes redo. Register a redo log
+# consumer, so that the server does not remove redo files not yet copied.
+
 # Test 1 - should fail since we don't have any entry on keyring file yet
 vlog "Test 1 - Should fail as keyring file does not have encryption information"
 run_cmd_expect_failure $XB_BIN $XB_ARGS --innodb-log-file-size=80M --xtrabackup-plugin-dir=${plugin_dir} --lock-ddl=OFF --backup \
---target-dir=$topdir/backup --debug-sync="xtrabackup_pause_after_redo_catchup" 2> >(tee $topdir/backup.log)&
+--target-dir=$topdir/backup --debug-sync="xtrabackup_pause_after_redo_catchup" \
+--register-redo-log-consumer 2> >(tee $topdir/backup.log)&
 
 job_pid=$!
 
@@ -85,7 +89,8 @@ innodb_wait_for_flush_all
 
 
 run_cmd $XB_BIN $XB_ARGS --innodb-log-file-size=80M --lock-ddl=OFF --backup \
---target-dir=$topdir/backup --xtrabackup-plugin-dir=${plugin_dir} ${keyring_args} --debug-sync="xtrabackup_pause_after_redo_catchup" &
+--target-dir=$topdir/backup --xtrabackup-plugin-dir=${plugin_dir} ${keyring_args} --debug-sync="xtrabackup_pause_after_redo_catchup" \
+--register-redo-log-consumer &
 
 job_pid=$!
 
