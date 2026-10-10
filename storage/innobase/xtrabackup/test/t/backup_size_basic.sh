@@ -177,9 +177,11 @@ record_db_state test
 xtrabackup --prepare --apply-log-only --target-dir=$topdir/backup6full
 xtrabackup --prepare --apply-log-only --incremental-dir=$topdir/backup6inc1 \
     --target-dir=$topdir/backup6full
-xtrabackup --prepare --apply-log-only --incremental-dir=$topdir/backup6inc2 \
+# Apply the last incremental without --apply-log-only. --apply-log-only
+# skips the persistent dynamic metadata (e.g. AUTO_INCREMENT of mysql.tables)
+# in the redo, so a separate final --prepare would restore stale counters.
+xtrabackup --prepare --incremental-dir=$topdir/backup6inc2 \
     --target-dir=$topdir/backup6full
-xtrabackup --prepare --target-dir=$topdir/backup6full
 stop_server
 rm -rf $mysql_datadir/*
 xtrabackup --copy-back --target-dir=$topdir/backup6full
