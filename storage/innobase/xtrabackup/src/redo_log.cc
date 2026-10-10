@@ -1069,6 +1069,8 @@ bool Redo_Log_Data_Manager::start() {
                   const char *key = "log_files_find_and_analyze";
                   *const_cast<const char **>(&xtrabackup_debug_sync) = key;
                   force_reopen = true;);
+  DBUG_EXECUTE_IF("xtrabackup_redo_vanish_on_check", xb_redo_vanish_point = 1;);
+  DBUG_EXECUTE_IF("xtrabackup_redo_vanish_on_open", xb_redo_vanish_point = 2;);
 
   thread.start();
 
