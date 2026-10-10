@@ -152,8 +152,10 @@ demanding privileges beyond ListBucket + DeleteObject"
 fi
 
 # An AccessDenied that xbcloud swallowed would show up here even with a clean
-# exit status.
-if grep -qiE 'access denied|forbidden|403' $LOG_DELETE; then
+# exit status. Match 403 only as an HTTP status: object names contain the
+# backup's random UUID, which can contain "403".
+if grep -qiE 'access ?denied|forbidden|error code: 403|error \(403\)' \
+    $LOG_DELETE; then
     cat $LOG_DELETE >&2
     die "PXB-3609: delete-only user hit a permission error during delete"
 fi
