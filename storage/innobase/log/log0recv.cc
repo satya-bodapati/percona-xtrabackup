@@ -2071,7 +2071,10 @@ static void xb_redo_index_load(space_id_t space_id, lsn_t start_lsn) {
                              << " take a consistent backup."
                              << " Retry the backup"
                              << " operation later or with --lock-ddl";
-    exit(EXIT_FAILURE);
+    /* This runs in the redo copy thread. exit() would run global
+    destructors while the main thread is still copying files. */
+    fflush(stderr);
+    _exit(EXIT_FAILURE);
   }
 
   if (ddl_tracker && redo_catchup_completed &&
