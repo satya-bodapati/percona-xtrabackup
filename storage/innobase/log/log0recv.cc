@@ -1682,7 +1682,10 @@ static const byte *recv_parse_or_apply_log_rec_body(
             << " take a consistent backup."
             << " Retry the backup"
             << " operation later or with --lock-ddl";
-        exit(EXIT_FAILURE);
+        /* This runs in the redo copy thread. exit() would run global
+        destructors while the main thread is still copying files. */
+        fflush(stderr);
+        _exit(EXIT_FAILURE);
       }
 #endif /* XTRABACKUP */
 
