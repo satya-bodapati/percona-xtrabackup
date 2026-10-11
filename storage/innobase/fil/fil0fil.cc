@@ -1941,7 +1941,9 @@ fil_space_t *Fil_shard::space_add(ut::unique_ptr<fil_space_t> space) {
     This acquires all shard mutexes, it can't be done after the verification
     the space name and ID is not used. */
     const auto changed = fil_system->update_maximum_space_id(space->id);
-    ut_a(!changed);
+    /* xtrabackup creates spaces found in the backup directory or the delta
+    files without adjusting the maximum space id first. */
+    ut_a(!changed IF_XB(|| true));
   }
 #endif /* !UNIV_HOTBACKUP */
 
