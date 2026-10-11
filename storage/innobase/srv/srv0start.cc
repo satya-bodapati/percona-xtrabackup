@@ -885,6 +885,12 @@ all undo tablespaces that are not undergoing truncation. If an undo tablespace
 is undergoing truncation, it will be recreated in srv_undo_tablespace_fixup().
 @return DB_SUCCESS or error code */
 static dberr_t srv_undo_tablespaces_open() {
+#ifdef XTRABACKUP
+  /* xtrabackup opens the undo tablespaces more than once in a process (backup
+  with lock-ddl=reduced, delta apply and recovery in --prepare). */
+  undo_truncate::xb_reset_space_id_bank();
+#endif /* XTRABACKUP */
+
   /* Open all existing implicit and explicit undo tablespaces.*/
   undo_truncate::spaces->x_lock(UT_LOCATION_HERE);
 
@@ -958,8 +964,6 @@ dberr_t srv_undo_tablespaces_init(bool create_new_db [[maybe_unused]],
                                   bool backup_mode [[maybe_unused]]) {
   ut_a(!create_new_db);
   ut_a(tablespace_scanning != nullptr);
-
-  undo_truncate::xb_reset_space_id_bank();
 
   /* Build the undo number to space id map from the tablespaces found by the
   last scan, the same way srv_start() does after the recovery. */

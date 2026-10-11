@@ -189,7 +189,10 @@ ut::Expected<ut::unique_ptr_aligned<byte[]>> Datafile::read_first_page(
 #ifndef UNIV_HOTBACKUP
   /* If Double-Write Buffer is available, in case the page is corrupted, check
   if it can be recovered from the Double-Write Buffer. */
-  if (!recv_sys->dblwr->empty()) {
+  /* xtrabackup opens .ibd files before the recovery system exists
+  (lock-ddl=reduced --prepare). */
+  if (IF_XB(recv_sys != nullptr &&
+            recv_sys->dblwr != nullptr &&) !recv_sys->dblwr->empty()) {
     const auto logical_page_size =
         std::max((uint32)UNIV_PAGE_SIZE, physical_page_size);
     /* This will set page_for_recovery to either the page.get() supplied or a
