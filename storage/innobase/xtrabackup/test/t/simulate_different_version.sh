@@ -51,49 +51,49 @@ fi
 
 rm $topdir/pxb.log
 
-vlog "case#5 backup should fail with 9.6 version (older 9.x, not 9.7.x)"
+vlog "case#5 backup should fail with 9.7 version (previous LTS, not 26.7.x)"
 
-run_cmd_expect_failure $XB_BIN $XB_ARGS --backup --debug=d,simulate_96_version --target-dir=$topdir/backup 2>&1 | tee $topdir/pxb.log
+run_cmd_expect_failure $XB_BIN $XB_ARGS --backup --debug=d,simulate_97_version --target-dir=$topdir/backup 2>&1 | tee $topdir/pxb.log
 
-if ! grep -q "Unsupported server version: '9.6.99'" $topdir/pxb.log
+if ! grep -q "Unsupported server version: '9.7.99'" $topdir/pxb.log
 then
-  die "xtrabackup did not show 'Unsupported server version' error for 9.6.99"
+  die "xtrabackup did not show 'Unsupported server version' error for 9.7.99"
 fi
 
-if ! grep -q 'only supports backing up and restoring MySQL and Percona Servers of version 9.7.x' $topdir/pxb.log
+if ! grep -q 'only supports backing up and restoring MySQL and Percona Servers of version 26.7.x' $topdir/pxb.log
 then
-  die "xtrabackup did not show 9.7.x-only support message for 9.6.99"
+  die "xtrabackup did not show 26.7.x-only support message for 9.7.99"
 fi
 
-if ! grep -q 'Please use Percona XtraBackup 9.6 for this database.' $topdir/pxb.log
+if ! grep -q 'Please use Percona XtraBackup 9.7 for this database.' $topdir/pxb.log
 then
-  die "xtrabackup did not suggest Percona XtraBackup 9.6 for a 9.6 server"
-fi
-
-rm $topdir/pxb.log
-
-vlog "case#6 backup should fail with 9.8 version (newer 9.x, not 9.7.x)"
-
-run_cmd_expect_failure $XB_BIN $XB_ARGS --backup --debug=d,simulate_98_version --target-dir=$topdir/backup 2>&1 | tee $topdir/pxb.log
-
-if ! grep -q "Unsupported server version: '9.8.0'" $topdir/pxb.log
-then
-  die "xtrabackup did not show 'Unsupported server version' error for 9.8.0"
-fi
-
-if ! grep -q 'only supports backing up and restoring MySQL and Percona Servers of version 9.7.x' $topdir/pxb.log
-then
-  die "xtrabackup did not show 9.7.x-only support message for 9.8.0"
-fi
-
-if ! grep -q 'Please use Percona XtraBackup 9.8 for this database.' $topdir/pxb.log
-then
-  die "xtrabackup did not suggest Percona XtraBackup 9.8 for a 9.8 server"
+  die "xtrabackup did not suggest Percona XtraBackup 9.7 for a 9.7 server"
 fi
 
 rm $topdir/pxb.log
 
-vlog "case#7 backup should succeed on a simulated 9.7.99 server (highest 9.7.x patch)"
+vlog "case#6 backup should fail with 26.10 version (newer, not 26.7.x)"
+
+run_cmd_expect_failure $XB_BIN $XB_ARGS --backup --debug=d,simulate_2610_version --target-dir=$topdir/backup 2>&1 | tee $topdir/pxb.log
+
+if ! grep -q "Unsupported server version: '26.10.0'" $topdir/pxb.log
+then
+  die "xtrabackup did not show 'Unsupported server version' error for 26.10.0"
+fi
+
+if ! grep -q 'only supports backing up and restoring MySQL and Percona Servers of version 26.7.x' $topdir/pxb.log
+then
+  die "xtrabackup did not show 26.7.x-only support message for 26.10.0"
+fi
+
+if ! grep -q 'Please use Percona XtraBackup 26.10 for this database.' $topdir/pxb.log
+then
+  die "xtrabackup did not suggest Percona XtraBackup 26.10 for a 26.10 server"
+fi
+
+rm $topdir/pxb.log
+
+vlog "case#7 backup should succeed on a simulated 26.7.99 server (highest 26.7.x patch)"
 xtrabackup --backup --debug=d,simulate_higher_version --no-server-version-check --target-dir=$topdir/backup
 xtrabackup --prepare --debug=d,simulate_higher_version --no-server-version-check --target-dir=$topdir/backup
 rm -r $topdir/backup

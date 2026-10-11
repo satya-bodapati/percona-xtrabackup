@@ -204,10 +204,12 @@ bool check_server_version(unsigned long version_number,
                   version_string = "9.0.1";);
   DBUG_EXECUTE_IF("simulate_96_version", version_number = 90699;
                   version_string = "9.6.99";);
-  DBUG_EXECUTE_IF("simulate_98_version", version_number = 90800;
-                  version_string = "9.8.0";);
-  DBUG_EXECUTE_IF("simulate_higher_version", version_number = 90799;
+  DBUG_EXECUTE_IF("simulate_97_version", version_number = 90799;
                   version_string = "9.7.99";);
+  DBUG_EXECUTE_IF("simulate_2610_version", version_number = 261000;
+                  version_string = "26.10.0";);
+  DBUG_EXECUTE_IF("simulate_higher_version", version_number = 260799;
+                  version_string = "26.7.99";);
   if (!xtrabackup::utils::get_major_minor_version(MYSQL_SERVER_VERSION,
                                                   pxb_version)) {
     xb::error() << "Failed to parse Percona Xtrabackup version: "
@@ -245,10 +247,10 @@ bool check_server_version(unsigned long version_number,
   pxb24 = pxb24 || ((version_number > 100000 && version_number < 100300) &&
                     server_flavor == FLAVOR_MARIADB);
 
-  /* Percona XtraBackup 9.7 only supports backing up 9.7.x servers
-  (i.e. 9.7.0 up to the highest 9.7.x release, currently expected to be no
-  higher than 9.7.99). Any other server version -- including 9.6.x and
-  9.8.x -- must use its matching PXB release. */
+  /* Percona XtraBackup 26.7 only supports backing up 26.7.x servers
+  (i.e. 26.7.0 up to the highest 26.7.x release, currently expected to be no
+  higher than 26.7.99). Any other server version -- including 9.7.x and
+  26.10.x -- must use its matching PXB release. */
   if (pxb_version != server_version) {
     xb::error() << "Unsupported server version: " << SQUOTE(version_string);
     xb::error()
