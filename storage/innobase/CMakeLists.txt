@@ -391,13 +391,6 @@ IF(MSVC AND NOT WIN32_CLANG)
   ENDFOREACH()
   TARGET_COMPILE_OPTIONS(innodb_zipdecompress PRIVATE "/wd4100")
 ENDIF()
-<<<<<<< HEAD
-
-# Must be after all ADD_DEFINITIONS() to be inherited by the
-# 'xtrabackup' subdirectory
-ADD_SUBDIRECTORY(xtrabackup)
-||||||| dc86e412f18
-=======
 
 IF(MY_COMPILER_IS_GNU AND FPROFILE_USE)
   ADD_COMPILE_FLAGS(page/page0zip.cc COMPILE_FLAGS
@@ -417,4 +410,7 @@ IF(MY_COMPILER_IS_GNU AND FPROFILE_USE)
     STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-error=alloc-size-larger-than=")
   ENDIF()
 ENDIF()
->>>>>>> mysql-8.4.11
+
+# Must be after all ADD_DEFINITIONS() to be inherited by the
+# 'xtrabackup' subdirectory
+ADD_SUBDIRECTORY(xtrabackup)

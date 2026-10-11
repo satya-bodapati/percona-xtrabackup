@@ -3373,21 +3373,18 @@ static bool recv_single_rec(const byte *ptr, const byte *end_ptr) {
 
     default:
 
-      if (recv_recovery_on
+      if (recv_recovery_on) {
 #ifndef UNIV_HOTBACKUP
-          && (space_id == TRX_SYS_SPACE ||
-              fil_tablespace_lookup_for_recovery(space_id))
+        if (space_id == TRX_SYS_SPACE ||
+            fil_tablespace_lookup_for_recovery(space_id))
 #endif /* !UNIV_HOTBACKUP */
-<<<<<<< HEAD
+        {
+          recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
+                                 old_lsn, recv_sys->recovered_lsn);
+        }
       } else if (xtrabackup_estimate_memory) {
         xtrabackup::recv_calculate_hash_heap(type, space_id, page_no, body,
                                              ptr + len, old_lsn);
-||||||| dc86e412f18
-=======
-      ) {
-        recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
-                               old_lsn, recv_sys->recovered_lsn);
->>>>>>> mysql-8.4.11
       }
 
       [[fallthrough]];
@@ -3557,38 +3554,18 @@ static bool recv_multi_rec(const byte *ptr, const byte *end_ptr) {
           break;
         }
 
-        if (recv_recovery_on
+        if (recv_recovery_on) {
 #ifndef UNIV_HOTBACKUP
-            && (space_id == TRX_SYS_SPACE ||
-                fil_tablespace_lookup_for_recovery(space_id))
+          if (space_id == TRX_SYS_SPACE ||
+              fil_tablespace_lookup_for_recovery(space_id))
 #endif /* !UNIV_HOTBACKUP */
-        ) {
-
-<<<<<<< HEAD
+          {
             recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
                                    old_lsn, new_recovered_lsn);
-
-#ifndef UNIV_HOTBACKUP
-          } else {
-            recv_sys->missing_ids.insert(space_id);
           }
-#endif /* !UNIV_HOTBACKUP */
         } else if (xtrabackup_estimate_memory) {
           xtrabackup::recv_calculate_hash_heap(type, space_id, page_no, body,
                                                ptr + len, old_lsn);
-||||||| dc86e412f18
-            recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
-                                   old_lsn, new_recovered_lsn);
-
-#ifndef UNIV_HOTBACKUP
-          } else {
-            recv_sys->missing_ids.insert(space_id);
-          }
-#endif /* !UNIV_HOTBACKUP */
-=======
-          recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
-                                 old_lsn, new_recovered_lsn);
->>>>>>> mysql-8.4.11
         }
     }
 

@@ -384,19 +384,9 @@ telemetry_pfs_metrics.cc
 )
 MYSQL_ADD_PLUGIN(perfschema ${PERFSCHEMA_SOURCES}
   STORAGE_ENGINE MANDATORY STATIC_ONLY
-<<<<<<< HEAD
-  LINK_LIBRARIES extra::rapidjson ext::zlib mysql_gtid)
-
-IF(WITH_UNIT_TESTS AND NOT WITH_XTRABACKUP)
-||||||| dc86e412f18
-  LINK_LIBRARIES extra::rapidjson ext::zlib mysql_gtid)
-
-IF(WITH_UNIT_TESTS)
-=======
   LINK_LIBRARIES extra::rapidjson ext::zlib mysql_gtid extra::unordered_dense
   )
-IF(WITH_UNIT_TESTS)
->>>>>>> mysql-8.4.11
+IF(WITH_UNIT_TESTS AND NOT WITH_XTRABACKUP)
   ADD_SUBDIRECTORY(unittest)
 ENDIF()
 

@@ -5266,24 +5266,12 @@ static void fil_name_write_rename(space_id_t space_id, const char *old_name,
 @param[in]      size            Number of bytes by which the file
                                 is extended starting from the offset
 @param[in,out]  mtr             Mini-transaction */
-<<<<<<< HEAD
 #ifdef XTRABACKUP
 [[maybe_unused]]
 #endif /* XTRABACKUP */
 static void
 fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
                           os_offset_t size, mtr_t *mtr) {
-  ut_ad(space_id != TRX_SYS_SPACE);
-
-||||||| dc86e412f18
-static void fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
-                                      os_offset_t size, mtr_t *mtr) {
-  ut_ad(space_id != TRX_SYS_SPACE);
-
-=======
-static void fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
-                                      os_offset_t size, mtr_t *mtr) {
->>>>>>> mysql-8.4.11
   byte *log_ptr;
 
   if (!mlog_open(mtr, 7 + 8 + 8, log_ptr)) {
@@ -7092,33 +7080,11 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
 
     ut_ad(len > 0);
 
-<<<<<<< HEAD
 #if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP) && defined(UNIV_LINUX)
-    /* Do not write redo log record for temporary tablespace
-    and the system tablespace as they don't need to be recreated.
-    Temporary tablespaces are reinitialized during startup and
-    hence need not be recovered during recovery. The system
-    tablespace is neither recreated nor resized and hence we do
-    not need to redo log any operations on it. */
-    if (!recv_recovery_is_on() && space->purpose != FIL_TYPE_TEMPORARY &&
-        space->id != TRX_SYS_SPACE) {
-||||||| dc86e412f18
-#if !defined(UNIV_HOTBACKUP) && defined(UNIV_LINUX)
-    /* Do not write redo log record for temporary tablespace
-    and the system tablespace as they don't need to be recreated.
-    Temporary tablespaces are reinitialized during startup and
-    hence need not be recovered during recovery. The system
-    tablespace is neither recreated nor resized and hence we do
-    not need to redo log any operations on it. */
-    if (!recv_recovery_is_on() && space->purpose != FIL_TYPE_TEMPORARY &&
-        space->id != TRX_SYS_SPACE) {
-=======
-#if !defined(UNIV_HOTBACKUP) && defined(UNIV_LINUX)
     /* Do not write redo log, during replay and, for temporary tablespaces
     because they are reinitialized during startup hence they need not be
     recovered during replay. */
     if (!recv_recovery_is_on() && space->purpose != FIL_TYPE_TEMPORARY) {
->>>>>>> mysql-8.4.11
       /* Write the redo log record for extending the space */
       mtr_t mtr;
       mtr_start(&mtr);
@@ -11178,16 +11144,7 @@ const byte *fil_tablespace_redo_extend(const byte *ptr, const byte *end,
     return ptr;
   }
 
-<<<<<<< HEAD
 #if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP)
-  const auto result =
-      fil_system->get_scanned_filename_by_space_id(page_id.space());
-||||||| dc86e412f18
-#ifndef UNIV_HOTBACKUP
-  const auto result =
-      fil_system->get_scanned_filename_by_space_id(page_id.space());
-=======
-#ifndef UNIV_HOTBACKUP
   dberr_t err = DB_SUCCESS;
   if (page_id.space() == TRX_SYS_SPACE) {
     /* System tablespace must have been loaded in the fil system at the time
@@ -11197,7 +11154,6 @@ const byte *fil_tablespace_redo_extend(const byte *ptr, const byte *end,
   } else {
     const auto result =
         fil_system->get_scanned_filename_by_space_id(page_id.space());
->>>>>>> mysql-8.4.11
 
     if (result.second == nullptr) {
       /* No files found for this tablespace ID. It's possible that the

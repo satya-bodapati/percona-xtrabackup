@@ -210,14 +210,8 @@ still created. See Kernel Bugzilla Bug 218049 */
 Unix; the value of os_innodb_umask is initialized in ha_innodb.cc to my_umask.
 It is a global value and can't be modified once it is set. */
 static mode_t os_innodb_umask = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
-<<<<<<< HEAD
 static bool umask_was_already_set{false};
-#else
-||||||| dc86e412f18
-#else
-=======
 #else  /* _WIN32 */
->>>>>>> mysql-8.4.11
 /** On Windows when using native AIO the number of AIO requests
 that a thread can handle at a given time is limited to 32
 i.e.: SRV_N_PENDING_IOS_PER_THREAD */
@@ -7795,7 +7789,6 @@ void os_file_set_umask(mode_t umask) {
   umask_was_already_set = true;
   os_innodb_umask = umask;
 }
-<<<<<<< HEAD
 
 #ifdef XTRABACKUP
 void os_file_reset_umask() {
@@ -7804,12 +7797,7 @@ void os_file_reset_umask() {
 }
 #endif /* XTRABACKUP */
 
-#endif
-||||||| dc86e412f18
-#endif
-=======
 #endif /* !_WIN32 */
->>>>>>> mysql-8.4.11
 
 #ifdef XTRABACKUP
 std::tuple<bool, os_file_type_t> Dir_Walker::is_directory(const Path &path) {

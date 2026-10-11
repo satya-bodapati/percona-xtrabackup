@@ -751,31 +751,7 @@ bool lock_rec_expl_exist_on_page(const page_id_t &page_id) {
  and resetting. */
 static void lock_rec_bitmap_reset(lock_t *lock) /*!< in: record lock */
 {
-<<<<<<< HEAD
-  ut_ad(lock_get_type_low(lock) == LOCK_REC);
-
-  /* Reset to zero the bitmap which resides immediately after the lock
-  struct */
-
-  const auto n_bytes = lock_rec_get_n_bits(lock) / 8;
-
-  ut_ad((lock_rec_get_n_bits(lock) % 8) == 0);
-
-  memset(reinterpret_cast<byte *>(&lock[1]), 0, n_bytes);
-||||||| dc86e412f18
-  ut_ad(lock_get_type_low(lock) == LOCK_REC);
-
-  /* Reset to zero the bitmap which resides immediately after the lock
-  struct */
-
-  const auto n_bytes = lock_rec_get_n_bits(lock) / 8;
-
-  ut_ad((lock_rec_get_n_bits(lock) % 8) == 0);
-
-  memset(&lock[1], 0, n_bytes);
-=======
   lock->bitset().reset();
->>>>>>> mysql-8.4.11
 }
 
 /** Copies a record lock to heap.
