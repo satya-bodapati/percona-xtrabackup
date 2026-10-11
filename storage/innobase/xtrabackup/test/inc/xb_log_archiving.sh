@@ -23,7 +23,11 @@ while true ; do
     mysql -e "insert into t select * from t" test >/dev/null 2>/dev/null
 done &
 
-xtrabackup --backup --target-dir=$topdir/backup
+# The backup reads redo from the checkpoint LSN, but the archive starts at the
+# LSN when archiving began. Redo in between exists only in the live redo files.
+# The insert loop above can make the server remove those files before the
+# backup reads them, unless the backup registers as a redo log consumer.
+xtrabackup --backup --target-dir=$topdir/backup --register-redo-log-consumer
 
 stop_server
 
