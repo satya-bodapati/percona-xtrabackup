@@ -2,6 +2,7 @@
 # PXB-1679: Crash after truncating partition when the backup is taken
 #
 
+require_debug_pxb_version
 start_server
 
 mysql test <<EOF
@@ -27,20 +28,41 @@ CREATE TABLE test02 (id int auto_increment primary key, a TEXT, b TEXT);
 INSERT INTO test02 SELECT * FROM test01;
 EOF
 
-xtrabackup --backup --lock-ddl=OFF --target-dir=$topdir/backup 2>&1 | tee /dev/stderr | \
+# Truncate each table once, when xtrabackup starts copying its file.
+function truncate_during_copy()
+{
+    local line
     while read line ; do
-        echo $line
-        if [ $( echo $line | grep -i -c './test/test01#p#p3.ibd') -eq 1 ]; then
+        echo "$line"
+        if [[ ! -f $topdir/p3_truncated &&
+              $line == *Copying*./test/test01#p#p3.ibd* ]]; then
             mysql -e "ALTER TABLE test01 TRUNCATE PARTITION p3" test
+            touch $topdir/p3_truncated
         fi
-        if [ $( echo $line | grep -c './test/test02.ibd') -eq 1 ]; then
+        if [[ ! -f $topdir/test02_truncated &&
+              $line == *Copying*./test/test02.ibd* ]]; then
             mysql -e "TRUNCATE TABLE test02" test
+            touch $topdir/test02_truncated
         fi
     done
+}
 
-if ! [ ${PIPESTATUS[0]} -eq 0 ] ; then
-    die "backup failed"
-fi
+# Pause the backup before it takes the backup lock, until both TRUNCATEs have
+# finished. Otherwise a TRUNCATE could wait for the lock and run after the
+# backup, and the data would not match the state recorded below.
+xtrabackup --backup --lock-ddl=REDUCED --target-dir=$topdir/backup \
+    --debug-sync="ddl_tracker_before_lock_ddl" \
+    2> >(truncate_during_copy) &
+job_pid=$!
+wait_for_xb_to_suspend $topdir/backup/xtrabackup_debug_sync
+for i in $(seq 1 60); do
+    [[ -f $topdir/p3_truncated && -f $topdir/test02_truncated ]] && break
+    sleep 1
+done
+[[ -f $topdir/p3_truncated && -f $topdir/test02_truncated ]] || \
+    die "TRUNCATE did not run during the backup"
+kill -SIGCONT $(cat $topdir/backup/xtrabackup_debug_sync)
+run_cmd wait $job_pid
 
 record_db_state test
 
