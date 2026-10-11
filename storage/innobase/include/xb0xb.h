@@ -22,6 +22,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define xb0xb_h
 #include "storage/innobase/xtrabackup/src/ddl_tracker.h"
 
+class fil_space_t;
+
 extern bool innodb_log_checksums_specified;
 extern bool innodb_checksum_algorithm_specified;
 

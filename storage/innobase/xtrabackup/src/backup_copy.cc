@@ -786,8 +786,8 @@ bool copy_redo_encryption_info() {
   char src_path[FN_REFLEN];
   char dst_path[FN_REFLEN];
   auto log_buf = ut_make_unique_ptr_nokey(UNIV_PAGE_SIZE_MAX * 128);
-  IORequest read_request(IORequest::READ);
-  IORequest write_request(IORequest::WRITE);
+  IORequest read_request(IORequest::Type::READ);
+  IORequest write_request(IORequest::Type::WRITE);
   bool success = false;
   if (log_buf == NULL) {
     return false;
@@ -805,20 +805,18 @@ bool copy_redo_encryption_info() {
   Fil_path::normalize(dst_path);
 
   src_file = os_file_create_simple_no_error_handling(
-      0, src_path, OS_FILE_OPEN, OS_FILE_READ_ONLY, srv_read_only_mode,
-      &success);
+      0, src_path, OS_FILE_OPEN, OS_FILE_READ_ONLY, &success);
   if (!success) {
-    os_file_get_last_error(true);
+    os_file_log_last_error();
     xb::fatal_or_error(UT_LOCATION_HERE) << "cannot find " << src_path;
 
     return false;
   }
 
   dst_file = os_file_create_simple_no_error_handling(
-      0, dst_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, srv_read_only_mode,
-      &success);
+      0, dst_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, &success);
   if (!success) {
-    os_file_get_last_error(true);
+    os_file_log_last_error();
     xb::fatal_or_error(UT_LOCATION_HERE) << "cannot find " << dst_path;
 
     return false;
@@ -2184,9 +2182,8 @@ bool should_skip_file_on_copy_back(const char *filepath) {
   }
 
   /* skip innodb data files */
-  for (auto iter(srv_sys_space.files_begin()), end(srv_sys_space.files_end());
-       iter != end; ++iter) {
-    if (strcmp(iter->name(), filename) == 0) {
+  for (size_t i = 0; i < srv_sys_space.get_nodes_count(); ++i) {
+    if (strcmp(srv_sys_space.node(i).name().c_str(), filename) == 0) {
       return true;
     }
   }
@@ -2394,7 +2391,7 @@ bool copy_back(int argc, char **argv) {
 
   srv_sys_space.set_path(".");
 
-  if (!srv_sys_space.parse_params(innobase_data_file_path, true, false)) {
+  if (!srv_sys_space.parse_params(innobase_data_file_path, false)) {
     xb::error() << "syntax error in innodb_data_file_path";
     return (false);
   }
@@ -2469,11 +2466,11 @@ bool copy_back(int argc, char **argv) {
 
   ds_data = ds_create(dst_dir, DS_TYPE_LOCAL);
 
-  for (auto iter(srv_sys_space.files_begin()), end(srv_sys_space.files_end());
-       iter != end; ++iter) {
-    const char *filename = base_name(iter->name());
+  for (size_t i = 0; i < srv_sys_space.get_nodes_count(); ++i) {
+    const char *node_name = srv_sys_space.node(i).name().c_str();
+    const char *filename = base_name(node_name);
 
-    if (!(ret = copy_or_move_file(filename, iter->name(), dst_dir, 1,
+    if (!(ret = copy_or_move_file(filename, node_name, dst_dir, 1,
                                   FILE_PURPOSE_DATAFILE))) {
       goto cleanup;
     }

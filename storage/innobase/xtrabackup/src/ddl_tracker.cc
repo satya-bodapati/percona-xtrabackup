@@ -33,8 +33,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <unordered_set>
 #include <vector>
 #include "backup_copy.h"
+#include "fil0tablespaces_nodes_interface.h"  // tablespaces_nodes
 #include "file_utils.h"
-#include "fsp0fsp.h"  // fsp_is_undo_tablespace
+#include "fsp0fsp.h"       // fsp_is_undo_tablespace
+#include "fsp0sysspace.h"  // srv_sys_space
 #include "scope_guard.h"
 #include "sql_thd_internal_api.h"  // create_thd, destroy_thd
 #include "srv0start.h"
@@ -410,12 +412,7 @@ static std::string convert_file_name(const space_id_t space_id,
     return std::to_string(space_id) + ext;
   }
 
-  char *space_name = fil_path_to_space_name(file_path.c_str());
-  auto free_guard = create_scope_guard([&]() {
-    if (space_name != nullptr) ut::free(space_name);
-  });
-
-  std::string file_name(space_name);
+  std::string file_name = fil_path_to_space_name(file_path);
   auto sep_pos = file_name.find_last_of(Fil_path::SEPARATOR);
   return file_name.substr(0, sep_pos + 1) + std::to_string(space_id) + ext;
 }
@@ -486,8 +483,8 @@ ulint get_space_flags(
 std::tuple<filevec, filevec> ddl_tracker_t::handle_undo_ddls() {
   xb::info() << "DDL tracking: handling undo DDLs";
 
-  undo_spaces_deinit();
-  undo_spaces_init();
+  undo_truncate_spaces_deinit();
+  undo_truncate_spaces_init();
   xb_scan_for_tablespaces(true);
 
   // Generates the after_lock_undo list
@@ -686,7 +683,7 @@ dberr_t ddl_tracker_t::handle_ddl_operations() {
 
     if (fsp_is_system_tablespace(table->first)) {
       // open system tablespace for recopying
-      srv_sys_space.shutdown();
+      srv_sys_space.reset();
 
       srv_sys_space.set_space_id(TRX_SYS_SPACE);
 
@@ -699,19 +696,18 @@ dberr_t ddl_tracker_t::handle_ddl_operations() {
       srv_sys_space.set_path(srv_data_home);
 
       /* Supports raw devices */
-      if (!srv_sys_space.parse_params(innobase_data_file_path, true,
+      if (!srv_sys_space.parse_params(innobase_data_file_path,
                                       xtrabackup_prepare)) {
         xb::error() << "Cannot parse system tablespace params";
         ut_ad(0);
         return DB_ERROR;
       }
       dberr_t err;
-      page_no_t sum_of_new_sizes;
-      lsn_t flush_lsn;
 
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-      err = srv_sys_space.check_file_spec(false, 0);
+      err = srv_sys_space.check_file_spec(
+          false, 0, tablespaces_nodes->get_capabilities().supports_raw_devices);
 
       if (err != DB_SUCCESS) {
         xb::error() << "In reduced mode, recopy could not find system "
@@ -720,8 +716,13 @@ dberr_t ddl_tracker_t::handle_ddl_operations() {
         return DB_ERROR;
       }
 
-      err = srv_sys_space.open_or_create(false, false, &sum_of_new_sizes,
-                                         &flush_lsn);
+      err = srv_sys_space.prepare_nodes();
+      if (err == DB_SUCCESS) {
+        const auto flush_lsn = srv_sys_space.read_lsn_and_check_flags();
+        if (!flush_lsn) {
+          err = flush_lsn.error();
+        }
+      }
 
       if (err != DB_SUCCESS) {
         xb::error() << "could not reopen system tablespace";
@@ -1177,7 +1178,7 @@ bool prepare_handle_del_files(const datadir_entry_t &entry,
 
     xb::info() << "prepare_handle_del_files: deleting " << fil_space->name;
 
-    dberr_t err = fil_delete_tablespace(fil_space->id, BUF_REMOVE_NONE);
+    dberr_t err = fil_delete_tablespace(fil_space->id);
     if (err != DB_SUCCESS) {
       xb::error() << "prepare_handle_del_files: Cannot delete "
                   << fil_space->name;
@@ -1231,8 +1232,8 @@ bool xtrabackup_scan_meta(const datadir_entry_t &entry, void *) {
     return true;
   }
 
-  IORequest read_request(IORequest::READ);
-  IORequest write_request(IORequest::WRITE | IORequest::PUNCH_HOLE);
+  IORequest read_request(IORequest::Type::READ);
+  IORequest write_request(IORequest::Type::WRITE | IORequest::Type::PUNCH_HOLE);
 
   ut_a(xtrabackup_incremental);
 

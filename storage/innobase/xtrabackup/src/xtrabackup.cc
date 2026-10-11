@@ -643,7 +643,8 @@ datafiles_iter_t *datafiles_iter_new(
                   return 0;
                 }
                 const page_size_t ps(node->space->flags);
-                return static_cast<uint64_t>(node->size) * ps.physical();
+                return static_cast<uint64_t>(node->get_cached_size_in_pages()) *
+                       ps.physical();
               };
 
               auto file_name = [](const fil_node_t *node) -> std::string_view {
@@ -877,6 +878,9 @@ enum options_xtrabackup {
   OPT_SSL_SESSION_DATA,
   OPT_SSL_SESSION_DATA_CONTINUE_ON_FAILED_REUSE,
   OPT_TLS_SNI_SERVERNAME,
+  OPT_TLS_KEX,
+  OPT_FORCE_PQC,
+  OPT_USE_PQC_SIGN,
   OPT_SERVER_PUBLIC_KEY,
 
   OPT_XTRA_TABLES_EXCLUDE,
@@ -2439,7 +2443,7 @@ static bool innodb_init_param(void) {
   srv_sys_space.set_path(srv_data_home);
 
   /* Supports raw devices */
-  if (!srv_sys_space.parse_params(innobase_data_file_path, true,
+  if (!srv_sys_space.parse_params(innobase_data_file_path,
                                   xtrabackup_prepare)) {
     goto error;
   }
@@ -2461,13 +2465,13 @@ static bool innodb_init_param(void) {
   fsp_flags = fsp_flags_init(univ_page_size, false, false, false, true);
   srv_tmp_space.set_flags(fsp_flags);
 
-  if (!srv_tmp_space.parse_params(innobase_temp_data_file_path, false,
+  if (!srv_tmp_space.parse_params(innobase_temp_data_file_path,
                                   xtrabackup_prepare)) {
     goto error;
   }
 
   /* Perform all sanity check before we take action of deleting files*/
-  if (srv_sys_space.intersection(&srv_tmp_space)) {
+  if (srv_sys_space.intersects(srv_tmp_space)) {
     xb::error() << srv_tmp_space.name() << " and " << srv_sys_space.name()
                 << " file names seem to be the same";
     goto error;
@@ -2677,23 +2681,9 @@ error:
 }
 
 void xb_scan_for_tablespaces(bool only_undo) {
-  /* This is the default directory for IBD and IBU files. Put it first
-  in the list of known directories. */
-  fil_set_scan_dir(MySQL_datadir_path.path());
-
-  /* Add --innodb-data-home-dir as a known location for IBD and IBU files
-  if it is not already there. */
+  /* fil_scan_for_tablespaces() scans the datadir, --innodb-data-home-dir,
+  --innodb-directories and --innodb-undo-directory. */
   ut_ad(srv_data_home != nullptr && *srv_data_home != '\0');
-  fil_set_scan_dir(Fil_path::remove_quotes(srv_data_home));
-
-  /* Add --innodb-directories as known locations for IBD and IBU files. */
-  if (srv_innodb_directories != nullptr && *srv_innodb_directories != 0) {
-    fil_set_scan_dirs(Fil_path::remove_quotes(srv_innodb_directories));
-  }
-
-  /* For the purpose of file discovery at startup, we need to scan
-  --innodb-undo-directory also. */
-  fil_set_scan_dir(Fil_path::remove_quotes(MySQL_undo_path), true);
 
   if (fil_scan_for_tablespaces(true, only_undo) != DB_SUCCESS) {
     exit(EXIT_FAILURE);
@@ -2703,12 +2693,8 @@ void xb_scan_for_tablespaces(bool only_undo) {
 static bool innodb_init(bool init_dd, bool for_apply_log) {
   os_event_global_init();
 
-  /* Check if the data files exist or not. */
-  dberr_t err = srv_sys_space.check_file_spec(false, 5 * 1024 * 1024 /* 5M */);
-
-  if (err != DB_SUCCESS) {
-    return (false);
-  }
+  /* srv_start() checks if the data files exist. */
+  dberr_t err;
 
   lsn_t to_lsn = LSN_MAX;
 
@@ -3851,22 +3837,27 @@ static dberr_t xb_load_tablespaces()
 /*=====================*/
 {
   dberr_t err;
-  page_no_t sum_of_new_sizes;
-  lsn_t flush_lsn;
 
   os_aio_start_threads();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  err = srv_sys_space.check_file_spec(false, 0);
+  err = srv_sys_space.check_file_spec(
+      false, 0, tablespaces_nodes->get_capabilities().supports_raw_devices);
 
   if (err != DB_SUCCESS) {
     xb::error() << "could not find data files at the specified datadir";
     return (DB_ERROR);
   }
 
-  err =
-      srv_sys_space.open_or_create(false, false, &sum_of_new_sizes, &flush_lsn);
+  err = srv_sys_space.prepare_nodes();
+
+  if (err == DB_SUCCESS) {
+    const auto flush_lsn = srv_sys_space.read_lsn_and_check_flags();
+    if (!flush_lsn) {
+      err = flush_lsn.error();
+    }
+  }
 
   if (err != DB_SUCCESS) {
     xb::error() << "Could not open or create data files.";
@@ -3922,7 +3913,7 @@ ulint xb_data_files_init()
     return DB_IO_ERROR;
   }
 
-  undo_spaces_init();
+  undo_truncate_spaces_init();
 
   return (xb_load_tablespaces());
 }
@@ -3962,7 +3953,7 @@ void xb_data_files_close(void)
                << " threads created by InnoDB had not exited at shutdown!";
   }
 
-  undo_spaces_deinit();
+  undo_truncate_spaces_deinit();
 
   os_aio_free();
 
@@ -4459,7 +4450,7 @@ static void xb_probe_read_request_cost() {
     max does not depend on that, or any, iteration order.) */
     const page_size_t node_page_size(node->space->flags);
     const uint64_t node_bytes =
-        uint64_t{node->size} * node_page_size.physical();
+        uint64_t{node->get_cached_size_in_pages()} * node_page_size.physical();
     if (node_bytes > probe_size) {
       probe_size = node_bytes;
       snprintf(probe_path, sizeof(probe_path), "%s", node->name);
@@ -4500,7 +4491,6 @@ void xtrabackup_backup_func(void) {
   ib_mutex_t count_mutex;
   data_thread_ctxt_t *data_threads;
 
-  recv_is_making_a_backup = true;
   bool data_copying_error = false;
   std::shared_ptr<xb::backup::dd_space_ids> xb_dd_spaces;
   init_mysql_environment();
@@ -5000,8 +4990,8 @@ static bool xtrabackup_init_temp_log(void) {
 
   bool checkpoint_found;
 
-  IORequest read_request(IORequest::READ);
-  IORequest write_request(IORequest::WRITE);
+  IORequest read_request(IORequest::Type::READ);
+  IORequest write_request(IORequest::Type::WRITE);
 
   log_buf = static_cast<byte *>(
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, UNIV_PAGE_SIZE_MAX * 128));
@@ -5033,12 +5023,11 @@ static bool xtrabackup_init_temp_log(void) {
   Fil_path::normalize(src_path);
 
   src_file = os_file_create_simple_no_error_handling(
-      0, src_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, srv_read_only_mode,
-      &success);
+      0, src_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, &success);
 
   if (!success) {
     /* The following call prints an error message */
-    os_file_get_last_error(true);
+    os_file_log_last_error();
 
     xb::warn() << "cannot open " << src_path << " will try to find.";
 
@@ -5274,7 +5263,7 @@ static bool xb_space_create_file(
   byte *page;
   bool success;
 
-  IORequest write_request(IORequest::WRITE);
+  IORequest write_request(IORequest::Type::WRITE);
 
   ut_ad(!fsp_is_system_or_temp_tablespace(space_id));
   ut_ad(!srv_read_only_mode);
@@ -5294,7 +5283,7 @@ static bool xb_space_create_file(
 
   if (!success) {
     /* The following call will print an error message */
-    ulint error = os_file_get_last_error(true);
+    ulint error = os_file_get_and_log_last_error();
 
     ib::error() << "Cannot create file '" << path << "'";
 
@@ -5319,7 +5308,8 @@ static bool xb_space_create_file(
     return (false);
   }
 
-  success = os_file_set_size(path, *file, 0, size * UNIV_PAGE_SIZE, false);
+  success = os_file_fill_range_with_zeros(path, *file, 0, size * UNIV_PAGE_SIZE,
+                                          true, false) == DB_SUCCESS;
 
   if (!success) {
     os_file_close(*file);
@@ -5366,7 +5356,7 @@ static bool xb_space_create_file(
 #ifdef UNIV_DEBUG
     page_zip.m_start =
 #endif /* UNIV_DEBUG */
-        page_zip.m_end = (page_zip.m_nonempty = (page_zip.n_blobs = 0));
+        page_zip.m_end = (page_zip.n_blobs = 0);
 
     buf_flush_init_for_writing(NULL, page, &page_zip, 0,
                                fsp_is_checksum_disabled(space_id), true);
@@ -5393,10 +5383,7 @@ static bool xb_space_create_file(
     return (false);
   }
 
-  if (fil_node_create(path, size, space, false, false) != DB_SUCCESS) {
-    ib::fatal(UT_LOCATION_HERE) << "Unable to add tablespace node '" << path
-                                << "' to the tablespace cache.";
-  }
+  fil_node_create(path, space, false, PAGE_NO_MAX);
 
   return (true);
 }
@@ -5412,12 +5399,12 @@ static space_id_t get_space_id_from_page_0(const char *file_name) {
       ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, 2 * srv_page_size));
 
   auto file = os_file_create_simple_no_error_handling(
-      0, file_name, OS_FILE_OPEN, OS_FILE_READ_ONLY, srv_read_only_mode, &ok);
+      0, file_name, OS_FILE_OPEN, OS_FILE_READ_ONLY, &ok);
 
   if (ok) {
     auto *page = static_cast<buf_frame_t *>(ut_align(buf, srv_page_size));
 
-    IORequest request(IORequest::READ);
+    IORequest request(IORequest::Type::READ);
     dberr_t err =
         os_file_read_first_page(request, file_name, file, page, UNIV_PAGE_SIZE);
 
@@ -5681,8 +5668,8 @@ static pfs_os_file_t xb_delta_open_matching_space(
 found:
   /* open the file and return it's handle */
 
-  file = os_file_create_simple_no_error_handling(
-      0, real_name, create_option, OS_FILE_READ_WRITE, srv_read_only_mode, &ok);
+  file = os_file_create_simple_no_error_handling(0, real_name, create_option,
+                                                 OS_FILE_READ_WRITE, &ok);
 
   if (ok) {
     *success = true;
@@ -5727,8 +5714,8 @@ bool xtrabackup_apply_delta(
     return true;
   }
 
-  IORequest read_request(IORequest::READ);
-  IORequest write_request(IORequest::WRITE | IORequest::PUNCH_HOLE);
+  IORequest read_request(IORequest::Type::READ);
+  IORequest write_request(IORequest::Type::WRITE | IORequest::Type::PUNCH_HOLE);
 
   ut_a(xtrabackup_incremental);
 
@@ -5770,10 +5757,9 @@ bool xtrabackup_apply_delta(
   }
 
   src_file = os_file_create_simple_no_error_handling(
-      0, src_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, srv_read_only_mode,
-      &success);
+      0, src_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, &success);
   if (!success) {
-    os_file_get_last_error(true);
+    os_file_log_last_error();
     xb::error() << "cannot open " << src_path;
     goto error;
   }
@@ -5795,7 +5781,7 @@ bool xtrabackup_apply_delta(
 
   os_file_set_nocache(dst_file.m_file, dst_path, "OPEN");
 
-  os_file_get_status(dst_path, &stat_info, false, false);
+  (void)os_file_get_status(dst_path, &stat_info);
 
   /* allocate buffer for incremental backup */
   incremental_buffer_base = static_cast<byte *>(
@@ -6073,8 +6059,8 @@ static bool xtrabackup_replace_log_file(const char *redo_path,
                                         const Log_files_context &log_files_ctx,
                                         bool clear_flag) {
   byte log_buf[UNIV_PAGE_SIZE_MAX];
-  IORequest read_request(IORequest::READ);
-  IORequest write_request(IORequest::WRITE);
+  IORequest read_request(IORequest::Type::READ);
+  IORequest write_request(IORequest::Type::WRITE);
   char src_path[FN_REFLEN];
   char dst_path[FN_REFLEN];
   bool success;
@@ -6116,8 +6102,7 @@ static bool xtrabackup_replace_log_file(const char *redo_path,
   }
 
   src_file = os_file_create_simple_no_error_handling(
-      0, src_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, srv_read_only_mode,
-      &success);
+      0, src_path, OS_FILE_OPEN, OS_FILE_READ_WRITE, &success);
   if (!success) {
     goto error;
   }
@@ -6890,8 +6875,8 @@ static bool xb_export_cfg_write(
 }
 
 static void innodb_free_param() {
-  srv_sys_space.shutdown();
-  srv_tmp_space.shutdown();
+  srv_sys_space.reset();
+  srv_tmp_space.reset();
   free(internal_innobase_data_file_path);
   internal_innobase_data_file_path = NULL;
   free_tmpdir(&mysql_tmpdir_list);
@@ -7035,8 +7020,8 @@ static bool xb_checksum_system_undo_spaces() {
   reading undo::spaces without taking its latch is safe. */
   std::vector<space_id_t> space_ids;
   space_ids.push_back(TRX_SYS_SPACE);
-  for (size_t i = 0; i < undo::spaces->size(); ++i) {
-    space_ids.push_back(undo::spaces->at(i)->id());
+  for (size_t i = 0; i < undo_truncate::spaces->size(); ++i) {
+    space_ids.push_back(undo_truncate::spaces->at(i)->id());
   }
 
   /* One aligned page buffer, reused for every read (O_DIRECT needs alignment).
@@ -7064,8 +7049,8 @@ static bool xb_checksum_system_undo_spaces() {
 
       const page_id_t page_id(space_id, page_no);
       const dberr_t err =
-          fil_io(IORequest(IORequest::READ), true, page_id, page_size, 0,
-                 page_size.physical(), buf, nullptr);
+          fil_io(IORequest::Type::READ, true, page_id, page_size,
+                 page_size.physical(), buf, nullptr, false);
       if (err != DB_SUCCESS) {
         xb::error() << "check-tables: cannot read page " << space_id << ":"
                     << page_no
@@ -7184,7 +7169,7 @@ static void xtrabackup_prepare_func(int argc, char **argv) {
   datafiles_iter_t *it;
   fil_node_t *node;
   fil_space_t *space;
-  IORequest write_request(IORequest::WRITE);
+  IORequest write_request(IORequest::Type::WRITE);
   read_metadata();
 
   /* prepare version check */
@@ -7353,7 +7338,7 @@ skip_check:
     xb_data_files_close();
     fil_close();
     innodb_free_param();
-    undo_spaces_deinit();
+    undo_truncate_spaces_deinit();
 
     /* Handle `CREATE` DDL files produced by DDL tracking during backup */
     if (xtrabackup_incremental_dir) {

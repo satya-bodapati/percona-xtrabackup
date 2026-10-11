@@ -43,7 +43,8 @@ page size and whether the file is compressable. */
 static bool xb_get_zip_size(const char *file_name, pfs_os_file_t file,
                             byte *buf, page_size_t &page_size,
                             bool &is_encrypted) {
-  IORequest read_request(IORequest::READ | IORequest::NO_COMPRESSION);
+  IORequest read_request(IORequest::Type::READ |
+                         IORequest::Type::NO_COMPRESSION);
   const auto ret =
       os_file_read(read_request, file_name, file, buf, 0, UNIV_PAGE_SIZE_MIN);
   if (!ret) {
@@ -149,7 +150,7 @@ xb_fil_cur_result_t xb_fil_cur_open(
       /* The following call prints an error message */
 
       if (opt_lock_ddl != LOCK_DDL_REDUCED || is_server_locked()) {
-        os_file_get_last_error(true);
+        os_file_log_last_error();
         xb::error() << "cannot open tablespace " << cursor->abs_path;
       }
 
@@ -157,10 +158,10 @@ xb_fil_cur_result_t xb_fil_cur_open(
     }
   }
 
-  ut_ad(node->is_open);
+  ut_ad(node->is_open());
 
   cursor->node = node;
-  cursor->file = node->handle;
+  cursor->file = node->xb_get_os_file();
 
   if (my_fstat(cursor->file.m_file, &cursor->statinfo)) {
     xb::error() << "cannot stat " << cursor->abs_path;
@@ -224,7 +225,7 @@ xb_fil_cur_result_t xb_fil_cur_open(
   cursor->thread_n = thread_n;
 
   cursor->space_size = cursor->statinfo.st_size / page_size.physical();
-  cursor->block_size = node->block_size;
+  cursor->block_size = node->get_block_size();
 
   cursor->read_filter = read_filter;
   cursor->read_filter->init(&cursor->read_filter_ctxt, cursor, node->space->id);
@@ -239,7 +240,7 @@ xb_fil_cur_result_t xb_fil_cur_open(
   memcpy(cursor->encryption_iv, node->space->m_encryption_metadata.m_iv,
          sizeof(cursor->encryption_iv));
   cursor->encryption_klen = node->space->m_encryption_metadata.m_key_len;
-  cursor->block_size = node->block_size;
+  cursor->block_size = node->get_block_size();
 
   return (XB_FIL_CUR_SUCCESS);
 }
@@ -272,7 +273,8 @@ xb_fil_cur_result_t xb_fil_cur_read_from_offset(xb_fil_cur_t *cursor,
   page_size_t page_size(
       cursor->zip_size != 0 ? cursor->zip_size : cursor->page_size,
       cursor->page_size, cursor->zip_size != 0);
-  IORequest read_request(IORequest::READ | IORequest::NO_COMPRESSION);
+  IORequest read_request(IORequest::Type::READ |
+                         IORequest::Type::NO_COMPRESSION);
 
   if (to_read == 0LL) {
     return (XB_FIL_CUR_EOF);

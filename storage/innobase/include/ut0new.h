@@ -341,6 +341,7 @@ static constexpr const char *auto_event_names[] = {
     /* added for Percona XtraBackup */
     "backup_copy",
     "changed_page_tracking",
+    "ddl_tracker",
     "fil_cur",
     "redo_log",
     "write_filt",
