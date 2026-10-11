@@ -1204,6 +1204,7 @@ dberr_t Builder::key_buffer_sort(size_t thread_id) noexcept {
 }
 
 dberr_t Builder::handle_error(dberr_t err) noexcept {
+  ut_ad(err != DB_SUCCESS);
   set_error(err);
 
   if (m_btr_load != nullptr) {
@@ -1492,17 +1493,7 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
         if (!cursor.eof()) {
           /* Copy the row data and release any latches held by the parallel
           scan thread. Required for the log_free_check() during mtr.commit(). */
-          err = cursor.copy_row(thread_id, row);
-
-          if (DBUG_EVALUATE_IF("builder_bulk_add_row_trigger_error_2", true,
-                               false)) {
-            err = DB_INVALID_NULL;
-          }
-
-          if (err != DB_SUCCESS) {
-            set_error(err);
-            return get_error();
-          }
+          cursor.copy_row(thread_id, row);
 
           err = latch_release();
 
@@ -1978,7 +1969,7 @@ dberr_t Builder::fts_sort_and_build() noexcept {
   }
 }
 
-dberr_t Builder::finalize() noexcept {
+void Builder::finalize() noexcept {
   ut_a(m_ctx.m_need_observer);
   ut_a(get_state() == State::FINISH);
 
@@ -2010,8 +2001,6 @@ dberr_t Builder::finalize() noexcept {
   if (err != DB_SUCCESS) {
     set_error(err);
   }
-
-  return err;
 }
 
 dberr_t Builder::merge_sort(size_t thread_id) noexcept {
@@ -2080,23 +2069,15 @@ dberr_t Builder::finish() noexcept {
     thread_ctx->m_file.m_file.close();
   }
 
-  dberr_t err{DB_SUCCESS};
-
   if (get_error() != DB_SUCCESS || !m_ctx.m_online) {
     /* Do not apply any online log. */
   } else if (m_ctx.m_old_table != m_ctx.m_new_table) {
     ut_a(!m_index->online_log);
     ut_a(m_index->online_status == ONLINE_INDEX_COMPLETE);
 
-    auto observer = m_ctx.m_trx->flush_observer;
-    observer->flush();
-
+    m_ctx.m_trx->flush_observer->flush();
   } else {
-    err = finalize();
-
-    if (err != DB_SUCCESS) {
-      set_error(err);
-    }
+    finalize();
   }
 
   set_next_state();

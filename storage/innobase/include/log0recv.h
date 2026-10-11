@@ -37,6 +37,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "buf0types.h"
 #include "dict0types.h"
 #include "hash0hash.h"
+#include "log0handler.h"
+#include "log0redo.h"
 #include "log0sys.h"
 #include "mtr0types.h"
 
@@ -54,72 +56,12 @@ this program; if not, write to the Free Software Foundation, Inc.,
 class MetadataRecover;
 class PersistentTableMetadata;
 
+#ifdef UNIV_HOTBACKUP
+
 struct recv_addr_t;
-
-#ifdef XTRABACKUP
-/** map of tablespace_id, that would be full scan during backup with
- * pagetracking*/
-extern std::unordered_set<space_id_t> full_scan_tables;
-
-/* count of tablespaces that will require full table scan. This is calculated
- * after full_scan_tables is fully populated and should never changed. */
-
-extern size_t full_scan_tables_count;
-
-namespace xtrabackup {
-struct recv_sys_t {
-  struct mem_block_t {
-    /** Constructor
-    @param[in]	n	size of this block and total size of all the blocks. */
-    mem_block_t(ulint n) : len(n), total_size(n), free(MEM_BLOCK_HEADER_SIZE) {}
-
-    /** Default constructor */
-    mem_block_t() : len(), total_size(), free(MEM_BLOCK_HEADER_SIZE) {}
-    ulint len;
-    ulint total_size;
-    ulint free;
-  };
-
-  struct space_page_t {
-    /** Default constructor */
-    space_page_t() : m_pages(), m_blocks() {}
-    std::unordered_set<page_no_t> m_pages;
-    std::vector<mem_block_t *> m_blocks;
-  };
-
-  using Spaces =
-      std::unordered_map<space_id_t, space_page_t *, std::hash<space_id_t>,
-                         std::equal_to<space_id_t>>;
-  Spaces *spaces;
-  ~recv_sys_t() {
-    if (this->spaces != nullptr) {
-      for (auto &space : *this->spaces) {
-        for (auto &block : space.second->m_blocks) {
-          delete (block);
-        }
-        delete (space.second);
-      }
-      ut::delete_(this->spaces);
-    }
-  }
-};
-
-/** calculates the amount of memory required for xtrabackup prepare
-@retval amount of memory required for hash table of parsed records
-@retval number of database frames */
-std::pair<size_t, ulint> recv_backup_heap_used();
-}  // namespace xtrabackup
-
-#endif /* XTRABACKUP */
 
 /** list of tablespaces, that experienced an inplace DDL during a backup op */
 extern std::list<std::pair<space_id_t, lsn_t>> index_load_list;
-/** the last redo log flush len as seen by MEB */
-extern volatile lsn_t backup_redo_log_flushed_lsn;
-/** true when the redo log is being backed up */
-extern bool recv_is_making_a_backup;
-
-#ifdef UNIV_HOTBACKUP
 
 /** Scans the log segment and n_bytes_scanned is set to the length of valid
 log scanned.
@@ -183,11 +125,7 @@ void meb_apply_log_record(recv_addr_t *recv_addr, buf_block_t *block);
 void meb_fil_name_process(const char *name, space_id_t space_id);
 
 /** Scans log from a buffer and stores new log data to the parsing buffer.
-Parses and hashes the log records if new data found.  Unless
-UNIV_HOTBACKUP is defined, this function will apply log records
-automatically when the hash table becomes full.
-@param[in]      available_memory        we let the hash table of recs
-to grow to this size, at the maximum
+Parses and hashes the log records if new data found.
 @param[in]      buf                     buffer containing a log
 segment or garbage
 @param[in]      len                     buffer length
@@ -196,14 +134,8 @@ segment or garbage
 @retval	true  if limit_lsn has been reached, or not able to scan any
 more in this log group
 @retval false   otherwise */
-bool meb_scan_log_recs(size_t available_memory, const byte *buf, size_t len,
-                       lsn_t start_lsn, lsn_t *group_scanned_lsn);
-
-/** Check the 4-byte checksum to the trailer checksum field of a log
-block.
-@param[in]      block   pointer to a log block
-@return whether the checksum matches */
-bool log_block_checksum_is_ok(const byte *block);
+[[nodiscard]] bool meb_scan_log_recs(const byte *buf, size_t len,
+                                     lsn_t start_lsn, lsn_t *group_scanned_lsn);
 #else /* UNIV_HOTBACKUP */
 
 /** Applies the hashed log records to the page, if the page lsn is less than the
@@ -229,6 +161,12 @@ static inline void recv_recover_page(bool jri, buf_block_t *block) {
 
 #endif /* UNIV_HOTBACKUP */
 
+/** Check the 4-byte checksum to the trailer checksum field of a log
+block.
+@param[in]      block   pointer to a log block
+@return whether the checksum matches */
+[[nodiscard]] bool log_block_checksum_is_ok(const byte *block);
+
 /** Frees the recovery system. */
 void recv_sys_free();
 
@@ -251,16 +189,12 @@ or no records to apply).
 @return true if brand new */
 bool recv_page_is_brand_new(buf_block_t *block);
 
-/** Start recovering from a redo log checkpoint.
+/** Recovers all tablespaces from the redo log.
 @see recv_recovery_from_checkpoint_finish
-@param[in,out]  log        redo log
 @param[in]      flush_lsn  lsn stored at offset FIL_PAGE_FILE_FLUSH_LSN
                            in the system tablespace header
-@param[in]      to_lsn          LSN to store recovery at
 @return error code or DB_SUCCESS */
-[[nodiscard]] dberr_t recv_recovery_from_checkpoint_start(log_t &log,
-                                                          lsn_t flush_lsn,
-                                                          lsn_t to_lsn);
+[[nodiscard]] dberr_t recv_recovery_from_checkpoint_start(lsn_t flush_lsn);
 
 /** Determine if a redo log from a version before MySQL 8.0.30 is clean.
 @param[in,out]  log             redo log
@@ -274,6 +208,21 @@ dberr_t recv_verify_log_is_clean_pre_8_0_30(log_t &log);
 @return recovered persistent metadata or nullptr if aborting*/
 [[nodiscard]] MetadataRecover *recv_recovery_from_checkpoint_finish(
     bool aborting);
+
+#ifndef UNIV_HOTBACKUP
+/** Scans log from a stream and stores new log data to the parsing buffer.
+Parses and hashes the log records if new data found. Each time the hash
+table gets full (see max_mem), it will apply all the records from the
+hashmap to the pages ("a batch"), clearing the hashmap, and continuing
+this way till the end of stream.
+@param[in]      checkpoint_lsn          log sequence number found in checkpoint
+                                        header. May be inexact (in a middle of
+                                        an mtr which we can ignore, as it is
+                                        already applied to tablespace files)
+                                        until which all redo log has been
+                                        scanned */
+[[nodiscard]] dberr_t recv_recovery_begin(lsn_t checkpoint_lsn);
+#endif /* !UNIV_HOTBACKUP */
 
 /** Creates the recovery system. */
 void recv_sys_create();
@@ -289,13 +238,7 @@ void recv_sys_init();
 @param[in]      len             This many bytes of data is added, log block
                                 headers not included
 @return LSN after data addition */
-lsn_t recv_calc_lsn_on_data_add(lsn_t lsn, os_offset_t len);
-
-/** Empties the hash table of stored log records, applying them to appropriate
-pages.
-@param[in,out]  log             redo log */
-
-void recv_apply_hashed_log_recs(log_t &log);
+[[nodiscard]] lsn_t recv_calc_lsn_on_data_add(lsn_t lsn, os_offset_t len);
 
 #if defined(UNIV_DEBUG) || defined(UNIV_HOTBACKUP)
 /** Return string name of the redo log record type.
@@ -473,104 +416,6 @@ struct recv_sys_t {
 
   using Encryption_Keys = std::vector<Encryption_Key>;
 
-  /** Mini transaction log record. */
-  struct Mlog_record {
-    /* Space ID */
-    space_id_t space_id;
-    /* Page number */
-    page_no_t page_no;
-    /* Log type */
-    mlog_id_t type;
-    /* Log body */
-    const byte *body;
-    /* Record size */
-    size_t size;
-  };
-
-  using Mlog_records = std::vector<Mlog_record, ut::allocator<Mlog_record>>;
-
-  /** While scanning logs for multi-record mini-transaction (mtr), we have two
-  passes. In first pass, we check if all the logs of the mtr is present in
-  current recovery buffer or not. If yes, then in second pass we go through the
-  logs again the add to hash table for apply. To avoid parsing multiple times,
-  we save the parsed records in first pass and reuse them in second pass.
-
-  Parsing of redo log takes significant amount of time and this optimization of
-  avoiding second parse gave about 1.8x speed up on recovery scan time of 1G of
-  redo log from sysbench rw test.
-
-  There is currently no limit for maximum number of logs in an mtr. Practically,
-  from sysbench rw test recovery with 1G of redo log to recover from the record
-  count were spread from 3 - 1235 with majority between 600 - 700. So, it is
-  likely by saving 1k records we could avoid most of the re-parsing overhead.
-  Considering possible bigger number of records in other load and future changes
-  the limit for number of saved records is kept at 8k. The same value from the
-  contribution patch. The memory requirement 32 x 8k = 256k seems fine as one
-  time overhead for the entire instance.  */
-  static constexpr size_t MAX_SAVED_MLOG_RECS = 8 * 1024;
-
-  /** Save mlog record information. Silently returns if cannot save. Works only
-  in single threaded recovery scanner.
-  @param[in]    rec_num         record number in multi record group
-  @param[in]    space_id        space ID for the log record
-  @param[in]    page_no         page number for the log record
-  @param[in]    type            log record type
-  @param[in]    body            pointer to log record body in recovery buffer
-  @param[in]    len             length of the log record */
-  void save_rec(size_t rec_num, space_id_t space_id, page_no_t page_no,
-                mlog_id_t type, const byte *body, size_t len) {
-    /* No more space to save log. */
-    if (rec_num >= MAX_SAVED_MLOG_RECS) {
-      return;
-    }
-
-    ut_ad(rec_num < saved_recs.size());
-
-    if (rec_num >= saved_recs.size()) {
-      return;
-    }
-
-    auto &saved_rec = saved_recs[rec_num];
-
-    saved_rec.space_id = space_id;
-    saved_rec.page_no = page_no;
-    saved_rec.type = type;
-    saved_rec.body = body;
-    saved_rec.size = len;
-  }
-
-  /** Return saved mlog record information, if there. Works only
-  in single threaded recovery scanner.
-  @param[in]    rec_num         record number in multi record group
-  @param[out]   space_id        space ID for the log record
-  @param[out]   page_no         page number for the log record
-  @param[out]   type            log record type
-  @param[out]   body            pointer to log record body in recovery buffer
-  @param[out]   len             length of the log record
-  @return true iff saved record data is found. */
-  bool get_saved_rec(size_t rec_num, space_id_t &space_id, page_no_t &page_no,
-                     mlog_id_t &type, const byte *&body, size_t &len) {
-    if (rec_num >= MAX_SAVED_MLOG_RECS) {
-      return false;
-    }
-
-    ut_ad(rec_num < saved_recs.size());
-
-    if (rec_num >= saved_recs.size()) {
-      return false;
-    }
-
-    auto &saved_rec = saved_recs[rec_num];
-
-    space_id = saved_rec.space_id;
-    page_no = saved_rec.page_no;
-    type = saved_rec.type;
-    body = const_cast<byte *>(saved_rec.body);
-    len = saved_rec.size;
-
-    return true;
-  }
-
 #ifndef UNIV_HOTBACKUP
 
   /** mutex protecting the fields apply_log_recs, decrements of
@@ -592,7 +437,12 @@ struct recv_sys_t {
   buf_flush_t flush_type;
 
 #else  /* !UNIV_HOTBACKUP */
+  /** This is true when the space log record needs to be applied */
   bool apply_file_operations;
+
+  /** This is true when an inconsistency with the file system contents
+  is detected during log scan or apply */
+  bool found_corrupt_fs;
 #endif /* !UNIV_HOTBACKUP */
 
   /** This is true when log rec application to pages is allowed;
@@ -617,9 +467,6 @@ struct recv_sys_t {
   /** Checkpoint lsn that was used during recovery (read from file). */
   lsn_t checkpoint_lsn;
 
-  /** Number of data bytes to ignore until we reach checkpoint_lsn. */
-  ulint bytes_to_ignore_before_checkpoint;
-
   /** The log data has been scanned up to this lsn */
   lsn_t scanned_lsn;
 
@@ -635,7 +482,7 @@ struct recv_sys_t {
   /** The previous value of recovered_lsn - before we parsed the last mtr.
   It is equal to recovered_lsn before we parsed any mtr. This is used to
   find moments in which recovered_lsn moves to the next block in which case
-  we should update the last_block_first_rec_group (described below). */
+  we should update the last_block_first_mtr_boundary (described below). */
   lsn_t previous_recovered_lsn;
 
   /** Tracks what should be the proper value of first_rec_group field in the
@@ -646,10 +493,6 @@ struct recv_sys_t {
   /** Set when finding a corrupt log block or record, or there
   is a log parsing buffer overflow */
   bool found_corrupt_log;
-
-  /** Set when an inconsistency with the file system contents
-  is detected during log scan or apply */
-  bool found_corrupt_fs;
 
   /** Data directory has been recognized as cloned data directory. */
   bool is_cloned_db;
@@ -687,8 +530,8 @@ struct recv_sys_t {
   /** Tablespace IDs that were explicitly deleted. */
   Missing_Ids deleted;
 
-  /* Saved log records to avoid second round parsing log. */
-  Mlog_records saved_recs;
+  /** Redo log applier. */
+  ut::unique_ptr<ib::redo::Redo_applier> redo_applier;
 };
 
 /** The recovery system */
@@ -717,66 +560,15 @@ roll-forward */
 
 extern size_t recv_n_frames_for_pages_per_pool_instance;
 
-/** Check the 4-byte checksum to the trailer checksum field of a log
-block.
-@param[in]  block pointer to a log block
-@return whether the checksum matches */
-bool log_block_checksum_is_ok(const byte *block);
-
-/** Checks if a given log data block could be considered a next valid block,
-with regards to the epoch_no it has stored in its header, during the recovery.
-@param[in]  log_block_epoch_no  epoch_no of the log data block to check
-@param[in]  last_epoch_no       epoch_no of the last data block scanned
-@return true iff the provided log block has valid epoch_no */
-bool log_block_epoch_no_is_valid(uint32_t log_block_epoch_no,
-                                 uint32_t last_epoch_no);
-/** Describes location of a single checkpoint. */
-struct Log_checkpoint_location {
-  /** File containing checkpoint header and checkpoint lsn. */
-  Log_file_id m_checkpoint_file_id{0};
-
-  /** Checkpoint header number. */
-  Log_checkpoint_header_no m_checkpoint_header_no{};
-
-  /** Checkpoint LSN. */
-  lsn_t m_checkpoint_lsn{0};
-};
-/** Find the latest checkpoint (check all existing redo log files).
-@param[in,out]  log             redo log
-@param[out]     checkpoint      the latest checkpoint found (if any)
-@return true iff any checkpoint has been found */
-bool recv_find_max_checkpoint(log_t &log, Log_checkpoint_location &checkpoint);
-
-/** Reads a specified log segment to a buffer.
-@param[in,out]  log   redo log
-@param[in,out]  buf   buffer where to read
-@param[in]  start_lsn read area start
-@param[in]  end_lsn   read area end */
-lsn_t recv_read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
-                        const lsn_t end_lsn);
-
-/** Adds data from a new log block to the parsing buffer of recv_sys if
-recv_sys->parse_start_lsn is non-zero.
-@param[in]  log_block   log block
-@param[in]  scanned_lsn  lsn of how far we were able
-                         to find data in this log block
-@param[in]  len          0 if full block or length of the data to add
-@return true if more data added */
-bool recv_sys_add_to_parsing_buf(const byte *log_block, lsn_t scanned_lsn,
-                                 ulint len);
-
-/** Moves the parsing buffer data left to the buffer start. */
-void recv_reset_buffer();
-
-/** Resize the recovery parsing buffer upto log_buffer_size */
+#ifdef UNIV_HOTBACKUP
+/* Following functions are defined in Redo Log Handler implementation but are
+exposed to MEB as it needs them and is not following Handler_interface.
+*/
+[[nodiscard]] dberr_t recv_parse_and_apply_log_recs(size_t max_mem);
 bool recv_sys_resize_buf();
-
-/** Parse log records from a buffer and optionally store them to a
-hash table to wait merging to file pages. */
-void recv_parse_log_recs();
-
-std::tuple<bool, recv_sys_t::Encryption_Key *> recv_find_encryption_key(
-    space_id_t space_id);
+void recv_reset_buffer();
+void recv_track_changes_of_recovered_lsn();
+#endif
 
 #include "log0recv.ic"
 

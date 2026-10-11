@@ -41,6 +41,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "data0data.h"
 #include "ddl0ddl.h"
+#include "fil0pages_persistence_interface.h"
 #include "handler0alter.h"
 #include "lob0lob.h"
 #include "log0chkp.h"
@@ -359,7 +360,7 @@ void row_log_online_op(
 
   if (mrec_size >= avail_size) {
     dberr_t err;
-    IORequest request(IORequest::ROW_LOG | IORequest::WRITE);
+    IORequest request(IORequest::Type::ROW_LOG | IORequest::Type::WRITE);
     const os_offset_t byte_offset =
         (os_offset_t)log->tail.blocks * srv_sort_buf_size;
 
@@ -462,7 +463,7 @@ static void row_log_table_close_func(row_log_t *log,
 
   if (size >= avail) {
     dberr_t err;
-    IORequest request(IORequest::ROW_LOG | IORequest::WRITE);
+    IORequest request(IORequest::Type::ROW_LOG | IORequest::Type::WRITE);
     const os_offset_t byte_offset =
         (os_offset_t)log->tail.blocks * srv_sort_buf_size;
 
@@ -2280,11 +2281,12 @@ flag_ok:
 
   big_rec_t *big_rec;
 
+  const undo_no_t dummy_undo_no = 0;
   error = btr_cur_pessimistic_update(
       BTR_CREATE_FLAG | BTR_NO_LOCKING_FLAG | BTR_NO_UNDO_LOG_FLAG |
           BTR_KEEP_SYS_FLAG | BTR_KEEP_POS_FLAG,
       pcur.get_btr_cur(), &cur_offsets, &offsets_heap, heap, &big_rec, update,
-      0, thr, 0, 0, &mtr);
+      0, thr, dummy_undo_no, &mtr);
 
   if (big_rec) {
     if (error == DB_SUCCESS) {
@@ -2862,7 +2864,7 @@ next_block:
       goto func_exit;
     }
 
-    IORequest request(IORequest::READ | IORequest::ROW_LOG);
+    IORequest request(IORequest::Type::READ | IORequest::Type::ROW_LOG);
     ;
 
     err = os_file_read_no_error_handling_int_fd(
@@ -3612,7 +3614,7 @@ next_block:
       goto func_exit;
     }
 
-    IORequest request(IORequest::READ | IORequest::ROW_LOG);
+    IORequest request(IORequest::Type::READ | IORequest::Type::ROW_LOG);
     dberr_t err = os_file_read_no_error_handling_int_fd(
         request, index->online_log->path, index->online_log->file.get(),
         index->online_log->head.block, ofs, srv_sort_buf_size, nullptr);
