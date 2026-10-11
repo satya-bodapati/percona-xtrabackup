@@ -94,4 +94,14 @@ write this new information to encryption header.
 
 #endif /* !UNIV_HOTBACKUP */
 
+#ifdef XTRABACKUP
+/** Read the encryption information from the header of a given redo log file
+and update the log encryption metadata. Used by xtrabackup when it copies the
+redo log.
+@param[in,out]  log   redo log
+@param[in]      file  redo log file
+@return DB_SUCCESS or error */
+dberr_t xb_log_encryption_read(log_t &log, const Log_file &file);
+#endif /* XTRABACKUP */
+
 #endif /* !log0encryption_h */

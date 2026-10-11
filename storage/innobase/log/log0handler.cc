@@ -49,6 +49,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "xb0xb.h"
 #endif /* XTRABACKUP */
 
+#ifndef XTRABACKUP
+/* xtrabackup declares it in log0recv.h */
 namespace {
 /** Describes location of a single checkpoint. */
 struct Log_checkpoint_location {
@@ -62,6 +64,7 @@ struct Log_checkpoint_location {
   lsn_t m_checkpoint_lsn{0};
 };
 }  // namespace
+#endif /* !XTRABACKUP */
 
 /** Validates the raw REDO log block buffer.
 @param[in]  log_block         REDO log block which contains REDO logs
@@ -131,12 +134,14 @@ static dberr_t read_checkpoint(
 [[nodiscard]] static bool recv_find_max_checkpoint(
     Log_file_handle &file_handle, Log_checkpoint_location &checkpoint);
 
+#ifndef XTRABACKUP
 /** Find the latest checkpoint (check all existing redo log files).
 @param[in]  log         redo log
 @param[out] checkpoint  the latest checkpoint found (if any)
 @return true iff any checkpoint has been found */
 [[nodiscard]] static bool recv_find_max_checkpoint(
     log_t &log, Log_checkpoint_location &checkpoint);
+#endif /* !XTRABACKUP */
 
 /** Scans log from a buffer and stores new log data to the destination buffer.
 @param[in]      buf                  buffer containing a log segment or garbage
@@ -1100,14 +1105,25 @@ static dberr_t write_header(
   return found;
 }
 
-[[nodiscard]] static bool recv_find_max_checkpoint(
-    log_t &log, Log_checkpoint_location &checkpoint) {
+#ifndef XTRABACKUP
+[[nodiscard]] static
+#endif /* !XTRABACKUP */
+    bool
+    recv_find_max_checkpoint(log_t &log, Log_checkpoint_location &checkpoint) {
   bool found = false;
   checkpoint = {};
 
   log_files_for_each(log.m_files, [&](const Log_file &file) {
     auto file_handle = file.open(Log_file_access_mode::READ_ONLY);
+#ifndef XTRABACKUP
     ut_a(file_handle.is_open());
+#else
+    if (!file_handle.is_open()) {
+      xb::error(ER_IB_MSG_716) << "Cannot open redo log file. Please consider "
+                                  "increasing innodb_redo_log_capacity";
+      return;
+    }
+#endif /* !XTRABACKUP */
 
     Log_checkpoint_location checkpoint_in_file;
 

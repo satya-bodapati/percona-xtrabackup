@@ -101,6 +101,14 @@ dberr_t log_encryption_read(log_t &log, Metadata_value &block) {
   return DB_SUCCESS;
 }
 
+/** Decode the encryption information stored in the redo log header block and
+update the log encryption metadata.
+@param[in,out]  log            redo log
+@param[in]      log_block_buf  header block of a redo log file
+@return DB_SUCCESS or error */
+static dberr_t log_encryption_decode_header(log_t &log,
+                                            const byte *log_block_buf);
+
 dberr_t log_read_encryption_info(log_t &log) {
   /* Read the encryption header to get the encryption information. */
   Metadata_value header_block{'\0'};
@@ -109,8 +117,28 @@ dberr_t log_read_encryption_info(log_t &log) {
     return DB_ERROR;
   }
 
-  auto log_block_buf = header_block.data();
+  return log_encryption_decode_header(log, header_block.data());
+}
 
+#ifdef XTRABACKUP
+dberr_t xb_log_encryption_read(log_t &log, const Log_file &file) {
+  Metadata_value header_block{'\0'};
+  {
+    auto file_handle = file.open(Log_file_access_mode::READ_ONLY);
+    if (!file_handle.is_open()) {
+      return DB_CANNOT_OPEN_FILE;
+    }
+    if (log_encryption_header_read(file_handle, header_block.data()) !=
+        DB_SUCCESS) {
+      return DB_ERROR;
+    }
+  }
+  return log_encryption_decode_header(log, header_block.data());
+}
+#endif /* XTRABACKUP */
+
+static dberr_t log_encryption_decode_header(log_t &log,
+                                            const byte *log_block_buf) {
   if (Encryption::is_encrypted_with_v3(log_block_buf +
                                        LOG_HEADER_ENCRYPTION_INFO_OFFSET)) {
 #ifdef XTRABACKUP

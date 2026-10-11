@@ -74,6 +74,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0rec.h"
 #include "trx0undo.h"
 #include "ut0new.h"
+#include "xb0xb.h"
 
 #include "my_dbug.h"
 
@@ -102,10 +103,35 @@ static const size_t RECV_READ_AHEAD_AREA = 32;
 /** The recovery system */
 recv_sys_t *recv_sys = nullptr;
 
+#ifdef XTRABACKUP
+/** Xtrabackup memory recovery system */
+xtrabackup::recv_sys_t *pxb_recv_sys = nullptr;
+#endif
+
 /** true when applying redo log records during crash recovery; false
 otherwise.  Note that this is false while a background thread is
 rolling back incomplete transactions. */
 volatile bool recv_recovery_on;
+
+#ifdef XTRABACKUP
+/** the last redo log flush lsn as seen by xtrabackup */
+volatile lsn_t backup_redo_log_flushed_lsn;
+
+/* List of tablespaces that should be copied fully. Even if page tracking is
+active, the tablespaces in this list will be fully copied to backup directory.
+This set is populated by the redo first scan phase (by a single thread) and
+after the initial parsing is over, we only use it for reads. Hence, it is not
+required to protect with mutex. */
+std::unordered_set<space_id_t> full_scan_tables;
+
+size_t full_scan_tables_count = 0;
+
+/** we let the hash table of recs to grow to this size, at the maximum */
+ulint max_mem;
+
+/** LSN at which recovery stops. LSN_MAX means apply all the redo. */
+lsn_t recv_to_lsn = LSN_MAX;
+#endif /* XTRABACKUP */
 
 /* It's preferable for performance to read more in single IO, and also to avoid
 resizing the buffer too often. If buffer size is less than 2KB, resize. */
@@ -305,6 +331,17 @@ void recv_sys_create() {
   mutex_create(LATCH_ID_RECV_WRITER, &recv_sys->writer_mutex);
 
   recv_sys->spaces = nullptr;
+
+#ifdef XTRABACKUP
+  if (pxb_recv_sys != nullptr) {
+    return;
+  }
+
+  pxb_recv_sys = static_cast<xtrabackup::recv_sys_t *>(
+      ut::zalloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, sizeof(*pxb_recv_sys)));
+
+  pxb_recv_sys->spaces = nullptr;
+#endif
 }
 
 /** Resize the recovery parsing buffer up to log_buffer_size */
@@ -404,6 +441,15 @@ void recv_sys_close() {
 
   ut::delete_(recv_sys);
   recv_sys = nullptr;
+
+#ifdef XTRABACKUP
+  if (pxb_recv_sys == nullptr) {
+    return;
+  }
+
+  ut::delete_(pxb_recv_sys);
+  pxb_recv_sys = nullptr;
+#endif
 }
 
 #ifndef UNIV_HOTBACKUP
@@ -478,6 +524,19 @@ void recv_sys_init() {
   }
 #endif /* !UNIV_HOTBACKUP */
 
+#ifdef XTRABACKUP
+  if (estimate_memory) {
+    if (srv_buf_pool_curr_size >= (long long)real_redo_memory) {
+      if (recv_n_frames_for_pages_per_pool_instance < real_redo_frames) {
+        xb::info() << "Setting free frames to " << real_redo_frames;
+        recv_n_frames_for_pages_per_pool_instance = real_redo_frames;
+      }
+    } else {
+      recv_n_frames_for_pages_per_pool_instance = 0;
+    }
+  }
+#endif
+
   recv_sys->buf_len =
       std::min<unsigned long>(RECV_PARSING_BUF_SIZE, srv_log_buffer_size);
   recv_sys->buf = static_cast<byte *>(
@@ -490,6 +549,11 @@ void recv_sys_init() {
 
   recv_sys->spaces = ut::new_withkey<Spaces>(
       ut::make_psi_memory_key(mem_log_recv_space_hash_key));
+
+#ifdef XTRABACKUP
+  pxb_recv_sys->spaces =
+      ut::new_withkey<xtrabackup::recv_sys_t::Spaces>(UT_NEW_THIS_FILE_PSI_KEY);
+#endif
 
   recv_sys->apply_log_recs = false;
   recv_sys->is_cloned_db = false;
@@ -532,6 +596,16 @@ static void recv_sys_empty_hash() {
 
   recv_sys->spaces = ut::new_withkey<Spaces>(
       ut::make_psi_memory_key(mem_log_recv_space_hash_key));
+
+#ifdef XTRABACKUP
+  if (estimate_memory && srv_buf_pool_curr_size < (long long)real_redo_memory) {
+    recv_n_frames_for_pages_per_pool_instance = 0;
+  }
+  if (pxb_recv_sys->spaces == nullptr) return;
+  ut::delete_(pxb_recv_sys->spaces);
+  pxb_recv_sys->spaces =
+      ut::new_withkey<xtrabackup::recv_sys_t::Spaces>(UT_NEW_THIS_FILE_PSI_KEY);
+#endif
 }
 
 /** Get the page map for a tablespace. It will create one if one isn't found.
@@ -814,7 +888,8 @@ static void recv_apply_log_rec(recv_addr_t *recv_addr) {
       fil_space_get_page_size(recv_addr->space, &found);
   ut_a(found);
   ut_a(!recv_sys->missing_ids.contains(recv_addr->space));
-  ut_a(!recv_sys->deleted.contains(recv_addr->space));
+  ut_a(!recv_sys->deleted.contains(recv_addr->space) ||
+       opt_lock_ddl == LOCK_DDL_REDUCED);
   if (recv_addr->state == RECV_NOT_PROCESSED) {
     mutex_exit(&recv_sys->mutex);
     if (buf_page_peek(page_id)) {
@@ -1173,6 +1248,134 @@ void meb_apply_log_recs_via_callback(
 
 #endif /* !UNIV_HOTBACKUP */
 
+#ifdef XTRABACKUP
+namespace xtrabackup {
+using pxb_mem_block = xtrabackup::recv_sys_t::mem_block_t;
+using pxb_space_page = xtrabackup::recv_sys_t::space_page_t;
+using pxb_spaces = xtrabackup::recv_sys_t::Spaces;
+
+std::pair<size_t, ulint> recv_backup_heap_used() {
+  size_t size = 0;
+  ulint pages = 0;
+  for (auto &space : *pxb_recv_sys->spaces) {
+    pxb_mem_block *block = space.second->m_blocks.back();
+    size += block->total_size;
+    if (space.second->m_pages.size() >= 1) {
+      pages += space.second->m_pages.size();
+    }
+  }
+
+  return std::make_pair(size, pages);
+}
+
+/*
+ * This function mimics the calculation done at
+ * recv_add_to_hash_table->mem_heap_alloc. We call this during --backup from
+ * recv_calculate_hash_heapas we parse each log record copyed by redo follow
+ * thread in order to hint the amout of memory required at --prepare. Please
+ * note we do not allocate any memory here, we just calcuate how much will be
+ * required based on log records parsed so far.
+ */
+static pxb_mem_block *add_new_block(pxb_space_page *space, ulint size) {
+  pxb_mem_block *block;
+  pxb_mem_block *new_block = new pxb_mem_block();
+  ulint new_size;
+  block = space->m_blocks.back();
+  new_size = 2 * block->len;
+  if (new_size > MEM_MAX_ALLOC_IN_BUF) {
+    new_size = MEM_MAX_ALLOC_IN_BUF;
+  }
+  if (new_size < size) {
+    new_size = size;
+  }
+  ulint len = MEM_BLOCK_HEADER_SIZE + MEM_SPACE_NEEDED(new_size);
+
+  if (len >= UNIV_PAGE_SIZE / 2) len = UNIV_PAGE_SIZE;
+
+  new_block->len = len;
+  new_block->total_size = block->total_size + len;
+  new_block->free = MEM_BLOCK_HEADER_SIZE;
+  space->m_blocks.push_back(new_block);
+
+  return new_block;
+}
+
+/** Get the page map for a tablespace. It will create one if one isn't found.
+@param[in]	space_id	Tablespace ID for which page map required.
+@return the space data  */
+static pxb_space_page *recv_get_page_map(space_id_t space_id) {
+  auto it = pxb_recv_sys->spaces->find(space_id);
+
+  if (it != pxb_recv_sys->spaces->end()) {
+    return (it->second);
+  }
+
+  ulint len = MEM_BLOCK_HEADER_SIZE + MEM_SPACE_NEEDED(256);
+  pxb_mem_block *block = new pxb_mem_block(len);
+  pxb_space_page *space_page = new pxb_space_page();
+  space_page->m_blocks.push_back(block);
+  using Space = xtrabackup::recv_sys_t::space_page_t *;
+  using Value = xtrabackup::recv_sys_t::Spaces::value_type;
+
+  auto where =
+      pxb_recv_sys->spaces->insert(it, Value({space_id, Space(space_page)}));
+
+  return (where->second);
+}
+
+/*
+ * This function is the core of estimate memory work. It mimics the work done at
+ * recv_add_to_hash_table. We call recv_calculate_hash_heap at --backup phase
+ * each time redo follow thread parses a new log record. It will result on
+ * having xtrabackup::recv_sys_t knowing the memory crash recovery will require
+ * later when we run the --prepare phase.
+ */
+static void recv_calculate_hash_heap(mlog_id_t type, space_id_t space_id,
+                                     page_no_t page_no,
+                                     std::span<const byte> body,
+                                     lsn_t start_lsn) {
+  if (!recv_recovery_on && xtrabackup_start_checkpoint > start_lsn) return;
+
+  ut_ad(type != MLOG_FILE_DELETE);
+  ut_ad(type != MLOG_FILE_CREATE);
+  ut_ad(type != MLOG_FILE_RENAME);
+  ut_ad(type != MLOG_FILE_EXTEND);
+  ut_ad(type != MLOG_DUMMY_RECORD);
+  ut_ad(type != MLOG_INDEX_LOAD);
+
+  /* check if we already have a Heap for this space id */
+  auto space = xtrabackup::recv_get_page_map(space_id);
+
+  pxb_mem_block *last_block = space->m_blocks.back();
+  if (last_block->len < (last_block->free + MEM_SPACE_NEEDED(sizeof(recv_t)))) {
+    last_block = xtrabackup::add_new_block(space, sizeof(recv_t));
+  }
+  last_block->free = last_block->free + MEM_SPACE_NEEDED(sizeof(recv_t));
+
+  if (space->m_pages.find(page_no) == space->m_pages.end()) {
+    if (last_block->len <
+        (last_block->free + MEM_SPACE_NEEDED(sizeof(recv_addr_t)))) {
+      last_block = xtrabackup::add_new_block(space, sizeof(recv_addr_t));
+    }
+    last_block->free = last_block->free + MEM_SPACE_NEEDED(sizeof(recv_addr_t));
+    space->m_pages.insert(page_no);
+  }
+
+  while (!body.empty()) {
+    const size_t len = std::min(body.size(), RECV_DATA_BLOCK_SIZE);
+
+    if (last_block->len <
+        (last_block->free + MEM_SPACE_NEEDED(sizeof(recv_data_t) + len))) {
+      last_block = xtrabackup::add_new_block(space, sizeof(recv_data_t) + len);
+    }
+    last_block->free =
+        last_block->free + MEM_SPACE_NEEDED(sizeof(recv_data_t) + len);
+    body = body.subspan(len);
+  }
+}
+}  // namespace xtrabackup
+#endif /* XTRABACKUP */
+
 /** Adds a new log record to the hash table of log records.
 @param[in]      type            log record type
 @param[in]      space_id        Tablespace id
@@ -1212,6 +1415,21 @@ static void recv_add_to_hash_table(mlog_id_t type, space_id_t space_id,
     recv_addr = it->second;
 
   } else {
+#ifdef XTRABACKUP
+    /*
+     * In case we do not have enough free memory to run --prepare in a single
+     * batch, we adjust recv_n_frames_for_pages_per_pool_instance as we parse
+     * each single record. This way we have room to hold all required pages on
+     * this batch.
+     */
+    if (estimate_memory &&
+        recv_n_frames_for_pages_per_pool_instance != real_redo_frames) {
+      recv_n_frames_for_pages_per_pool_instance++;
+      max_mem = UNIV_PAGE_SIZE * (buf_pool_get_n_pages() -
+                                  (recv_n_frames_for_pages_per_pool_instance *
+                                   srv_buf_pool_instances));
+    }
+#endif
     recv_addr = static_cast<recv_addr_t *>(
         mem_heap_alloc(space->m_heap, sizeof(*recv_addr)));
 
@@ -1722,6 +1940,86 @@ void recv_track_changes_of_recovered_lsn() {
   recv_sys->previous_recovered_lsn = recv_sys->recovered_lsn;
 }
 
+#ifdef XTRABACKUP
+/** Handle a MLOG_INDEX_LOAD record seen while scanning the redo log during
+the backup.
+@param[in]  space_id   tablespace id of the record
+@param[in]  start_lsn  start lsn of mtr containing the record */
+static void xb_redo_index_load(space_id_t space_id, lsn_t start_lsn) {
+  if (recv_recovery_on) {
+    return;
+  }
+  /* While scaning redo logs during  backup phase a
+  MLOG_INDEX_LOAD type redo log record indicates a DDL
+  (create index, alter table...)is performed with
+  'algorithm=inplace'. This redo log indicates that
+
+  1. The DDL was started after PXB started backing up, in which
+  case PXB will not be able to take a consistent backup and should
+  fail. or
+  2. There is a possibility of this record existing in the REDO
+  even after the completion of the index create operation. This is
+  because of InnoDB does  not checkpointing after the flushing the
+  index pages.
+
+  If PXB gets the last_redo_flush_lsn and that is less than the
+  lsn of the current record PXB fails the backup process.
+  Error out in case of online backup and emit a warning in case
+  of offline backup and continue. */
+  if (redo_catchup_completed) {
+    if (backup_redo_log_flushed_lsn < start_lsn) {
+      if (ddl_tracker) {
+        ddl_tracker->backup_file_op(space_id, MLOG_INDEX_LOAD, nullptr, 0,
+                                    start_lsn);
+      } else {
+        xb::info() << "Last flushed lsn: " << backup_redo_log_flushed_lsn
+                   << " load_index lsn " << start_lsn;
+
+        if (backup_redo_log_flushed_lsn == 0) {
+          xb::error(ER_IB_MSG_715) << "PXB was not able"
+                                   << " to determine the"
+                                   << " InnoDB Engine"
+                                   << " Status";
+        }
+
+        xb::error(ER_IB_MSG_716) << "An optimized (without"
+                                 << " redo logging) DDL"
+                                 << " operation has been"
+                                 << " performed. All modified"
+                                 << " pages may not have been"
+                                 << " flushed to the disk yet.\n"
+                                 << "    PXB will not be able to"
+                                 << " take a consistent backup."
+                                 << " Retry the backup"
+                                 << " operation";
+        exit(EXIT_FAILURE);
+      }
+    }
+    /** else the index is flushed to disk before
+    backup started hence no error */
+  } else {
+    // While scaning redo logs during a backup operation a
+    // MLOG_INDEX_LOAD type redo log record indicates, that a DDL
+    // (create index, alter table...) is performed with
+    // 'algorithm=inplace'. If using pagetracking, the affected tablespace
+    // must be copied using full scan. Record it in the full_scan_tables
+    // We do this during the first scan of redo before starting file copy
+    // thread. This copy is required because Page-tracking relies on
+    // changes from redo. ie PXB has to copy redo as well apart
+    // from copying pages from the pages given by page-tracking list.
+    // Since in-place DDL skips redo logging and the pages that are not
+    // yet flushed, will not be tracked by page-tracking. And since the
+    // redo logging is skipped, PXB will fail to get those changed pages
+    // (on disk .ibd but yet not on pagetracking). hence, we rely on
+    // re-copying the datafiles.
+    if (opt_page_tracking && xtrabackup_incremental != nullptr &&
+        start_lsn > incremental_start_checkpoint_lsn) {
+      full_scan_tables.insert(space_id);
+    }
+  }
+}
+#endif /* XTRABACKUP */
+
 /** Process a table space record.
 @param[in]      rec             record to process
 @param[in]      start_lsn       start lsn of mtr containing the record
@@ -1747,6 +2045,77 @@ void recv_track_changes_of_recovered_lsn() {
     return true;
   }
 #endif /* UNIV_HOTBACKUP */
+
+#ifdef XTRABACKUP
+  const auto type = static_cast<mlog_id_t>(rec.type());
+  const byte *body = rec.body().data();
+  const byte *body_end = body + rec.body().size();
+
+  if (type == MLOG_INDEX_LOAD) {
+    xb_redo_index_load(space_id, start_lsn);
+    return true;
+  }
+
+  /* error out backup if undo truncation happens during backup */
+  if (type == MLOG_FILE_DELETE && srv_backup_mode &&
+      fsp_is_undo_tablespace(space_id) &&
+      backup_redo_log_flushed_lsn < start_lsn && ddl_tracker == nullptr) {
+    xb::info() << "Last flushed lsn: " << backup_redo_log_flushed_lsn
+               << " undo_delete lsn " << start_lsn;
+
+    xb::error(ER_IB_MSG_716) << "An undo ddl truncation (could be automatic)"
+                             << " operation has been"
+                             << " performed. \n"
+                             << " PXB will not be able to"
+                             << " take a consistent backup."
+                             << " Retry the backup"
+                             << " operation later or with --lock-ddl";
+    exit(EXIT_FAILURE);
+  }
+
+  if (ddl_tracker && redo_catchup_completed &&
+      (type == MLOG_FILE_CREATE || type == MLOG_FILE_RENAME ||
+       type == MLOG_FILE_DELETE)) {
+    ddl_tracker->backup_file_op(space_id, type, body, rec.body().size(),
+                                start_lsn);
+  }
+
+  /* xtrabackup never replays MLOG_FILE_EXTEND, files are extended on demand
+  when a page beyond the end of the file is accessed (see Fil_shard::do_io) */
+  if (type == MLOG_FILE_EXTEND) {
+    return true;
+  }
+
+  if (recv_recovery_on) {
+    /* xtrabackup --prepare never replays file operations from the redo log.
+    File operations done during the backup are determined at backup time and
+    applied from the backup directory (.new, .ren, .del files, see
+    ddl_tracker), before the redo log is applied. Only remember dropped
+    tablespaces so that their missing files are not reported. */
+    if (type == MLOG_FILE_DELETE) {
+      recv_sys->deleted.insert(space_id);
+      recv_sys->missing_ids.erase(space_id);
+    }
+    return true;
+  }
+
+  /* Redo log parsed during the backup. Records older than the redo log flush
+  point seen by the backup are already reflected in the copied files. With
+  lock_ddl=LOCK_DDL_REDUCED file operations are tracked by ddl_tracker. */
+  if (opt_lock_ddl == LOCK_DDL_REDUCED ||
+      start_lsn + rec.size() < backup_redo_log_flushed_lsn) {
+    return true;
+  }
+
+  switch (type) {
+    case MLOG_FILE_CREATE:
+      return fil_xb_backup_redo_create(body, body_end, space_id);
+    case MLOG_FILE_DELETE:
+      return fil_xb_backup_redo_delete(body, body_end, space_id);
+    default:
+      return true;
+  }
+#endif /* XTRABACKUP */
 
   switch (rec.type()) {
     case MLOG_FILE_CREATE:
@@ -1779,9 +2148,9 @@ void recv_track_changes_of_recovered_lsn() {
   if (!recv_recovery_on) {
     return true;
   }
-#else  /* UNIV_HOTBACKUP */
+#elif !defined(XTRABACKUP)
   ut_a(recv_recovery_on);
-#endif /* !UNIV_HOTBACKUP */
+#endif /* UNIV_HOTBACKUP */
 
   const auto type = static_cast<mlog_id_t>(rec.type());
   const auto space_id = rec.page().space_id;
@@ -1819,18 +2188,74 @@ void recv_track_changes_of_recovered_lsn() {
         if (recv_sys->is_cloned_db) {
           return true;
         }
-        const auto proceed_to_apply =
-            fil_tablespace_redo_encryption(ptr, end_ptr, space_id, start_lsn);
-        if (!proceed_to_apply) {
-          return false;
-        } else if (!proceed_to_apply.value()) {
-          return true;
+#ifdef XTRABACKUP
+        /* If tablespace has been in-place encrypted ie ALTER TABLESPACE
+        ENCRYPTION=Y/N after the last checkpoint LSN (after full backup),
+        and if the checkpoint LSN doesn't move between full and incremental
+        backups, page tracking will not give the full list of modified pages.
+        So we rely on the redo to roll forward the changes.
+
+        With redo based apply, if page 0 redo is applied first, it will remove
+        the encryption info and after this, other encrypted pages in
+        tablespace cannot be decrypted.
+
+        Scan and copy modified pages of such tablespaces during the
+        incremental backup. This way we would have the latest state of
+        tablespace and redo apply will skip all the redo generated on the
+        tablespace. */
+        if (opt_page_tracking && xtrabackup_incremental != nullptr &&
+            start_lsn > incremental_start_checkpoint_lsn) {
+          full_scan_tables.insert(space_id);
+        }
+
+        if (ddl_tracker && redo_catchup_completed) {
+          ddl_tracker->backup_file_op(space_id, MLOG_WRITE_STRING, nullptr, 0,
+                                      start_lsn);
+        }
+
+        /* With Percona Server, Tables created with ENCRYPTION='N' have
+        crypt_data (CRYPT_SCHEME_UNENCRYPTED) in Page 0 */
+        const bool is_ps_crypt_data =
+            end_ptr >= ptr + 4 + Encryption::MAGIC_SIZE + 1 &&
+            memcmp(ptr + 4, Encryption::KEY_MAGIC_PS_V3,
+                   Encryption::MAGIC_SIZE) == 0;
+        if (is_ps_crypt_data) {
+          const uint crypt_type =
+              mach_read_from_1(ptr + 4 + Encryption::MAGIC_SIZE);
+          if (crypt_type != Encryption::CRYPT_SCHEME_UNENCRYPTED) {
+            xb::error(ER_IB_MSG_716)
+                << "Can't take backup of tablespace encrypted with KEYRING "
+                << "encryption";
+            exit(EXIT_FAILURE);
+          }
+        } else
+#endif /* XTRABACKUP */
+        {
+          const auto proceed_to_apply =
+              fil_tablespace_redo_encryption(ptr, end_ptr, space_id, start_lsn);
+          if (!proceed_to_apply) {
+            return false;
+          } else if (!proceed_to_apply.value()) {
+            return true;
+          }
         }
       }
     }
     default:
       break;
   }
+
+#ifdef XTRABACKUP
+  if (!recv_recovery_on) {
+    /* Redo log parsed during the backup: only estimate the memory the
+    --prepare will need. */
+    if (xtrabackup_estimate_memory) {
+      xtrabackup::recv_calculate_hash_heap(type, space_id, page_no, rec.body(),
+                                           start_lsn);
+    }
+    return true;
+  }
+#endif /* XTRABACKUP */
 
 #ifndef UNIV_HOTBACKUP
   if (space_id != TRX_SYS_SPACE &&
@@ -1963,7 +2388,9 @@ with encryption etc.
 
   const auto start_lsn = recv_sys->recovered_lsn;
 
-#ifdef UNIV_HOTBACKUP
+#if defined(UNIV_HOTBACKUP) || defined(XTRABACKUP)
+  /* xtrabackup also parses the redo log during the backup, when the redo log
+  handler is not started. */
   lsn_t end_lsn = recv_calc_lsn_on_data_add(start_lsn, mtr.size());
 #else
   lsn_t end_lsn = ib::redo::handler->compute_end_lsn(start_lsn, mtr.size());
@@ -2034,7 +2461,7 @@ strict ordering.
 }
 
 /** Moves the parsing buffer data left to the buffer start. */
-#ifndef UNIV_HOTBACKUP
+#if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP)
 static
 #endif
     void
@@ -2183,6 +2610,21 @@ static
       read_buf = first_byte;
     });
 #endif /* HAVE_ASAN */
+
+#ifdef XTRABACKUP
+    /* Stop the recovery at recv_to_lsn: the redo log copied by the backup can
+    contain records beyond the end LSN of the backup. */
+    if (recv_to_lsn != LSN_MAX) {
+      if (start_lsn >= recv_to_lsn) {
+        break;
+      }
+      const size_t max_data_len = log_translate_lsn_to_sn(recv_to_lsn) -
+                                  log_translate_lsn_to_sn(start_lsn);
+      if (read_buf.size() > max_data_len) {
+        read_buf = read_buf.subspan(0, max_data_len);
+      }
+    }
+#endif /* XTRABACKUP */
 
     /* Read next chunk of REDOs */
     const Status read_status = ib::redo::handler->read(start_lsn, read_buf);
@@ -2638,3 +3080,81 @@ const char *get_mlog_string(mlog_id_t type) {
   return nullptr;
 }
 #endif /* UNIV_DEBUG || UNIV_HOTBACKUP */
+
+std::tuple<bool, recv_sys_t::Encryption_Key *> recv_find_encryption_key(
+    space_id_t space_id) {
+  if (recv_sys == nullptr || recv_sys->keys == nullptr) {
+    return {false, nullptr};
+  }
+
+  mutex_enter(&recv_sys->mutex);
+  for (auto &recv_key : *recv_sys->keys) {
+    if (recv_key.space_id == space_id) {
+      mutex_exit(&recv_sys->mutex);
+      return {true, &recv_key};
+    }
+  }
+  mutex_exit(&recv_sys->mutex);
+  return {false, nullptr};
+}
+
+#ifdef XTRABACKUP
+bool recv_sys_add_to_parsing_buf(const byte *log_block, lsn_t scanned_lsn,
+                                 ulint len) {
+  ut_ad(scanned_lsn >= recv_sys->scanned_lsn);
+
+  if (!recv_sys->parse_start_lsn) {
+    /* Cannot start parsing yet because no start point for
+    it found */
+
+    return false;
+  }
+
+  ulint more_len;
+  ulint data_len = len > 0 ? len : log_block_get_data_len(log_block);
+
+  if (recv_sys->parse_start_lsn >= scanned_lsn) {
+    return false;
+
+  } else if (recv_sys->scanned_lsn >= scanned_lsn) {
+    return false;
+
+  } else if (recv_sys->parse_start_lsn > recv_sys->scanned_lsn) {
+    more_len = (ulint)(scanned_lsn - recv_sys->parse_start_lsn);
+
+  } else {
+    more_len = (ulint)(scanned_lsn - recv_sys->scanned_lsn);
+  }
+
+  if (more_len == 0) {
+    return false;
+  }
+
+  ut_ad(data_len >= more_len);
+
+  ulint start_offset = data_len - more_len;
+
+  if (start_offset < LOG_BLOCK_HDR_SIZE) {
+    start_offset = LOG_BLOCK_HDR_SIZE;
+  }
+
+  ulint end_offset = data_len;
+
+  if (end_offset > OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE) {
+    end_offset = OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE;
+  }
+
+  ut_ad(start_offset <= end_offset);
+
+  if (start_offset < end_offset) {
+    memcpy(recv_sys->buf + recv_sys->len, log_block + start_offset,
+           end_offset - start_offset);
+
+    recv_sys->len += end_offset - start_offset;
+
+    ut_a(recv_sys->len <= recv_sys->buf_len);
+  }
+
+  return true;
+}
+#endif /* XTRABACKUP */

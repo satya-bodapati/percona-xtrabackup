@@ -109,6 +109,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 /* srv_is_being_started */
 #include "srv0start.h"
+#ifdef XTRABACKUP
+#include "log0recv.h"
+#endif /* XTRABACKUP */
 
 /* ut_uint64_align_down */
 #include "ut0byte.h"

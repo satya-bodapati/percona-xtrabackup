@@ -56,6 +56,71 @@ this program; if not, write to the Free Software Foundation, Inc.,
 class MetadataRecover;
 class PersistentTableMetadata;
 
+#ifdef XTRABACKUP
+struct recv_addr_t;
+
+/** map of tablespace_id, that would be full scan during backup with
+ * pagetracking*/
+extern std::unordered_set<space_id_t> full_scan_tables;
+
+/* count of tablespaces that will require full table scan. This is calculated
+ * after full_scan_tables is fully populated and should never changed. */
+
+extern size_t full_scan_tables_count;
+
+/** the last redo log flush lsn as seen by xtrabackup */
+extern volatile lsn_t backup_redo_log_flushed_lsn;
+
+/** LSN at which recovery stops (xtrabackup --prepare). LSN_MAX means apply
+all the redo log. */
+extern lsn_t recv_to_lsn;
+
+namespace xtrabackup {
+struct recv_sys_t {
+  struct mem_block_t {
+    /** Constructor
+    @param[in]	n	size of this block and total size of all the blocks. */
+    mem_block_t(ulint n) : len(n), total_size(n), free(MEM_BLOCK_HEADER_SIZE) {}
+
+    /** Default constructor */
+    mem_block_t() : len(), total_size(), free(MEM_BLOCK_HEADER_SIZE) {}
+    ulint len;
+    ulint total_size;
+    ulint free;
+  };
+
+  struct space_page_t {
+    /** Default constructor */
+    space_page_t() : m_pages(), m_blocks() {}
+    std::unordered_set<page_no_t> m_pages;
+    std::vector<mem_block_t *> m_blocks;
+  };
+
+  using Spaces =
+      std::unordered_map<space_id_t, space_page_t *, std::hash<space_id_t>,
+                         std::equal_to<space_id_t>>;
+  Spaces *spaces;
+  ~recv_sys_t() {
+    if (this->spaces != nullptr) {
+      for (auto &space : *this->spaces) {
+        for (auto &block : space.second->m_blocks) {
+          delete (block);
+        }
+        delete (space.second);
+      }
+      ut::delete_(this->spaces);
+    }
+  }
+};
+
+/** calculates the amount of memory required for xtrabackup prepare
+@retval amount of memory required for hash table of parsed records
+@retval number of database frames */
+std::pair<size_t, ulint> recv_backup_heap_used();
+}  // namespace xtrabackup
+
+#endif /* XTRABACKUP */
+
 #ifdef UNIV_HOTBACKUP
 
 struct recv_addr_t;
@@ -560,7 +625,7 @@ roll-forward */
 
 extern size_t recv_n_frames_for_pages_per_pool_instance;
 
-#ifdef UNIV_HOTBACKUP
+#if defined(UNIV_HOTBACKUP) || defined(XTRABACKUP)
 /* Following functions are defined in Redo Log Handler implementation but are
 exposed to MEB as it needs them and is not following Handler_interface.
 */
@@ -569,6 +634,44 @@ bool recv_sys_resize_buf();
 void recv_reset_buffer();
 void recv_track_changes_of_recovered_lsn();
 #endif
+
+#ifdef XTRABACKUP
+/** Describes location of a single checkpoint. */
+struct Log_checkpoint_location {
+  /** File containing checkpoint header and checkpoint lsn. */
+  Log_file_id m_checkpoint_file_id{0};
+
+  /** Checkpoint header number. */
+  Log_checkpoint_header_no m_checkpoint_header_no{};
+
+  /** Checkpoint LSN. */
+  lsn_t m_checkpoint_lsn{0};
+};
+
+/** Find the latest checkpoint (check all existing redo log files).
+@param[in]  log         redo log
+@param[out] checkpoint  the latest checkpoint found (if any)
+@return true iff any checkpoint has been found */
+[[nodiscard]] bool recv_find_max_checkpoint(
+    log_t &log, Log_checkpoint_location &checkpoint);
+
+/** Adds data from a new log block to the parsing buffer of recv_sys if
+recv_sys->parse_start_lsn is non-zero. Used by the xtrabackup redo log
+copier, which reads and validates the log blocks itself.
+@param[in]  log_block    log block
+@param[in]  scanned_lsn  lsn of how far we were able to find data in this
+                         log block
+@param[in]  len          0 if full block or length of the data to add
+@return true if more data added */
+bool recv_sys_add_to_parsing_buf(const byte *log_block, lsn_t scanned_lsn,
+                                 ulint len);
+
+/** Find the encryption key parsed from the redo log for a tablespace.
+@param[in]  space_id  tablespace id
+@return found flag and the key */
+std::tuple<bool, recv_sys_t::Encryption_Key *> recv_find_encryption_key(
+    space_id_t space_id);
+#endif /* XTRABACKUP */
 
 #include "log0recv.ic"
 

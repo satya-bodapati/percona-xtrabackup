@@ -149,7 +149,7 @@ static bool reopen_log_files(lsn_t desired_lsn) {
     xb::error() << "could not find redo log file with LSN " << desired_lsn;
     return false;
   }
-  if (log_encryption_read(log, *file) != DB_SUCCESS) {
+  if (xb_log_encryption_read(log, *file) != DB_SUCCESS) {
     xb::error() << "log_encryption_read failed on file ID " << file->m_id;
     return (false);
   };
@@ -315,9 +315,8 @@ ssize_t Redo_Log_Reader::scan_log_recs(byte *buf, bool is_last, lsn_t start_lsn,
       break;
     }
 
-    if (scanned_epoch_no > 0 &&
-        !log_block_epoch_no_is_valid(block_header.m_epoch_no,
-                                     scanned_epoch_no)) {
+    if (scanned_epoch_no > 0 && block_header.m_epoch_no != scanned_epoch_no &&
+        block_header.m_epoch_no != scanned_epoch_no + 1) {
       /* Garbage from a log buffer flush which was made
       before the most recent database recovery */
 
@@ -380,42 +379,15 @@ bool Redo_Log_Parser::parse_log(const byte *buf, size_t len, lsn_t start_lsn) {
       xb::info() << "Starting to parse redo log at lsn = "
                  << recv_sys->parse_start_lsn;
 
-      if (recv_sys->parse_start_lsn < recv_sys->checkpoint_lsn) {
-        /* We start to parse log records even before
-        checkpoint_lsn, from the beginning of the log
-        block which contains the checkpoint_lsn.
-
-        That's because the first group of log records
-        in the log block, starts before checkpoint_lsn,
-        and checkpoint_lsn could potentially point to
-        the middle of some log record. We need to find
-        the first group of log records that starts at
-        or after checkpoint_lsn. This could be only
-        achieved by traversing all groups of log records
-        that start within the log block since the first
-        one (to discover their beginnings we need to
-        parse them). However, we don't want to report
-        missing tablespaces for space_id in log records
-        before checkpoint_lsn. Hence we need to ignore
-        those records and that's why we need a counter
-        of bytes to ignore. */
-
-        recv_sys->bytes_to_ignore_before_checkpoint =
-            recv_sys->checkpoint_lsn - recv_sys->parse_start_lsn;
-
-        ut_a(recv_sys->bytes_to_ignore_before_checkpoint <=
-             OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE);
-
-        ut_a(recv_sys->checkpoint_lsn % OS_FILE_LOG_BLOCK_SIZE +
-                 LOG_BLOCK_TRL_SIZE <
-             OS_FILE_LOG_BLOCK_SIZE);
-
-        ut_a(recv_sys->parse_start_lsn % OS_FILE_LOG_BLOCK_SIZE >=
-             LOG_BLOCK_HDR_SIZE);
-      }
-
+      /* The parse can start before checkpoint_lsn, from the first group of
+      log records in the block which contains checkpoint_lsn. The mtrs which
+      start before checkpoint_lsn are parsed but not processed, see
+      process_mtr_and_possibly_apply_records(). */
       recv_sys->scanned_lsn = recv_sys->parse_start_lsn;
       recv_sys->recovered_lsn = recv_sys->parse_start_lsn;
+      recv_sys->previous_recovered_lsn = recv_sys->parse_start_lsn;
+      recv_sys->last_block_first_mtr_boundary = 0;
+      recv_track_changes_of_recovered_lsn();
     }
 
     scanned_lsn += data_len;
@@ -455,7 +427,14 @@ bool Redo_Log_Parser::parse_log(const byte *buf, size_t len, lsn_t start_lsn) {
   if (more_data && !recv_sys->found_corrupt_log) {
     /* Try to parse more log records */
 
-    recv_parse_log_recs();
+    /* Do not apply the records, pass the max() as memory threshold so that
+    the hash table does not overflow. */
+    if (recv_parse_and_apply_log_recs(std::numeric_limits<size_t>::max()) !=
+        DB_SUCCESS) {
+      xb::error() << "Failed to parse the redo log";
+      recv_sys->found_corrupt_log = true;
+      return (false);
+    }
     /* update parsed lsn after we have completed parsing */
     last_parsed_lsn.store(scanned_lsn);
 
@@ -524,9 +503,9 @@ bool Redo_Log_Writer::write_buffer(byte *buf, size_t len) {
     between the read buffer size and the scratch buffer size. */
     ut_a(len <= redo_log_read_buffer_size);
 
-    IORequest req_type(IORequest::WRITE);
+    IORequest req_type(IORequest::Type::WRITE);
     req_type.get_encryption_info().set(log_sys->m_encryption_metadata);
-    ut_ad(req_type.is_encrypted());
+    ut_ad(req_type.is_encryption_requested());
 
     Encryption encryption(req_type.encryption_algorithm());
 
@@ -571,7 +550,7 @@ ssize_t Archived_Redo_Log_Reader::read_logfile(bool *finished) {
   }
 
   if (srv_redo_log_encrypt) {
-    IORequest req_type(IORequest::READ);
+    IORequest req_type(IORequest::Type::READ);
     req_type.get_encryption_info().set(log_sys->m_encryption_metadata);
     Encryption encryption(req_type.encryption_algorithm());
     auto err = encryption.decrypt_log(log_buf, len);
@@ -918,7 +897,7 @@ void Archived_Redo_Log_Monitor::thread_func() {
         hdr_len -= n_read;
       }
       if (srv_redo_log_encrypt) {
-        IORequest req_type(IORequest::READ);
+        IORequest req_type(IORequest::Type::READ);
         req_type.get_encryption_info().set(log_sys->m_encryption_metadata);
         Encryption encryption(req_type.encryption_algorithm());
         auto err = encryption.decrypt_log(buf, hdr_len);
@@ -965,8 +944,6 @@ bool Redo_Log_Data_Manager::init() {
 
   thread = os_thread_create(PFS_NOT_INSTRUMENTED, 0, [this] { copy_func(); });
 
-  lsn_t flushed_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
-
   if (xtrabackup_register_redo_log_consumer) {
     if (!redo_log_consumer.check()) {
       xtrabackup_register_redo_log_consumer = false;
@@ -984,7 +961,7 @@ bool Redo_Log_Data_Manager::init() {
     }
   }
 
-  if (log_sys_init(false, flushed_lsn, flushed_lsn) != DB_SUCCESS) {
+  if (log_sys_init(false) != DB_SUCCESS) {
     return (false);
   }
   lsn_t checkpoint_lsn;
@@ -999,7 +976,7 @@ bool Redo_Log_Data_Manager::init() {
     xb::error() << " Cannot find file with checkpoint " << checkpoint_lsn;
     return (false);
   }
-  if (log_encryption_read(*log_sys, *file) != DB_SUCCESS) {
+  if (xb_log_encryption_read(*log_sys, *file) != DB_SUCCESS) {
     xb::error() << "log_encryption_read failed on file ID " << file->m_id;
     return (false);
   };
