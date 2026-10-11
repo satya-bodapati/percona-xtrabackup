@@ -95,16 +95,12 @@ class Tablespace {
     }
   }
 
-  files_t::iterator files_begin() { return m_files.begin(); }
-
-  files_t::iterator files_end() { return m_files.end(); }
-
   // Disable copying
   Tablespace(const Tablespace &) = delete;
 
   Tablespace &operator=(const Tablespace &) = delete;
 
-#ifdef UNIV_HOTBACKUP
+#if defined(UNIV_HOTBACKUP) || defined(XTRABACKUP)
   virtual void reset() {
     if (m_name != nullptr) {
       ut::free(m_name);

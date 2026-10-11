@@ -71,6 +71,11 @@ class Tablespace_node_handle final : public Tablespace_node_handle_interface {
                                            Callback callback) override;
 #endif /* !UNIV_HOTBACKUP */
 
+#ifdef XTRABACKUP
+  /** @return the OS file handle, used by xtrabackup to copy the node. */
+  [[nodiscard]] pfs_os_file_t get_os_file() const { return m_handle; }
+#endif /* XTRABACKUP */
+
  private:
 #ifndef UNIV_HOTBACKUP
   /** Checks if the page read by a successful asynchronous read contains the

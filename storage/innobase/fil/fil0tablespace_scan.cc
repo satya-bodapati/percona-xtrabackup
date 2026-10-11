@@ -31,6 +31,7 @@ The scanned tablespaces at startup */
 #include "fil0tablespace_scan.h"
 #include "os0thread-create.h" /* par_for */
 #include "scope_guard.h"
+#include "xb0xb.h"
 
 namespace ib::fil {
 
@@ -281,9 +282,11 @@ dberr_t Scanned_tablespace_dirs::scan() {
 
     ib::info(ER_IB_MSG_SCANNING_DIR, dir.path().c_str());
 
-    /* Walk the sub-tree of dir. */
+    /* Walk the sub-tree of dir. If it is undo tablespaces only discovery,
+    used by xtrabackup, we dont do look into sub directories */
+    const bool walk_subtree = !(IF_XB(m_xb_only_undo ||) false);
 
-    Dir_Walker::walk(real_path_dir, true, [&](const std::string &path) {
+    Dir_Walker::walk(real_path_dir, walk_subtree, [&](const std::string &path) {
       /* If it is a file and the suffix matches ".ibd"
       or the undo file name format then store it for
       determining the space ID. */
@@ -294,8 +297,9 @@ dberr_t Scanned_tablespace_dirs::scan() {
       /* Check if need to alter partition file names to lower case. */
       std::string new_path;
 
-      if (m_partition_file_names_upgrader.get_partition_file(path, IBD,
-                                                             new_path)) {
+      /* xtrabackup never renames the files of the server. */
+      if (IF_XB(false &&) m_partition_file_names_upgrader.get_partition_file(
+              path, IBD, new_path)) {
         /* Note all old file names to be renamed. */
         ut_ad(!new_path.empty());
         m_partition_file_names_upgrader.add_old_path(path);
@@ -312,11 +316,12 @@ dberr_t Scanned_tablespace_dirs::scan() {
 
       using Value = Scanned_files::value_type;
 
-      if (Fil_path::has_suffix(IBD, file.c_str())) {
-        ibd_files.push_back(Value{count, file});
-
-      } else if (Fil_path::is_undo_tablespace_name(file)) {
+      if (Fil_path::is_undo_tablespace_name(file)) {
         undo_files.push_back(Value{count, file});
+      } else if (IF_XB(m_xb_only_undo ||) false) {
+        return;
+      } else if (Fil_path::has_suffix(IBD, file.c_str())) {
+        ibd_files.push_back(Value{count, file});
       }
 
       if (std::chrono::steady_clock::now() - start_time >= PRINT_INTERVAL) {
@@ -366,13 +371,21 @@ dberr_t Scanned_tablespace_dirs::scan() {
       check = std::bind(&Scanned_tablespace_dirs::duplicate_check, this, _1, _2,
                         _3, _4, _5, _6);
 
-  par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, check, &m, &unique,
-          &duplicates);
+#ifdef XTRABACKUP
+  /* When the tablespaces are loaded into the fil cache they are opened
+  directly from the file list below, the space id to file mapping is not
+  needed for them. */
+  if (!m_xb_populate_fil_cache && ibd_files.size() > 0)
+#endif /* XTRABACKUP */
+    par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, check, &m, &unique,
+            &duplicates);
 
   duplicate_check(undo_files.begin(), undo_files.end(), n_threads, &m, &unique,
                   &duplicates);
 
+#ifndef XTRABACKUP
   ut_a(m_checked == ibd_files.size() + undo_files.size());
+#endif /* !XTRABACKUP */
 
   ib::info(ER_IB_MSG_383) << "Completed space ID check of " << m_checked.load()
                           << " files.";
@@ -390,8 +403,147 @@ dberr_t Scanned_tablespace_dirs::scan() {
     err = DB_SUCCESS;
   }
 
+#ifdef XTRABACKUP
+  debug_sync_point("xtrabackup_suspend_between_file_discovery_and_open");
+  debug_sync_thread("xtrabackup_suspend_between_file_discovery_and_open");
+
+  if (err == DB_SUCCESS && m_xb_populate_fil_cache && !m_xb_only_undo) {
+    bool result = true;
+    std::function<void(const Const_iter &, const Const_iter &, size_t, bool &)>
+        open = std::bind(&Scanned_tablespace_dirs::xb_open_ibd, this, _1, _2,
+                         _3, _4);
+
+    par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, open, result);
+
+    if (!result) err = DB_FAIL;
+  }
+#endif /* XTRABACKUP */
+
   return err;
 }
+
+#ifdef XTRABACKUP
+void Scanned_tablespace_dirs::xb_open_ibd(const Const_iter &start,
+                                          const Const_iter &end,
+                                          size_t thread_id [[maybe_unused]],
+                                          bool &result) {
+  if (!result) return;
+
+  for (auto it = start; it != end; ++it) {
+    const std::string filename = it->second;
+    const auto &files = m_scanned_dirs_and_files[it->first];
+    const std::string phy_filename = files.path() + filename;
+
+    if (check_if_skip_table(filename.c_str())) {
+      continue;
+    }
+    /* With lock-ddl=reduced, prepare on such backup directories, we open
+    tablespaces before recovery starts. This is required to process to
+    space_id.del or .ren files. Hence, we have to tolerate encryption errors
+    during first-page validation. Hence, we use a separate opening function of
+    reduced mode */
+    if (xtrabackup_prepare && opt_lock_ddl == LOCK_DDL_REDUCED &&
+        !xtrabackup_incremental) {
+      dberr_t err = fil_open_for_reduced(phy_filename);
+      if (err != DB_SUCCESS) {
+        result = false;
+      }
+    } else {
+      dberr_t err;
+      std::tie(err, std::ignore) = fil_open_for_xtrabackup(
+          phy_filename, filename.substr(0, filename.length() - 4));
+      if ((err == DB_TABLESPACE_EXISTS || err == DB_CANNOT_OPEN_FILE) &&
+          opt_lock_ddl == LOCK_DDL_REDUCED) {
+        /* table was renamed during scan. Since original table was loaded to
+        cache and rename ddl will be handled by ddl_tracker we skip loading
+        duplicate tablespace */
+        continue;
+      } else {
+        /* PXB-2275 - Allow DB_INVALID_ENCRYPTION_META as we will test it in
+        the end of the backup */
+        if (err != DB_SUCCESS && err != DB_INVALID_ENCRYPTION_META) {
+          result = false;
+        }
+      }
+    }
+  }
+}
+
+void Scanned_tablespace_dirs::xb_open_ibds() {
+  /* Collect the .ibd files of the last scan. */
+  Scanned_files ibd_files;
+  uint16_t dir_no = 0;
+  for (auto &dir : m_scanned_dirs_and_files) {
+    std::vector<space_id_t> space_ids;
+    dir.get_space_ids(space_ids);
+    for (auto space_id : space_ids) {
+      for (const auto &info : *dir.find_by_id(space_id)) {
+        if (Fil_path::has_suffix(IBD, info.file_name.c_str())) {
+          ibd_files.push_back({dir_no, info.file_name});
+        }
+      }
+    }
+    ++dir_no;
+  }
+
+  const size_t n_threads = fil_get_scan_threads(ibd_files.size());
+
+  const auto open = [&](const Const_iter &start, const Const_iter &end,
+                        size_t thread_id) {
+    size_t count = 0;
+    bool printed_msg = false;
+    auto start_time = std::chrono::steady_clock::now();
+    for (auto it = start; it != end; ++it) {
+      const auto &name = it->second;
+      /* result <dberr_t, space_id_t> */
+      auto [err, space_id] = fil_open_for_xtrabackup(
+          m_scanned_dirs_and_files[it->first].path() + name,
+          name.substr(0, name.length() - 4));
+
+      /* DB_TABLESPACE_EXISTS is allowed because it means a tablespace is
+      already opened by redo */
+      if (err != DB_SUCCESS && err != DB_TABLESPACE_EXISTS &&
+          space_id != SPACE_UNKNOWN) {
+        /* We do not abort immediately on tablespace loading errors (after
+        redo apply. We save them and abort only if there is a prepare on
+        these tablespaces. See dict_load_tables_from_space_id_wrapper() for
+        more information */
+        fil_xb_save_tablespace_error(space_id, err);
+      }
+      ++count;
+
+      if (std::chrono::steady_clock::now() - start_time >= PRINT_INTERVAL) {
+        xb::info() << "Thread# " << thread_id << " - Opened " << count << "/"
+                   << std::distance(start, end) << " tablespaces";
+
+        start_time = std::chrono::steady_clock::now();
+
+        printed_msg = true;
+      }
+    }
+
+    if (printed_msg) {
+      xb::info() << "Thread# " << thread_id << " Opened " << count
+                 << " tablespaces";
+    }
+  };
+
+  std::function<void(const Const_iter &, const Const_iter &, size_t)> fn = open;
+
+  auto begin = std::chrono::high_resolution_clock::now();
+
+  // The parallel for loop. Loads InnoDB tablespaces into cache.
+  par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, fn);
+
+  auto end = std::chrono::high_resolution_clock::now();
+  auto elapsed =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+
+  xb::info() << "Completed loading of " << ibd_files.size()
+             << " tablespaces into cache in " << elapsed.count() * 1e-9
+             << " seconds";
+}
+#endif /* XTRABACKUP */
 
 Scanned_tablespace_dir_and_files::Space_read_info
 Scanned_tablespace_dirs::get_tablespace_info_heavy(

@@ -119,7 +119,7 @@ class SysTablespace : public Tablespace<SysTablespace_node> {
       : Tablespace(space_id, space_type) { /* No op */
   }
 
-#ifdef UNIV_HOTBACKUP
+#if defined(UNIV_HOTBACKUP) || defined(XTRABACKUP)
   void reset() override {
     m_auto_extend_last_file = false;
     m_last_file_size_in_pages_max = 0;

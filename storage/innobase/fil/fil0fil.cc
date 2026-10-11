@@ -50,6 +50,7 @@ The tablespace memory cache */
 #include "dict0dict.h"
 #include "fil0fil.h"
 #include "fil0innodb_pages_persistence.h"
+#include "fil0innodb_tablespace_node_handle.h"
 #include "fil0innodb_tablespaces_nodes.h"
 #include "fil0tablespace_node_handle_interface.h" /* Tablespace_node_handle_interface */
 #include "fil0tablespace_scan.h"                  /* tablespace_scanning */
@@ -93,6 +94,7 @@ The tablespace memory cache */
 #endif /* !UNIV_HOTBACKUP */
 
 #include "os0thread-create.h"
+#include "xb0xb.h"
 
 #include "current_thd.h"
 
@@ -317,7 +319,10 @@ enum fil_load_status {
   FIL_LOAD_MISMATCH,
 
   /** Doublewrite buffer corruption */
-  FIL_LOAD_DBWLR_CORRUPTION
+  FIL_LOAD_DBWLR_CORRUPTION,
+
+  /** Invalid encrytion metadata in page 0 */
+  FIL_LOAD_INVALID_ENCRYPTION_META
 };
 
 /** File operations for tablespace */
@@ -879,6 +884,39 @@ class Fil_shard {
   @return any error returned by the callback function. */
   [[nodiscard]] dberr_t iterate(Fil_iterator::Function &f);
 
+#ifdef XTRABACKUP
+  /** Iterate through all persistent tablespaces (FIL_TYPE_TABLESPACE).
+  @param[in]  f   Callback
+  @return any error returned by the callback function. */
+  [[nodiscard]] dberr_t iterate_spaces(Fil_space_iterator::Function &f);
+
+  /** Save tablespace error in cache. This is retrieved later on
+  rollback on tables. If a tablespace cannot be loaded due to keyring
+  issues, we dont assume it to be dropped and skip rollback. We use
+  this cached error and abort if tablespace cannot be loaded to due to
+  an error
+  @param[in]	space_id	tablespace id
+  @param[in]    err		DB_* error that occurred on tablespace */
+  void xb_save_tablespace_error(space_id_t space_id, dberr_t err) {
+    mutex_acquire();
+    m_errored_spaces.insert({space_id, err});
+    mutex_release();
+  }
+
+  /** Retrieve a tablespace error that occurred during tablespace loading
+  stage. This is used at rollback phase
+  @param[in]	space_id	tablespace id
+  @return DB_ERROR_UNSET if no error occured, else DB_* error */
+  dberr_t xb_get_tablespace_error(space_id_t space_id) {
+    mutex_acquire();
+    auto it = m_errored_spaces.find(space_id);
+    const auto err =
+        (it == m_errored_spaces.end() ? DB_ERROR_UNSET : it->second);
+    mutex_release();
+    return err;
+  }
+#endif /* XTRABACKUP */
+
   /** Open an ibd tablespace and add it to the InnoDB data structures.
   This is similar to fil_ibd_open() except that it is used while processing the
   redo log, so the data dictionary is not available and very little validation
@@ -971,6 +1009,13 @@ class Fil_shard {
   from memory. All reads and writes must be done under the shard mutex. */
   Deleted_spaces m_deleted_spaces;
 #endif /* !UNIV_HOTBACKUP */
+
+#ifdef XTRABACKUP
+  /** Map of tablespaces that are errored out at loading stage. We do
+  not abort immediately. We only abort if there is a rollback on such
+  tablespaces. This map is used to find such errored tablespaces  */
+  std::unordered_map<space_id_t, dberr_t> m_errored_spaces;
+#endif /* XTRABACKUP */
 
   /** Base node for the LRU list of the most recently used open
   files with no pending I/O's; if we start an I/O on the file,
@@ -1379,6 +1424,10 @@ class Fil_system {
   Fil_system &operator=(const Fil_system &) = delete;
 
   friend class Fil_shard;
+#ifdef XTRABACKUP
+  friend class Fil_space_iterator;
+  friend dberr_t fil_open_for_reduced(const std::string &path);
+#endif /* XTRABACKUP */
 };
 
 /** The tablespace memory cache. This variable is nullptr before the module is
@@ -2493,6 +2542,17 @@ dberr_t fil_space_t::validate_first_page() {
   const page_size_t on_disk_page_size(on_disk_flags);
   const auto on_disk_physical_page_size = on_disk_page_size.physical();
 
+#ifdef XTRABACKUP
+  /* With lock_ddl=LOCK_DDL_REDUCED the backup copies the files while DDLs are
+  running. A file can be truncated, re-created (undo truncation) or not fully
+  initialized yet. Report a failure to open it, ddl_tracker handles it. */
+  if (srv_backup_mode && opt_lock_ddl == LOCK_DDL_REDUCED &&
+      (file.get_cached_size_in_pages() < expected_min_file_size_in_pages ||
+       on_disk_space_id != id)) {
+    return DB_CANNOT_OPEN_FILE;
+  }
+#endif /* XTRABACKUP */
+
   if (file.get_cached_size_in_pages() < expected_min_file_size_in_pages) {
     const auto file_size_in_bytes =
         file.get_cached_size_in_pages() * on_disk_physical_page_size;
@@ -2535,7 +2595,17 @@ dberr_t fil_space_t::validate_first_page() {
   if (recv_recovery_is_on() || id == TRX_SYS_SPACE) {
     flags = on_disk_flags;
   } else {
-    if (flags != on_disk_flags) {
+    /* xtrabackup may read undo tablespace just after reintialized but
+    encryption flags are not written yet on the page. xtrabackup can
+    detect encryption from recovery and set the in-memory space->flags
+    to be encrypted. So on-disk (flags) may not have encryption set
+    but in-memory flags have encryption set (from redo parsing). This
+    happens undo because it writes space flags in two separate
+    steps. Also general tablespaces are affected because the encryption is
+    in-place. */
+    if (flags != on_disk_flags IF_XB(&&!(opt_lock_ddl == LOCK_DDL_REDUCED &&
+                                         (fsp_is_undo_tablespace(id) ||
+                                          fsp_is_shared_tablespace(flags))))) {
       ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_TABLESPACE_FLAGS_MISMATCH,
                 ulong{flags}, file.name, ulonglong{on_disk_flags});
     }
@@ -3070,7 +3140,11 @@ There must not be any pending i/o's or flushes on the files.
 @param[in]      space_id        Tablespace ID
 @param[in]      x_latched       Whether the caller holds X-mode space->latch
 @return true if success */
-static bool fil_space_free(space_id_t space_id, bool x_latched) {
+#ifndef XTRABACKUP
+static
+#endif /* !XTRABACKUP */
+    bool
+    fil_space_free(space_id_t space_id, bool x_latched) {
   ut_ad(space_id != TRX_SYS_SPACE);
 
   const auto shard = fil_system->shard_by_id(space_id);
@@ -3643,6 +3717,82 @@ dberr_t Fil_system::iterate(Fil_iterator::Function &f) {
 }
 
 dberr_t Fil_iterator::iterate(Function &&f) { return fil_system->iterate(f); }
+
+#ifdef XTRABACKUP
+dberr_t Fil_shard::iterate_spaces(Fil_space_iterator::Function &f) {
+  mutex_acquire();
+
+  for (auto &elem : m_spaces) {
+    auto space = elem.second;
+
+    if (space->purpose != FIL_TYPE_TABLESPACE) {
+      continue;
+    }
+
+    dberr_t err = f(space);
+
+    if (err != DB_SUCCESS) {
+      mutex_release();
+
+      return err;
+    }
+  }
+
+  mutex_release();
+
+  return DB_SUCCESS;
+}
+
+dberr_t Fil_space_iterator::iterate(Function &&f) {
+  for (auto shard : fil_system->m_shards) {
+    dberr_t err = shard->iterate_spaces(f);
+
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+  }
+
+  return DB_SUCCESS;
+}
+
+bool fil_node_open_file(fil_node_t *file) {
+  auto shard = fil_system->shard_by_id(file->space->id);
+
+  shard->mutex_acquire();
+
+  const auto err = shard->open_file(file);
+
+  shard->mutex_release();
+
+  return err == DB_SUCCESS;
+}
+
+void fil_node_close_file(fil_node_t *file) {
+  auto shard = fil_system->shard_by_id(file->space->id);
+
+  shard->mutex_acquire();
+
+  if (file->is_open() && file->can_be_closed()) {
+    shard->close_file(file);
+  }
+
+  shard->mutex_release();
+}
+
+pfs_os_file_t fil_node_t::xb_get_os_file() const {
+  ut_a(m_is_open);
+  return static_cast<const ib::fil::Tablespace_node_handle *>(m_handle.get())
+      ->get_os_file();
+}
+
+void fil_xb_save_tablespace_error(space_id_t space_id, dberr_t err) {
+  fil_system->shard_by_id(space_id)->xb_save_tablespace_error(space_id, err);
+}
+
+dberr_t fil_xb_get_tablespace_error(space_id_t space_id) {
+  return fil_system->shard_by_id(space_id)->xb_get_tablespace_error(space_id);
+}
+#endif /* XTRABACKUP */
 
 /** Sets the max tablespace id counter if the given number is bigger than the
 previous value.
@@ -4233,10 +4383,10 @@ dberr_t Fil_shard::space_delete(space_id_t space_id) {
 #endif /* !UNIV_HOTBACKUP */
 
   if (!is_space_temporary) {
-#ifdef UNIV_HOTBACKUP
+#if defined(UNIV_HOTBACKUP) || defined(XTRABACKUP)
     /* When replaying the operation in MySQL Enterprise
     Backup, we do not try to write any log record. */
-#else  /* UNIV_HOTBACKUP */
+#else  /* UNIV_HOTBACKUP || XTRABACKUP */
     /* Before deleting the file, write a log record about it, so that
     InnoDB crash recovery will expect the file to be gone. */
     mtr_t mtr;
@@ -4255,7 +4405,7 @@ dberr_t Fil_shard::space_delete(space_id_t space_id) {
         UT_LOCATION_HERE);
 
     DBUG_EXECUTE_IF("space_delete_crash", DBUG_SUICIDE(););
-#endif /* UNIV_HOTBACKUP */
+#endif /* UNIV_HOTBACKUP || XTRABACKUP */
   }
 
   mutex_acquire();
@@ -4493,8 +4643,10 @@ dberr_t fil_discard_tablespace(space_id_t space_id) {
 @param[in]      old_name        Tablespace file name
 @param[in]      new_name        Tablespace file name after renaming
 @param[in,out]  mtr             Mini-transaction */
-static void fil_name_write_rename(space_id_t space_id, const char *old_name,
-                                  const char *new_name, mtr_t *mtr) {
+[[maybe_unused]] static void fil_name_write_rename(space_id_t space_id,
+                                                   const char *old_name,
+                                                   const char *new_name,
+                                                   mtr_t *mtr) {
   ut_ad(!fsp_is_system_or_temp_tablespace(space_id));
   ut_ad(!fsp_is_undo_tablespace(space_id));
 
@@ -4518,8 +4670,10 @@ static void fil_name_write_rename(space_id_t space_id, const char *old_name,
 @param[in]      size            Number of bytes by which the file
                                 is extended starting from the offset
 @param[in,out]  mtr             Mini-transaction */
-static void fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
-                                      os_offset_t size, mtr_t *mtr) {
+[[maybe_unused]] static void fil_op_write_space_extend(space_id_t space_id,
+                                                       os_offset_t offset,
+                                                       os_offset_t size,
+                                                       mtr_t *mtr) {
   byte *log_ptr;
 
   if (!mlog_open(mtr, 7 + 8 + 8, log_ptr)) {
@@ -4962,7 +5116,7 @@ dberr_t Fil_shard::space_rename(space_id_t space_id, const char *old_path,
   char *old_space_name = space->name;
   char *new_space_name = mem_strdup(new_name);
 
-#ifndef UNIV_HOTBACKUP
+#if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP)
   if (!recv_recovery_is_on()) {
     mtr_t mtr;
     mtr.start();
@@ -4976,7 +5130,7 @@ dberr_t Fil_shard::space_rename(space_id_t space_id, const char *old_path,
         ib::redo::handler->persist_smaller_than(mtr.commit_lsn()),
         UT_LOCATION_HERE);
   }
-#endif /* !UNIV_HOTBACKUP */
+#endif /* !UNIV_HOTBACKUP && !XTRABACKUP */
 
   ut_ad(strchr(old_file_name, OS_PATH_SEPARATOR) != nullptr);
   ut_ad(strchr(new_file_name, OS_PATH_SEPARATOR) != nullptr);
@@ -5255,7 +5409,7 @@ dberr_t fil_write_initial_pages(pfs_os_file_t file, const char *path,
 
   DEBUG_SYNC_C("fil_ibd_created_space");
 
-#ifndef UNIV_HOTBACKUP
+#if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP)
   /* Temporary tablespace creation need not be redo logged */
   if (type != FIL_TYPE_TEMPORARY) {
     /* Typically, InnoDB follows the WAL rule: describes action it plans to do,
@@ -5289,7 +5443,7 @@ dberr_t fil_write_initial_pages(pfs_os_file_t file, const char *path,
                     pages_persistence->request_sharp_checkpoint(););
   }
 
-#endif /* !UNIV_HOTBACKUP */
+#endif /* !UNIV_HOTBACKUP && !XTRABACKUP */
   const auto shard = fil_system->shard_by_id(space_id);
   const auto err = shard->create_node(path, space, false, PAGE_NO_MAX);
   /* We just created the file successfully, no errors are expected at this
@@ -5585,8 +5739,18 @@ fil_load_status Fil_shard::ibd_open_for_recovery(space_id_t space_id,
   if (tablespace_scanning != nullptr) {
     const auto scanned_file_page_size =
         tablespace_scanning->get_tablespace_page_size(space_id);
+#ifdef XTRABACKUP
+    /* With lock_ddl=LOCK_DDL_REDUCED, xtrabackup opens the .ibd files before
+    the recovery without the space id to file name mapping. */
+    physical_page_size = scanned_file_page_size
+                             ? *scanned_file_page_size
+                             : tablespace_scanning->xb_scanned_dirs()
+                                   .xb_get_tablespace_info(path)
+                                   .physical_page_size;
+#else
     ut_a(scanned_file_page_size);
     physical_page_size = *scanned_file_page_size;
+#endif /* XTRABACKUP */
   }
 #endif /* !UNIV_HOTBACKUP */
 
@@ -5606,8 +5770,13 @@ fil_load_status Fil_shard::ibd_open_for_recovery(space_id_t space_id,
   if (err == DB_INVALID_ENCRYPTION_META) {
     ut_a(tablespace_scanning != nullptr);
     bool success = tablespace_scanning->erase_path(space_id);
+#ifdef XTRABACKUP
+    (void)success;
+    return FIL_LOAD_INVALID_ENCRYPTION_META;
+#else
     ut_a(success);
     return FIL_LOAD_NOT_FOUND;
+#endif /* XTRABACKUP */
   }
 
   ut_a(df.get_cached_space_id() == space_id);
@@ -5737,6 +5906,17 @@ fil_load_status Fil_shard::ibd_open_for_recovery(space_id_t space_id,
       ib::error(ER_IB_MSG_312, space->name);
     }
   }
+
+#ifdef XTRABACKUP
+  if (FSP_FLAGS_GET_ENCRYPTION(space->flags) && !srv_backup_mode &&
+      use_dumped_tablespace_keys) {
+    if (xb_set_encryption(space) != DB_SUCCESS) {
+      xb::error() << "Cannot find encryption key for tablespace "
+                  << SQUOTE(space->name);
+      return FIL_LOAD_INVALID;
+    }
+  }
+#endif /* XTRABACKUP */
 
   /* Set encryption operation in progress */
   space->encryption_op_in_progress = df.m_encryption_op_in_progress;
@@ -6043,7 +6223,7 @@ bool Fil_shard::space_extend(fil_space_t *space,
   /* Number of pages to extend the node by. */
   const auto n_pages_to_extend = new_min_size_in_pages - space->m_size_in_pages;
 
-#if !defined(UNIV_HOTBACKUP) && defined(UNIV_LINUX)
+#if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP) && defined(UNIV_LINUX)
   /* Do not write redo log, during replay and, for temporary tablespaces
   because they are reinitialized during startup hence they need not be
   recovered during replay. */
@@ -6103,7 +6283,7 @@ bool Fil_shard::space_extend(fil_space_t *space,
 
     DBUG_INJECT_CRASH("ib_crash_after_writing_redo_extend", 1);
   }
-#endif /* !UNIV_HOTBACKUP && UNIV_LINUX */
+#endif /* !UNIV_HOTBACKUP && !XTRABACKUP && UNIV_LINUX */
 
   DBUG_EXECUTE_IF("ib_crash_during_tablespace_extension", DBUG_SUICIDE(););
 
@@ -6136,6 +6316,12 @@ bool Fil_shard::space_extend(fil_space_t *space,
   DBUG_EXECUTE_IF("fil_crash_after_extend", DBUG_SUICIDE(););
   return success;
 }
+
+#ifdef XTRABACKUP
+/* See fil0fil.h. Off by default; enabled only around the --check-tables
+phase, which must never modify the backup. */
+std::atomic<bool> fil_check_tables_no_extend = false;
+#endif /* XTRABACKUP */
 
 /** Try to extend a tablespace if it is smaller than the specified size.
 @param[in,out]  space           Tablespace ID
@@ -6909,6 +7095,16 @@ static void fil_report_invalid_page_access_low(page_no_t block_offset,
 @param[in]      space           table space */
 void fil_io_set_encryption(IORequest &req_type, const page_id_t &page_id,
                            fil_space_t *space) {
+#ifdef XTRABACKUP
+  /* Don't encrypt pages of system tablespace upto TRX_SYS_PAGE(including). The
+  doublewrite buffer header is on TRX_SYS_PAGE */
+  if (fsp_is_system_tablespace(space->id) &&
+      page_id.page_no() <= FSP_TRX_SYS_PAGE_NO) {
+    req_type.clear_encrypted();
+    return;
+  }
+#endif /* XTRABACKUP */
+
   ut_a(!req_type.is_log());
   /* Don't encrypt page 0 of all tablespaces except redo log
   tablespace, all pages from the system tablespace. */
@@ -7082,7 +7278,41 @@ dberr_t Fil_shard::do_io(const IORequest::Type type, bool sync,
 #endif /* !UNIV_HOTBACKUP */
 
   auto page_no = page_id.page_no();
-  const auto file = space->get_node_for_page_no(page_no);
+  auto file = space->get_node_for_page_no(page_no);
+
+#ifdef XTRABACKUP
+  if (file == nullptr && !req_type.ignore_missing() &&
+      space->files.size() == 1) {
+    /* --check-tables is strictly read-only. An out-of-bounds page number
+    reaching here during table validation comes from corrupt page data (a
+    bad sibling/child/segment pointer), not from a short-copied file that
+    needs extending during redo apply (PXB-1819). Refuse to grow the file:
+    return an error so the read fails fast (no retry, no multi-terabyte
+    posix_fallocate) and the backup is left untouched. The corruption
+    itself is reported by the validation-layer gates in btr_validate_*. */
+    if (fil_check_tables_no_extend.load()) {
+      ib::error() << "check-tables: page " << page_id.page_no()
+                  << " is outside the bounds of tablespace " << space->id
+                  << " (" << space->name << ", size " << space->m_size_in_pages
+                  << " pages); refusing to extend a backup file during"
+                     " read-only validation. The page pointer is corrupt.";
+      mutex_release();
+      return postprocess_result(DB_ERROR);
+    }
+
+    /* Extend the file if the page_no does not fall inside its bounds
+    because xtrabackup may have copied it when it was smaller */
+    mutex_release();
+
+    if (!space_extend(space, page_id.page_no() + 1)) {
+      return postprocess_result(DB_ERROR);
+    }
+
+    mutex_acquire();
+    page_no = page_id.page_no();
+    file = space->get_node_for_page_no(page_no);
+  }
+#endif /* XTRABACKUP */
 
   if (file == nullptr) {
     /* If we can tolerate the non-existent pages, we should return with
@@ -8197,11 +8427,14 @@ dberr_t fil_set_autoextend_size(space_id_t space_id, uint64_t autoextend_size) {
 
 dberr_t fil_set_encryption(space_id_t space_id, Encryption::Type algorithm,
                            byte *key, byte *iv) {
+#ifndef XTRABACKUP
+  /* Percona Server can encrypt the system tablespace. */
   ut_ad(space_id != TRX_SYS_SPACE);
 
   if (fsp_is_system_or_temp_tablespace(space_id)) {
     return DB_IO_NO_ENCRYPT_TABLESPACE;
   }
+#endif /* !XTRABACKUP */
 
   auto shard = fil_system->shard_by_id(space_id);
 
@@ -8805,6 +9038,9 @@ static void fil_tablespace_encryption_init(const fil_space_t *space) {
                                << " for tablespace" << space->name << "!";
     }
 
+#ifndef XTRABACKUP
+    /* xtrabackup keeps the keys found in the redo log, they are looked up
+    again later (recv_find_encryption_key()). */
     ut::free(key.iv);
     ut::free(key.ptr);
 
@@ -8812,6 +9048,7 @@ static void fil_tablespace_encryption_init(const fil_space_t *space) {
     key.ptr = nullptr;
 
     key.space_id = SPACE_UNKNOWN;
+#endif /* !XTRABACKUP */
   }
 }
 
@@ -9076,8 +9313,9 @@ bool Fil_system::lookup_for_recovery(space_id_t space_id) {
       ut_a(recv_sys->missing_ids.count(space_id) == 0);
 
       /* Every time a space_id is marked deleted, the path
-      is also removed from m_dirs. */
-      ut_a(recv_sys->deleted.count(space_id) == 0);
+      is also removed from m_dirs. Unless in xtrabackup, which never replays
+      file operations from the redo log during --prepare. */
+      ut_a(recv_sys->deleted.count(space_id) == 0 IF_XB(|| true));
     } else {
       /* Should belong to exactly one of `deleted` or `missing_ids`, as whenever
       adding to deleted we remove from missing_ids, and
@@ -9114,9 +9352,15 @@ Dirs_in_datadir Dirs_in_datadir::make() {
   }
 
   Dir_Walker::walk(datadir, false, [&](const std::string &path) {
+#ifdef XTRABACKUP
+    if (std::get<1>(Dir_Walker::is_directory(path)) != OS_FILE_TYPE_DIR) {
+      return;
+    }
+#else
     if (!Dir_Walker::is_directory(path)) {
       return;
     }
+#endif /* XTRABACKUP */
 
     const auto schema_dir = fil_real_dir_for_lookup(path);
 
@@ -9178,6 +9422,14 @@ dberr_t Fil_system::open_for_recovery(space_id_t space_id) {
 
     return DB_SUCCESS;
   }
+#ifdef XTRABACKUP
+  else if (status == FIL_LOAD_INVALID_ENCRYPTION_META) {
+    xb::error() << "Invalid encryption metadata in tablespace header.";
+    xb::error() << KEYRING_NOT_LOADED;
+
+    exit(EXIT_FAILURE);
+  }
+#endif /* XTRABACKUP */
 
   return DB_FAIL;
 }
@@ -9251,8 +9503,9 @@ Fil_state fil_tablespace_dir_equals(const space_id_t space_id,
   mapping. A space once deleted, can't be created with the same ID. So we should
   never reach here with deleted space. We are running in context of threads of
   DD validation. No one is modifying this data in parallel
-  so it is safe to read it without mutex protection. */
-  ut_a(recv_sys->deleted.count(space_id) == 0);
+  so it is safe to read it without mutex protection. xtrabackup never replays
+  file operations from the redo log during --prepare. */
+  ut_a(recv_sys->deleted.count(space_id) == 0 IF_XB(|| true));
 
   /* A file with this space_id was found during scanning.
   Validate its location and check if it was moved from where
@@ -9864,6 +10117,40 @@ std::optional<bool> fil_tablespace_redo_encryption(const byte *ptr,
   byte iv[Encryption::KEY_LEN] = {0};
   byte key[Encryption::KEY_LEN] = {0};
 
+#ifdef XTRABACKUP
+  if (srv_backup_mode || !use_dumped_tablespace_keys) {
+    Encryption_key e_key{key, iv};
+    if (!Encryption::decode_encryption_info(space_id, e_key, encryption_ptr,
+                                            true)) {
+      if (!srv_backup_mode) {
+        xb::error() << "Cannot decode encryption information in the redo log.";
+        xb::error() << KEYRING_NOT_LOADED;
+        exit(EXIT_FAILURE);
+      }
+      /* The backup checks at the end if the key of the tablespace is
+      available. */
+      return true;
+    }
+  } else {
+    ulint master_key_id =
+        mach_read_from_4(encryption_ptr + Encryption::MAGIC_SIZE);
+    if (Encryption::get_master_key_id() < master_key_id) {
+      Encryption::set_master_key(master_key_id);
+    }
+    bool found = xb_fetch_tablespace_key(space_id, key, iv);
+    ut_a(found);
+  }
+
+  ut_ad(len == Encryption::INFO_SIZE);
+
+  /* xtrabackup remembers the key even if the space is loaded, it is looked up
+  later by recv_find_encryption_key(). */
+  if (space != nullptr) {
+    Encryption::set_or_generate(Encryption::AES, key, iv,
+                                space->m_encryption_metadata);
+    fsp_flags_set_encryption(space->flags);
+  }
+#else
   Encryption_key e_key{key, iv};
   if (!Encryption::decode_encryption_info(space_id, e_key, encryption_ptr,
                                           true)) {
@@ -9881,6 +10168,7 @@ std::optional<bool> fil_tablespace_redo_encryption(const byte *ptr,
     fsp_flags_set_encryption(space->flags);
     return true;
   }
+#endif /* XTRABACKUP */
 
   /* Space is not loaded yet. Remember this key in recv_sys and use it later
   to populate space encryption info once it is loaded. */
@@ -10407,3 +10695,263 @@ bool fil_space_t::initialize_while_extending() const {
   would be explicitly flushed with data or zero filled pages. */
   return (tbsp_extend_and_initialize && !is_bulk_operation_in_progress());
 }
+
+#ifdef XTRABACKUP
+dberr_t fil_scan_for_tablespaces(bool populate_fil_cache, bool only_undo) {
+  /* Every call starts a new scan. */
+  tablespace_scanning = ut::make_unique<ib::fil::Tablespace_scanning>();
+
+  /* This is the default directory for IBD and IBU files. Put it first
+  in the list of known directories. */
+  tablespace_scanning->add_scan_dir(MySQL_datadir_path.path());
+
+  /* Add --innodb-data-home-dir as a known location for IBD and IBU files
+  if it is not already there. */
+  if (srv_data_home != nullptr && *srv_data_home != '\0') {
+    tablespace_scanning->add_scan_dir(Fil_path::remove_quotes(srv_data_home));
+  }
+
+  /* Add --innodb-directories as known locations for IBD and IBU files. */
+  if (srv_innodb_directories != nullptr && *srv_innodb_directories != 0) {
+    tablespace_scanning->add_scan_dirs(
+        Fil_path::remove_quotes(srv_innodb_directories));
+  }
+
+  /* Note whether the undo path is different (not the same or under)
+  from all other known directories. */
+  MySQL_undo_path_is_unique =
+      !tablespace_scanning->is_known_path(MySQL_undo_path.path());
+
+  if (MySQL_undo_path_is_unique) {
+    tablespace_scanning->add_scan_dir(Fil_path::remove_quotes(MySQL_undo_path));
+  }
+
+  ib::info(ER_IB_MSG_378) << "Directories to scan '"
+                          << tablespace_scanning->get_dirs() << "'";
+
+  tablespace_scanning->xb_scanned_dirs().xb_set_scan_options(populate_fil_cache,
+                                                             only_undo);
+
+  return tablespace_scanning->scan();
+}
+
+void fil_open_ibds() { tablespace_scanning->xb_scanned_dirs().xb_open_ibds(); }
+
+space_id_t fil_get_tablespace_id(const std::string &filename) {
+  ib::fil::Scanned_tablespace_dirs dirs;
+  return dirs.xb_get_tablespace_info(filename).space_id;
+}
+
+bool fil_system_get_file_by_space_id(space_id_t space_id, std::string &name) {
+  name = "";
+  if (tablespace_scanning == nullptr || !tablespace_scanning->is_inited()) {
+    return false;
+  }
+  const auto file = tablespace_scanning->get_tablespace_file_by_id(space_id);
+  if (!file) {
+    return false;
+  }
+  name = *file;
+  return true;
+}
+
+std::tuple<dberr_t, space_id_t> fil_open_for_xtrabackup(
+    const std::string &path, const std::string &name) {
+  bool success = false;
+  pfs_os_file_t handle = os_file_create(
+      innodb_data_file_key, path.c_str(),
+      OS_FILE_OPEN | OS_FILE_ON_ERROR_SILENT | OS_FILE_ON_ERROR_NO_EXIT,
+      OS_DATA_FILE, true, &success);
+
+  if (!success) {
+    /* Note that table has been renamed during scan, we will save it in missing
+    tables and copy/rename will be handled by ddl_tracker */
+    if (ddl_tracker && opt_lock_ddl == LOCK_DDL_REDUCED) {
+      ddl_tracker->add_missing_after_discovery(SPACE_UNKNOWN);
+    }
+    return {opt_lock_ddl == LOCK_DDL_REDUCED ? DB_CANNOT_OPEN_FILE : DB_ERROR,
+            SPACE_UNKNOWN};
+  }
+
+  const os_offset_t node_size = os_file_get_size(handle);
+
+  /* The first page is never compressed nor encrypted. Read as much of it as
+  there is, the header fields are at the start of the page. */
+  auto page =
+      ut::make_unique_aligned<byte[]>(UNIV_PAGE_SIZE_MAX, UNIV_PAGE_SIZE_MAX);
+  memset(page.get(), 0, UNIV_PAGE_SIZE_MAX);
+  IORequest request{IORequest::Type::READ |
+                    IORequest::Type::DISABLE_PARTIAL_IO_WARNINGS |
+                    IORequest::Type::NO_COMPRESSION};
+  ulint n_read = 0;
+  const auto read_len = std::min<os_offset_t>(UNIV_PAGE_SIZE, node_size);
+  dberr_t err = read_len == 0 ? DB_SUCCESS
+                              : os_file_read_no_error_handling(
+                                    request, path.c_str(), handle, page.get(),
+                                    0, read_len, &n_read);
+  os_file_close(handle);
+
+  if (err != DB_SUCCESS) {
+    return {DB_CANNOT_OPEN_FILE, SPACE_UNKNOWN};
+  }
+
+  const space_id_t space_id = fsp_header_get_space_id(page.get());
+
+  Encryption_metadata encryption_metadata{};
+  Encryption_key encryption_key{encryption_metadata.m_key,
+                                encryption_metadata.m_iv};
+  uint32_t flags = 0;
+  err = fsp_header_validate(page.get(), space_id, flags, path, false,
+                            encryption_key);
+
+  if (err == DB_PAGE_IS_BLANK) {
+    /* allow corrupted first page for xtrabackup, it could be just
+    zero-filled page, which we'll restore from redo log later */
+    return {DB_SUCCESS, space_id};
+  } else if (err != DB_SUCCESS) {
+    return {err, space_id};
+  }
+
+  if (fil_space_get(space_id)) {
+    /* space already exists */
+    return {DB_TABLESPACE_EXISTS, space_id};
+  }
+
+  const bool is_tmp = FSP_FLAGS_GET_TEMPORARY(flags);
+
+  fil_space_t *space =
+      fil_space_create(name.c_str(), space_id, flags,
+                       is_tmp ? FIL_TYPE_TEMPORARY : FIL_TYPE_TABLESPACE);
+
+  ut_a(space != nullptr);
+
+  err = fil_system->shard_by_id(space_id)->create_node(path.c_str(), space,
+                                                       false, PAGE_NO_MAX);
+  if (err != DB_SUCCESS) {
+    fil_space_free(space->id, false);
+    return {DB_CANNOT_OPEN_FILE, space_id};
+  }
+
+  /* For encrypted tablespace, initialize encryption information.*/
+  if (FSP_FLAGS_GET_ENCRYPTION(flags)) {
+    if (srv_backup_mode || !use_dumped_tablespace_keys) {
+      fsp_flags_set_encryption(space->flags);
+      if (encryption_metadata.can_encrypt() ||
+          !Encryption_metadata{}.match(encryption_metadata)) {
+        err = fil_set_encryption(space->id, Encryption::AES,
+                                 encryption_metadata.m_key,
+                                 encryption_metadata.m_iv);
+      }
+    } else {
+      err = xb_set_encryption(space);
+    }
+
+    ut_ad(err == DB_SUCCESS);
+  }
+
+  /* by opening the tablespace we forcing node and space objects
+  in the cache to be populated with fields from space header */
+  if (const auto open_res = fil_space_open(space->id); !open_res) {
+    if (srv_backup_mode && opt_lock_ddl == LOCK_DDL_REDUCED) {
+      if (fil_close_tablespace(space->id) != DB_SUCCESS)
+        xb::warn() << "Failed to close space_id: " << space->id;
+      return {DB_CANNOT_OPEN_FILE, space_id};
+    }
+
+    xb::error() << "Failed to open tablespace " << space->name;
+  } else {
+    fil_space_release(*open_res);
+  }
+
+  if (!srv_backup_mode || srv_close_files) {
+    fil_space_close(space->id);
+  }
+
+  return {DB_SUCCESS, space_id};
+}
+
+dberr_t fil_open_for_reduced(const std::string &path) {
+  const space_id_t space_id = fil_get_tablespace_id(path);
+  fil_space_t *space;
+
+  switch (fil_system->ibd_open_for_recovery(space_id, path, space)) {
+    case FIL_LOAD_NOT_FOUND:
+      return DB_TABLESPACE_NOT_FOUND;
+
+    case FIL_LOAD_DBWLR_CORRUPTION:
+      return DB_CORRUPTION;
+
+    case FIL_LOAD_INVALID_ENCRYPTION_META:
+      return DB_INVALID_ENCRYPTION_META;
+
+    case FIL_LOAD_INVALID:
+    case FIL_LOAD_MISMATCH:
+    case FIL_LOAD_ID_CHANGED:
+      return DB_CANNOT_OPEN_FILE;
+    default:
+      return DB_SUCCESS;
+  }
+}
+
+bool fil_xb_backup_redo_create(const byte *ptr, const byte *end,
+                               space_id_t space_id) {
+  /* Where 6 = flags (uint32_t) + name len (uint16_t). */
+  if (end <= ptr + 6) {
+    return false;
+  }
+
+  const uint32_t flags = mach_read_from_4(ptr);
+  ptr += 4;
+
+  std::string name, error_str;
+  ptr = parse_path_from_redo(ptr, end, !fsp_is_undo_tablespace(space_id), name,
+                             error_str);
+  if (ptr == nullptr) {
+    return false;
+  }
+
+  const auto tablespace_name = fil_path_to_space_name(name, space_id, flags);
+
+  xb_tablespace_map_add(name.c_str(), tablespace_name.c_str());
+
+  return true;
+}
+
+bool fil_xb_backup_redo_delete(const byte *ptr, const byte *end,
+                               space_id_t space_id) {
+  std::string name, error_str;
+  ptr = parse_path_from_redo(ptr, end, !fsp_is_undo_tablespace(space_id), name,
+                             error_str);
+  if (ptr == nullptr) {
+    return false;
+  }
+
+  recv_sys->deleted.insert(space_id);
+  recv_sys->missing_ids.erase(space_id);
+
+  if (tablespace_scanning != nullptr && tablespace_scanning->is_inited() &&
+      tablespace_scanning->is_tablespace_file_found(space_id)) {
+    fil_space_free(space_id, false);
+
+    bool success = tablespace_scanning->erase_path(space_id);
+    ut_a(success);
+  }
+
+  return true;
+}
+#endif /* XTRABACKUP */
+
+#ifdef XTRABACKUP
+bool fil_space_read_name_and_filepath(space_id_t space_id, char **name,
+                                      char **filepath) {
+  std::string name_str, filepath_str;
+  *name = nullptr;
+  *filepath = nullptr;
+  if (!fil_space_read_name_and_filepath(space_id, name_str, filepath_str)) {
+    return false;
+  }
+  *name = mem_strdup(name_str.c_str());
+  *filepath = mem_strdup(filepath_str.c_str());
+  return true;
+}
+#endif /* XTRABACKUP */

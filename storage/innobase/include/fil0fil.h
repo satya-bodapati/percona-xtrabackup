@@ -370,6 +370,12 @@ class fil_node_t {
   truncation. */
   [[nodiscard]] bool truncate(page_no_t new_size_in_pages);
 
+#ifdef XTRABACKUP
+  /** @return the OS file handle of the opened node. Used by xtrabackup to copy
+  the node directly. */
+  [[nodiscard]] pfs_os_file_t xb_get_os_file() const;
+#endif /* XTRABACKUP */
+
   /** Makes the @p number_of_pages pages, starting with page number @p
   first_page contain all zeros. This can be used to efficiently extend the node
   size. It may be implemented more efficiently than actually writing buffers
@@ -1834,6 +1840,124 @@ void fil_close();
 modifications in the files. */
 void fil_close_all_files();
 
+#ifdef XTRABACKUP
+/** Open a file of a tablespace.
+@param[in,out]  file    Tablespace file
+@return false if the file can't be opened, otherwise true */
+bool fil_node_open_file(fil_node_t *file);
+
+/** Closes a file.
+@param[in] file file to close. */
+void fil_node_close_file(fil_node_t *file);
+
+/** When true, Fil_shard::do_io() must never extend a tablespace to satisfy a
+read whose page number falls outside the current file bounds. Set only for
+the duration of the xtrabackup --check-tables phase, which is strictly
+read-only: an out-of-bounds page number there comes from corrupt page data
+being validated (a bad sibling/child/segment pointer), not from a file that
+xtrabackup copied short and that legitimately needs extending during redo
+apply (see PXB-1819). Refusing to extend keeps --check-tables from modifying
+the backup and turns the bogus read into an error instead of a multi-terabyte
+file growth. Atomic: set/cleared by the main thread around the check-tables
+phase and read concurrently by the check-tables worker and IO threads. */
+extern std::atomic<bool> fil_check_tables_no_extend;
+
+/** Iterate over the tablespaces. */
+class Fil_space_iterator {
+ public:
+  using Function = std::function<dberr_t(fil_space_t *)>;
+
+  /** For each space.
+  @param[in]  f   Callback */
+  template <typename F>
+  static dberr_t for_each_space(F &&f) {
+    return (iterate([=](fil_space_t *sp) { return (f(sp)); }));
+  }
+
+  /** Iterate over the spaces.
+  @param[in,out]  f   Callback */
+  static dberr_t iterate(Function &&f);
+};
+
+/** Open tablespace file for backup.
+@param[in]  path  file path.
+@param[in]  name  space name.
+@return tuple <DB_SUCCESS,space_id> if all OK, else <DB_*, space_id> */
+std::tuple<dberr_t, space_id_t> fil_open_for_xtrabackup(
+    const std::string &path, const std::string &name);
+
+/** Discover tablespaces by reading the header from .ibd files. Can be called
+more than once, every call starts a new scan.
+@param[in] populate_fil_cache  Whether to load tablespaces into fil cache
+@param[in] only_undo           if true, only the undo tablespaces are discovered
+@return DB_SUCCESS if all goes well */
+dberr_t fil_scan_for_tablespaces(bool populate_fil_cache, bool only_undo);
+
+/** Open all known tablespaces. */
+void fil_open_ibds();
+
+/** Open a tablespace when LOCK_DDL_REDUCED is on. Used on --prepare.
+We cannot use fil_open_for_xtrabackup() as we will open before recovery and we
+have to tolerate encryption errors. All we need at this point is
+space_id -> path mapping
+@param[in]  path  File path
+@return DB_SUCCESS if open was successful */
+dberr_t fil_open_for_reduced(const std::string &path);
+
+/** Save tablespace error in cache. This is retrieved later on
+rollback on tables. If a tablespace cannot be loaded due to keyring
+issues, we dont assume it to be dropped and skip rollback. We use
+this cached error and abort if tablespace cannot be loaded to due to
+an error
+@param[in]	space_id	tablespace id
+@param[in]    err		DB_* error that occurred on tablespace */
+void fil_xb_save_tablespace_error(space_id_t space_id, dberr_t err);
+
+/** Retrieve a tablespace error that occurred during tablespace loading
+stage. This is used at rollback phase
+@param[in]	space_id	tablespace id
+@return DB_ERROR_UNSET if no error occured, else DB_* error */
+dberr_t fil_xb_get_tablespace_error(space_id_t space_id);
+
+/** Get the tablespace ID from an .ibd and/or an undo tablespace.
+@param[in]      filename        File name to check
+@return s_invalid_space_id if not found, otherwise the space ID */
+space_id_t fil_get_tablespace_id(const std::string &filename);
+
+/** Fetch the file name opened for a space_id from the last scan.
+@param[in]   space_id  Tablespace ID
+@param[out]  name      the scanned filename
+@return true if the space_id was found. The name is set to an
+empty string if the space_id is not found. */
+bool fil_system_get_file_by_space_id(space_id_t space_id, std::string &name);
+
+/** Frees a space object from the tablespace memory cache.
+Closes a tablespaces files but does not delete them.
+There must not be any pending i/o's or flushes on the files.
+@param[in]      space_id        Tablespace ID
+@param[in]      x_latched       Whether the caller holds X-mode space->latch
+@return true if success */
+bool fil_space_free(space_id_t space_id, bool x_latched);
+
+/** Handle a MLOG_FILE_CREATE record parsed while copying the redo log during
+the backup.
+@param[in]  ptr       record body
+@param[in]  end       end of the record body
+@param[in]  space_id  tablespace id
+@return false on parse error */
+[[nodiscard]] bool fil_xb_backup_redo_create(const byte *ptr, const byte *end,
+                                             space_id_t space_id);
+
+/** Handle a MLOG_FILE_DELETE record parsed while copying the redo log during
+the backup.
+@param[in]  ptr       record body
+@param[in]  end       end of the record body
+@param[in]  space_id  tablespace id
+@return false on parse error */
+[[nodiscard]] bool fil_xb_backup_redo_delete(const byte *ptr, const byte *end,
+                                             space_id_t space_id);
+#endif /* XTRABACKUP */
+
 /** Iterate over the files in all the tablespaces. */
 class Fil_iterator {
  public:
@@ -2333,6 +2457,14 @@ tablespace.
 [[nodiscard]] bool fil_space_read_name_and_filepath(space_id_t space_id,
                                                     std::string &name,
                                                     std::string &filepath);
+
+#ifdef XTRABACKUP
+/** @overload, the name and filepath are allocated with ut::malloc and must be
+freed by the caller with ut::free. */
+[[nodiscard]] bool fil_space_read_name_and_filepath(space_id_t space_id,
+                                                    char **name,
+                                                    char **filepath);
+#endif /* XTRABACKUP */
 
 /** Convert a file path to a tablespace name, based on space ID and its flags.
 @param[in]      file_path  Full path to the tablespace file.

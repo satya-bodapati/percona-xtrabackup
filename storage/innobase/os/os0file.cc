@@ -7354,11 +7354,20 @@ void os_file_reset_umask() {
 #endif /* !_WIN32 */
 
 #ifdef XTRABACKUP
-std::tuple<bool, os_file_type_t> Dir_Walker::is_directory(const Path &path) {
-  os_file_type_t type;
-  bool exists;
+bool os_file_status(const char *path, bool *exists, os_file_type_t *type) {
+  *type = os_file_type(path);
+  if (!os_file_status_is_conclusive(*type)) {
+    *exists = false;
+    return false;
+  }
+  *exists = *type != OS_FILE_TYPE_MISSING;
+  return true;
+}
 
-  os_file_status(path.c_str(), &exists, &type);
+std::tuple<bool, os_file_type_t> Dir_Walker::is_directory(const Path &path) {
+  const os_file_type_t type = os_file_type(path.c_str());
+  const bool exists =
+      os_file_status_is_conclusive(type) && type != OS_FILE_TYPE_MISSING;
 
   return {exists, type};
 }

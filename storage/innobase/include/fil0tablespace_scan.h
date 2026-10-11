@@ -210,6 +210,30 @@ class Scanned_tablespace_dirs {
   @return DB_SUCCESS if all goes well */
   [[nodiscard]] dberr_t scan();
 
+#ifdef XTRABACKUP
+  /** Set the xtrabackup scan options, see fil_scan_for_tablespaces().
+  @param[in] populate_fil_cache  open the found tablespaces and load them into
+                                 the fil cache
+  @param[in] only_undo           only discover the undo tablespaces, do not look
+                                 into sub directories */
+  void xb_set_scan_options(bool populate_fil_cache, bool only_undo) {
+    m_xb_populate_fil_cache = populate_fil_cache;
+    m_xb_only_undo = only_undo;
+  }
+
+  /** Read the space id and the physical page size of a tablespace file.
+  @param[in]  filename  file to read
+  @return space id and page size */
+  [[nodiscard]] Scanned_tablespace_dir_and_files::Space_read_info
+  xb_get_tablespace_info(const std::string &filename) const {
+    return get_tablespace_info(filename);
+  }
+
+  /** Open all the .ibd files found by the scan and load them into the fil
+  cache. */
+  void xb_open_ibds();
+#endif /* XTRABACKUP */
+
   /** Clear all the tablespace file data but leave the list of
   scanned directories in place. */
   void clear() {
@@ -361,6 +385,22 @@ class Scanned_tablespace_dirs {
 
   /** An object to handle partition file names during upgrade. */
   Partition_file_names_upgrader m_partition_file_names_upgrader;
+
+#ifdef XTRABACKUP
+  /** Open the found tablespaces during the scan. */
+  bool m_xb_populate_fil_cache{false};
+
+  /** Discover only undo tablespaces. */
+  bool m_xb_only_undo{false};
+
+  /** Open .ibd files and load them to the fil cache.
+  @param[in]      start      Start of slice
+  @param[in]      end        End of slice
+  @param[in]      thread_id  Thread ID
+  @param[in,out]  result     false in case of failure */
+  void xb_open_ibd(const Const_iter &start, const Const_iter &end,
+                   size_t thread_id, bool &result);
+#endif /* XTRABACKUP */
 };
 
 /** Represents infrastructure needed for tablespace files scanning during
@@ -405,6 +445,13 @@ class Tablespace_scanning {
   void add_scan_dirs(const std::string &directories) {
     m_scanned_dirs.add_scan_dirs(directories);
   }
+
+#ifdef XTRABACKUP
+  /** @return the scanned directories, used to set the xtrabackup options */
+  [[nodiscard]] Scanned_tablespace_dirs &xb_scanned_dirs() {
+    return m_scanned_dirs;
+  }
+#endif /* XTRABACKUP */
 
   /** Discover tablespaces by reading the header from IBD files.
   @return DB_SUCCESS if all goes well */

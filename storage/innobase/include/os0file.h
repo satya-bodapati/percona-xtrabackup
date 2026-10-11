@@ -1618,6 +1618,15 @@ os_file_type() method. It concludes the file status as following :
 @return false Otherwise */
 [[nodiscard]] bool os_file_status_is_conclusive(os_file_type_t type);
 
+#ifdef XTRABACKUP
+/** Check the existence and type of a given path.
+@param[in]   path    pathname of the file
+@param[out]  exists  true if file exists
+@param[out]  type    type of the file (if it exists)
+@return true if call succeeded */
+bool os_file_status(const char *path, bool *exists, os_file_type_t *type);
+#endif /* XTRABACKUP */
+
 /** A helper method that usually is feed the file_type returned by the
 os_file_type() method. It indicates that file exists and there are no access,
 invalid path or other issues.
