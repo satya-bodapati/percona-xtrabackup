@@ -3,14 +3,14 @@
 ########################################################################
 
 . inc/common.sh
-require_server_version_higher_than 5.6.0
+require_debug_pxb_version
 
 remote_dir=$TEST_VAR_ROOT/var1/remote_dir
 
 mkdir -p $remote_dir
 start_server --innodb_directories=$remote_dir
 
-xtrabackup --backup --lock-ddl=OFF --target-dir=$topdir/backup \
+xtrabackup --backup --lock-ddl=REDUCED --target-dir=$topdir/backup \
            --debug-sync="data_copy_thread_func" &
 
 job_pid=$!
@@ -27,8 +27,9 @@ done
 
 xb_pid=`cat $pid_file`
 
-# Create a remote tablespace so that xtrabackup has to replay the corresponding
-# MLOG_FILE_CREATE2 on prepare
+# Create a remote tablespace while the files are copied. DDL during a backup
+# with --lock-ddl=OFF is not safe, the reduced lock tracks the new tablespace
+# and copies it under the backup lock.
 
 
 run_cmd $MYSQL $MYSQL_ARGS test <<EOF

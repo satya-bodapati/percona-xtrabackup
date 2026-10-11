@@ -3113,6 +3113,13 @@ void Fil_shard::space_detach(fil_space_t *space) {
   for (auto &file : space->files) {
     file_close_to_free(&file, space);
   }
+
+#ifdef XTRABACKUP
+  /* xtrabackup frees and reopens the system tablespace (lock-ddl=reduced) */
+  if (space == fil_space_t::s_sys_space) {
+    fil_space_t::s_sys_space = nullptr;
+  }
+#endif /* XTRABACKUP */
 }
 
 /** Frees a space object from the tablespace memory cache.
@@ -5740,17 +5747,22 @@ fil_load_status Fil_shard::ibd_open_for_recovery(space_id_t space_id,
   uint32_t physical_page_size = UNIV_PAGE_SIZE_MIN;
 #ifndef UNIV_HOTBACKUP
   if (tablespace_scanning != nullptr) {
-    const auto scanned_file_page_size =
-        tablespace_scanning->get_tablespace_page_size(space_id);
 #ifdef XTRABACKUP
     /* With lock_ddl=LOCK_DDL_REDUCED, xtrabackup opens the .ibd files before
-    the recovery without the space id to file name mapping. */
+    the recovery, during the scan, without the space id to file name mapping.
+    */
+    const auto scanned_file_page_size =
+        tablespace_scanning->is_inited()
+            ? tablespace_scanning->get_tablespace_page_size(space_id)
+            : std::nullopt;
     physical_page_size = scanned_file_page_size
                              ? *scanned_file_page_size
                              : tablespace_scanning->xb_scanned_dirs()
                                    .xb_get_tablespace_info(path)
                                    .physical_page_size;
 #else
+    const auto scanned_file_page_size =
+        tablespace_scanning->get_tablespace_page_size(space_id);
     ut_a(scanned_file_page_size);
     physical_page_size = *scanned_file_page_size;
 #endif /* XTRABACKUP */
@@ -7768,6 +7780,11 @@ void fil_close() {
   tablespace_scanning.reset();
 
   fil_system = nullptr;
+
+#ifdef XTRABACKUP
+  /* xtrabackup initializes the tablespace memory cache more than once. */
+  fil_space_t::s_sys_space = nullptr;
+#endif /* XTRABACKUP */
 }
 
 #ifndef UNIV_HOTBACKUP
