@@ -148,8 +148,4 @@ extern bool srv_start_raw_disk_in_use;
 @return DB_SUCCESS or error code */
 dberr_t srv_undo_tablespaces_init(bool create_new_db, bool backup_mode);
 
-/** Free the resources occupied by undo::spaces and trx_sys_undo_spaces,
-called once during thread de-initialization. */
-void undo_spaces_deinit();
-
 #endif

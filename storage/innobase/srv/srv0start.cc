@@ -127,6 +127,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0crc32.h"
 #include "ut0dbg.h"
 #include "ut0new.h"
+#include "xb0xb.h"
 
 /** true if a raw partition is in use */
 bool srv_start_raw_disk_in_use = false;
@@ -302,6 +303,62 @@ static dberr_t srv_undo_tablespace_read_encryption(
   const auto offset = fsp_header_get_encryption_offset(space_page_size);
   ut_ad(offset);
 
+#ifdef XTRABACKUP
+  auto [found, recv_key] = recv_find_encryption_key(space->id);
+
+  bool is_enc = Encryption::is_encrypted_with_v3(first_page + offset);
+  lsn_t page_lsn = mach_read_from_8(first_page + FIL_PAGE_LSN);
+
+  // Function to set encryption using a given key and iv
+  auto set_encryption = [&](byte *key, byte *iv) -> bool {
+    fsp_flags_set_encryption(space->flags);
+    err = fil_set_encryption(space->id, Encryption::AES, key, iv);
+    ut_ad(err == DB_SUCCESS);
+    return err == DB_SUCCESS;
+  };
+
+  // Function to handle dumped encryption keys
+  auto load_key_from_dump = [&]() -> bool {
+    err = xb_set_encryption(space);
+    return err == DB_SUCCESS;
+  };
+
+  // Function to load encryption key from the page header
+  auto load_key_from_page = [&]() -> bool {
+    byte key[Encryption::KEY_LEN];
+    byte iv[Encryption::KEY_LEN];
+    Encryption_key e_key{key, iv};
+
+    if (fsp_header_get_encryption_key(space->flags, e_key, first_page)) {
+      return set_encryption(key, iv);
+    }
+    return false;
+  };
+
+  bool encryption_success = false;
+
+  if (found && recv_key->lsn >= page_lsn) {
+    // Condition 1: Use key from redo if available and appropriate
+    encryption_success = (use_dumped_tablespace_keys && !srv_backup_mode)
+                             ? load_key_from_dump()
+                             : set_encryption(recv_key->ptr, recv_key->iv);
+  } else if (is_enc) {
+    // Condition 2: Page is encrypted
+    encryption_success = (use_dumped_tablespace_keys && !srv_backup_mode)
+                             ? load_key_from_dump()
+                             : load_key_from_page();
+  } else {
+    // Condition 3: If the page is not encrypted, we consider it successful
+    ut::aligned_free(first_page);
+    return (DB_SUCCESS);
+  }
+
+  ut::aligned_free(first_page);
+
+  if (!encryption_success) {
+    return (DB_FAIL);
+  }
+#else
   /* Return if the encryption metadata is empty. */
   if (!Encryption::is_encrypted_with_v3(first_page + offset)) {
     ut::aligned_free(first_page);
@@ -321,6 +378,7 @@ static dberr_t srv_undo_tablespace_read_encryption(
   }
 
   ut::aligned_free(first_page);
+#endif /* XTRABACKUP */
   ib::info(ER_IB_MSG_UNDO_ENCRYPTION_INFO_LOADED, space->name);
 
   return (DB_SUCCESS);
@@ -339,6 +397,23 @@ static dberr_t srv_undo_tablespace_fixup_num(space_id_t space_num) {
   if (!undo_truncate::is_active_truncate_log_present(space_num)) {
     return (DB_SUCCESS);
   }
+#ifdef XTRABACKUP
+  if (srv_backup_mode) {
+    if (opt_lock_ddl == LOCK_DDL_OFF) {
+      xb::error()
+          << "Found _trunc.log file in server directory. Undo truncation might "
+             "be concurrently running, Try backup after undo truncation is "
+             "complete. These *_trunc.log could be left over from previous "
+             "undo truncation, remove them safely to continue backup. You can "
+             "also run backup with --lock-ddl=ON that blocks concurrent undo "
+             "truncation";
+      return (DB_ERROR);
+    } else {
+      xb::warn() << "Found _trunc.log in server directory. ";
+      return (DB_SUCCESS);
+    }
+  }
+#endif /* XTRABACKUP */
 
   ib::info(ER_IB_MSG_UNDO_TRUNCATE_DURING_SHUTDOWN_OR_CRASH, ulong{space_num});
 
@@ -572,6 +647,16 @@ dberr_t srv_undo_tablespace_open(undo_truncate::Tablespace &undo_space,
       ut_a(space != nullptr);
       ut_ad(fil_validate());
 
+#ifdef XTRABACKUP
+      DBUG_EXECUTE_IF(
+          "undo_create_node",
+          if (strncmp(file_name, "./undo_1.ibu", strlen("./undo_1.ibu")) == 0) {
+            *const_cast<const char **>(&xtrabackup_debug_sync) =
+                "undo_create_node";
+            debug_sync_point("undo_create_node");
+          });
+#endif /* XTRABACKUP */
+
       fil_node_create(file_name, space, false, PAGE_NO_MAX);
     }
 
@@ -582,10 +667,25 @@ dberr_t srv_undo_tablespace_open(undo_truncate::Tablespace &undo_space,
         srv_undo_tablespace_read_encryption(status->get(), space);
 
     if (err != DB_SUCCESS) {
-      ib::error(ER_IB_MSG_ENCRYPTION_READ_FAILED, undo_name);
+#ifdef XTRABACKUP
+      fil_space_free(space_id, false);
+      if (opt_lock_ddl != LOCK_DDL_REDUCED)
+#endif /* XTRABACKUP */
+        ib::error(ER_IB_MSG_ENCRYPTION_READ_FAILED, undo_name);
       return err;
     }
   }
+
+#ifdef XTRABACKUP
+  DBUG_EXECUTE_IF(
+      "undo_space_open", if (!is_server_locked()) {
+        if (strncmp(file_name, "./undo_1.ibu", strlen("./undo_1.ibu")) == 0) {
+          *const_cast<const char **>(&xtrabackup_debug_sync) =
+              "undo_space_open";
+          debug_sync_point("undo_space_open");
+        }
+      });
+#endif /* XTRABACKUP */
 
   /* Now that space and node exist, make sure this undo tablespace is open so
   that it stays open until shutdown. But if it is still marked unusable, we
@@ -593,9 +693,25 @@ dberr_t srv_undo_tablespace_open(undo_truncate::Tablespace &undo_space,
   the FSP-related cache with invalid data. */
   if (!expected_to_be_unusable) {
     const auto open_res = fil_space_open(space_id);
+#ifdef XTRABACKUP
+    if (!open_res) {
+      fil_space_free(space_id, false);
+      return DB_CANNOT_OPEN_FILE;
+    }
+#else
     ut_a(open_res);
+#endif /* XTRABACKUP */
     fil_space_release(*open_res);
   }
+
+#ifdef XTRABACKUP
+  // Track undo tablespaces that are found after server is locked
+  // if lock_ddl is REDUCED, we will do one more undo scan via
+  // srv_undo_tablespaces_init()
+  if (ddl_tracker && is_server_locked()) {
+    ddl_tracker->add_undo_tablespace(space_id, file_name);
+  }
+#endif /* XTRABACKUP */
 
   if (undo_truncate::is_reserved(space_id)) {
     undo_truncate::spaces->add(undo_space);
@@ -690,6 +806,15 @@ static dberr_t srv_undo_tablespace_open_by_num(const space_id_t space_num) {
       Windows, where we have to close all handles before removing a file.*/
     }
     if (unusable_header) {
+#ifdef XTRABACKUP
+      if (srv_backup_mode) {
+        /* The undo tablespace is being truncated or created by the server.
+        Never touch the server files during the backup. */
+        xb::info() << "Undo tablespace " << undo_space.file_name()
+                   << " is marked unusable (truncation in progress)";
+        return DB_UNDO_FILE_UNDER_TRUNCATION;
+      }
+#endif /* XTRABACKUP */
       if (srv_read_only_mode) {
         ib::error(ER_IB_MSG_UNDO_RECOVER_FAILED_READ_ONLY_MODE);
         return DB_READ_ONLY;
@@ -719,6 +844,11 @@ static dberr_t srv_undo_tablespace_open_by_num(const space_id_t space_num) {
     }
 
   } else if (FSP_FLAGS_GET_UNDO_UNUSABLE(space->flags)) {
+#ifdef XTRABACKUP
+    if (srv_backup_mode) {
+      return DB_UNDO_FILE_UNDER_TRUNCATION;
+    }
+#endif /* XTRABACKUP */
     if (srv_read_only_mode) {
       ib::error(ER_IB_MSG_UNDO_RECOVER_FAILED_READ_ONLY_MODE);
       return DB_READ_ONLY;
@@ -792,6 +922,9 @@ static dberr_t srv_undo_tablespaces_open() {
       case DB_SUCCESS:
       case DB_UNDO_FILE_UNDER_TRUNCATION:
         /* Undergoing truncation, recreate it in srv_undo_tablespace_fixup(). */
+#ifdef XTRABACKUP
+      case DB_NOT_FOUND:
+#endif /* XTRABACKUP */
       case DB_CANNOT_OPEN_FILE:
         /* Doesn't exist, possibly deleted by srv_undo_tablespace_fixup_num().
          */
@@ -819,6 +952,27 @@ static dberr_t srv_undo_tablespaces_open() {
 
   return (DB_SUCCESS);
 }
+
+#ifdef XTRABACKUP
+dberr_t srv_undo_tablespaces_init(bool create_new_db [[maybe_unused]],
+                                  bool backup_mode [[maybe_unused]]) {
+  ut_a(!create_new_db);
+  ut_a(tablespace_scanning != nullptr);
+
+  /* Build the undo number to space id map from the tablespaces found by the
+  last scan, the same way srv_start() does after the recovery. */
+  std::vector<space_id_t> space_ids;
+  tablespace_scanning->get_found_space_ids(space_ids);
+  undo_truncate::num2id_map =
+      ut::make_unique<undo_truncate::Undo_num2id_map>(space_ids);
+
+  const dberr_t err = srv_undo_tablespaces_open();
+
+  undo_truncate::num2id_map.reset();
+
+  return err;
+}
+#endif /* XTRABACKUP */
 
 /** Create the implicit undo tablespaces for the new instance. It only ensures
 the Undo Tablespace exists, has a minimal valid header and is open. It doesn't
@@ -1412,9 +1566,13 @@ static void verify_page_type(page_id_t page_id, page_type_t type) {
   mtr_commit(&mtr);
 }
 
-dberr_t srv_start(bool create_new_db) {
+dberr_t srv_start(bool create_new_db IF_XB(, lsn_t to_lsn)) {
   /* Reset the start state. */
   srv_start_state = SRV_START_STATE_NONE;
+
+#ifdef XTRABACKUP
+  recv_to_lsn = to_lsn;
+#endif /* XTRABACKUP */
 
 #ifdef UNIV_LINUX
 #ifdef HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
@@ -1880,7 +2038,12 @@ dberr_t srv_start(bool create_new_db) {
 
     /* for a restored database we reset creator for log. To do this we stop
     background log processing for unknown reason, possibly just in case. */
-    if (recv_sys->is_cloned_db || recv_sys->is_meb_db) {
+    /* xtrabackup --prepare (when it does the rollback of transactions) cannot
+    reuse the redo log file copied by the backup: it is full. Mark it full,
+    new redo log files are created on demand. */
+    if (IF_XB((!srv_apply_log_only && !srv_read_only_mode) ||)
+            recv_sys->is_cloned_db ||
+        recv_sys->is_meb_db) {
       ut_a(!recv_sys->is_cloned_db ||
            ib::redo::handler->get_capabilities().supports_clone);
       ut_a(!recv_sys->is_meb_db ||
@@ -2034,7 +2197,8 @@ dberr_t srv_start(bool create_new_db) {
   didn't complete key rotation. Here, we will resume the
   rotation. */
   if (!srv_read_only_mode && !create_new_db &&
-      srv_force_recovery < SRV_FORCE_NO_LOG_REDO) {
+      srv_force_recovery < SRV_FORCE_NO_LOG_REDO &&
+      !use_dumped_tablespace_keys) {
     size_t fail_count = fil_encryption_rotate();
     if (fail_count > 0) {
       ib::info(ER_IB_MSG_1146)
@@ -2050,6 +2214,7 @@ dberr_t srv_start(bool create_new_db) {
   /* wake main loop of page cleaner up */
   os_event_set(buf_flush_event);
 
+#ifndef XTRABACKUP
   const auto sum_of_data_file_sizes_in_pages =
       fil_space_get_size(TRX_SYS_SPACE);
 
@@ -2082,6 +2247,7 @@ dberr_t srv_start(bool create_new_db) {
       return srv_init_abort(DB_ERROR);
     }
   }
+#endif /* !XTRABACKUP */
 
   /* Finish clone files recovery. */
   clone_files_recovery(true);
@@ -2094,6 +2260,7 @@ dberr_t srv_start(bool create_new_db) {
   return DB_SUCCESS;
 }
 
+#ifndef XTRABACKUP
 /** Applier of dynamic metadata */
 struct metadata_applier {
   /** Default constructor */
@@ -2120,6 +2287,7 @@ static void apply_dynamic_metadata() {
 
   dict_sys->for_each_table(applier);
 }
+#endif /* !XTRABACKUP */
 
 /** On a restart, initialize the remaining InnoDB subsystems so that
 any tables (including data dictionary tables) can be accessed. */
@@ -2172,8 +2340,17 @@ void srv_dict_recover_on_restart() {
 
   trx_clear_resurrected_table_ids();
 
+#ifndef XTRABACKUP
+  /* PXB applies dynamic metadata on table open via this path.
+  dict_load_tables_from_space_id()->dd_table_load_on_dd_obj()->
+  dd_table_load_part()->dd_table_create_on_dd_obj(). In
+  dd_table_create_on_dd_obj(), we will load dynamic metadata
+  and also adjust the autoinc offset. Hence apply_dynamic_metadata()
+  is not necessary in PXB prepare */
+
   /* Do after all DD transactions recovery, to get consistent metadata */
   apply_dynamic_metadata();
+#endif /* !XTRABACKUP */
 
   if (srv_force_recovery < SRV_FORCE_NO_IBUF_MERGE) {
     srv_sys_tablespaces_open = true;
@@ -2240,6 +2417,17 @@ void srv_start_threads() {
     purge_sys->state = PURGE_STATE_DISABLED;
     return;
   }
+#ifdef XTRABACKUP
+  if (!srv_apply_log_only && srv_force_recovery < SRV_FORCE_NO_TRX_UNDO &&
+      trx_sys_need_rollback()) {
+    /* Rollback all recovered transactions that are
+    not in committed nor in XA PREPARE state. */
+    srv_threads.m_trx_recovery_rollback = os_thread_create(
+        trx_recovery_rollback_thread_key, 0, trx_recovery_rollback_thread);
+
+    srv_threads.m_trx_recovery_rollback.start();
+  }
+#endif  // XTRABACKUP
 
   /* Create the master thread which does purge and other utility
   operations */

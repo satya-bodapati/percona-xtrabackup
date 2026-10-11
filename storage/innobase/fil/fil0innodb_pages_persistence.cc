@@ -36,6 +36,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0monitoring_interface.h"
 #include "srv0start.h"
 #include "ut0new.h" /* ut::make_unique */
+#include "xb0xb.h"
 
 #ifndef UNIV_HOTBACKUP
 
@@ -214,6 +215,11 @@ Pages_persistence::recover_pages(Lsn &flushed_lsn) {
 
   if (srv_force_recovery == 0 &&
       tablespace_scanning->check_missing_tablespaces()) {
+#ifdef XTRABACKUP
+    /* Missing tablespaces in the redo log are a valid possibility with partial
+    backups. But keep them in the output for visibility. */
+    xb::warn(ER_IB_MSG_1139);
+#else
     ib::error(ER_IB_MSG_1139);
     srv_recovery_crash(3);
 
@@ -223,6 +229,7 @@ Pages_persistence::recover_pages(Lsn &flushed_lsn) {
     ut_a(p == nullptr);
 
     return ut::Unexpected(Status::IO_ERROR);
+#endif /* XTRABACKUP */
   }
 
   /* We have successfully recovered from the redo log. The
@@ -258,7 +265,8 @@ Pages_persistence::Status Pages_persistence::recover_tables() {
   lost by any future checkpoint. Since DD and data dictionary in memory
   objects are not fully initialized at this point, the usual mechanism to
   persist dynamic metadata at checkpoint wouldn't work. */
-  if (!recv_sys->is_cloned_db && !m_dict_metadata->empty()) {
+  if (!recv_sys->is_cloned_db && !m_dict_metadata->empty()
+                                      IF_XB(&&!srv_apply_log_only)) {
     ut_a(!srv_read_only_mode);
 
     /* Open this table in case dict_metadata should be applied to this
