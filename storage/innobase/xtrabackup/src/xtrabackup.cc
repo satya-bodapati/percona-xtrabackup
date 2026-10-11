@@ -5420,8 +5420,7 @@ static space_id_t get_space_id_from_page_0(const char *file_name) {
     auto *page = static_cast<buf_frame_t *>(ut_align(buf, srv_page_size));
 
     IORequest request(IORequest::Type::READ);
-    dberr_t err =
-        os_file_read_first_page(request, file_name, file, page, UNIV_PAGE_SIZE);
+    dberr_t err = os_file_read_first_page(request, file_name, file, page, 1);
 
     if (err == DB_SUCCESS) {
       space_id = fsp_header_get_space_id(page);
