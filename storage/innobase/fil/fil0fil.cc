@@ -10333,9 +10333,19 @@ bool Fil_system::lookup_for_recovery(space_id_t space_id) {
       quite wrong. */
       ut_a(recv_sys->missing_ids.count(space_id) == 0);
 
+#ifdef XTRABACKUP
+      /* With lock-ddl=reduced, fil_tablespace_redo_delete() marks the
+      space_id deleted while only parsing MLOG_FILE_DELETE, and the file
+      stays in m_dirs (the DDL tracker handles it). Such a tablespace is
+      deleted, not known. */
+      if (recv_sys->deleted.count(space_id) != 0) {
+        return false;
+      }
+#else
       /* Every time a space_id is marked deleted, the path
       is also removed from m_dirs. */
       ut_a(recv_sys->deleted.count(space_id) == 0);
+#endif /* XTRABACKUP */
     } else {
       /* Should belong to exactly one of `deleted` or `missing_ids`, as whenever
       adding to deleted we remove from missing_ids, and
