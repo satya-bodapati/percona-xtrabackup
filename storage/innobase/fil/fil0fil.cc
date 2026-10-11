@@ -9313,10 +9313,18 @@ bool Fil_system::lookup_for_recovery(space_id_t space_id) {
       quite wrong. */
       ut_a(recv_sys->missing_ids.count(space_id) == 0);
 
+#ifdef XTRABACKUP
+      /* xtrabackup --prepare never replays MLOG_FILE_DELETE, it only marks
+      the space_id deleted and the file stays in the scanned directories (the
+      DDL tracker handles it). Such a tablespace is deleted, not known. */
+      if (recv_sys->deleted.count(space_id) != 0) {
+        return false;
+      }
+#else
       /* Every time a space_id is marked deleted, the path
-      is also removed from m_dirs. Unless in xtrabackup, which never replays
-      file operations from the redo log during --prepare. */
-      ut_a(recv_sys->deleted.count(space_id) == 0 IF_XB(|| true));
+      is also removed from m_dirs. */
+      ut_a(recv_sys->deleted.count(space_id) == 0);
+#endif /* XTRABACKUP */
     } else {
       /* Should belong to exactly one of `deleted` or `missing_ids`, as whenever
       adding to deleted we remove from missing_ids, and
