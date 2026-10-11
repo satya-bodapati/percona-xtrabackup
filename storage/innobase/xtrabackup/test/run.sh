@@ -504,6 +504,25 @@ function get_version_info()
 }
 
 ############################################################################
+# Save the error logs of the servers a failed test started next to its output
+# file, so that they are kept with the test results
+############################################################################
+function save_server_logs()
+{
+  local worker=$1
+  local f
+
+  for f in $TEST_BASEDIR/var/w$worker/var*/data/mysqld*.err
+  do
+      [ -f $f ] || continue
+      echo "==== $f"
+      cat $f
+  done > ${worker_outfiles[$worker]}.server.err 2>&1
+  [ -s ${worker_outfiles[$worker]}.server.err ] || \
+      rm -f ${worker_outfiles[$worker]}.server.err
+}
+
+############################################################################
 # Make a copy of var directory
 ############################################################################
 function copy_worker_var_dir()
@@ -699,6 +718,7 @@ function reap_worker()
 
        FAILED_COUNT=$((FAILED_COUNT + 1))
        FAILED_TESTS="$FAILED_TESTS $tname"
+       save_server_logs $worker
 
        # Return 0 on failed tests in the -f mode
        if [ -z "$force" ]
@@ -756,6 +776,7 @@ function check_timeout_for_worker()
 
         FAILED_COUNT=$((FAILED_COUNT + 1))
         FAILED_TESTS="$FAILED_TESTS $tname"
+        save_server_logs $worker
 
         # Return 0 on failed tests in the -f mode
         if [ -z "$force" ]
