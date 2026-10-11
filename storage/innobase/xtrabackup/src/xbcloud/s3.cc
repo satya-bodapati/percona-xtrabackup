@@ -428,6 +428,12 @@ bool S3_client::create_bucket(const std::string &name) {
     return false;
   }
 
+  /* Another client created the bucket between our existence check and this
+  request. The bucket is ours, so it is usable. */
+  if (s3_resp.error() && s3_resp.error_code() == "BucketAlreadyOwnedByYou") {
+    return true;
+  }
+
   if (s3_resp.error()) {
     msg_ts("%s: Failed to create bucket. Error message: %s\n", my_progname,
            s3_resp.error_message().c_str());
