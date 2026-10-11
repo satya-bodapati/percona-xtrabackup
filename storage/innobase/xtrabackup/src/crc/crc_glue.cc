@@ -22,8 +22,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <stdint.h>
 #include <string.h>
 #include <zlib.h>
-#include "config.h"
 #include "crc-intel-pclmul.h"
+#include "my_config.h"
 
 #if __GNUC__ >= 4 && defined(__x86_64__)
 static int pclmul_enabled = 0;
