@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -478,6 +478,18 @@ bool Sql_cmd_create_table::execute(THD *thd) {
   return res;
 }
 
+bool Sql_cmd_create_table::reprepare_on_execute_required() const {
+  // Expressions in key and partition clauses end up with being allocated on
+  // differing (incompatible) MEM_ROOTs and thus need to be reprepared. The
+  // incompatibility arises in the case of prepared statements as a parse tree
+  // MEM_ROOT whose lifetime is associated with the lifetime of the prepared
+  // statement ends up containing pointers to parse tree objects that have been
+  // allocated from a MEM_ROOT with a lifetime of the prepared statement's
+  // execution. It's benign (though wasteful) to reprepare other create table
+  // statements as well.
+  return true;
+}
+
 const MYSQL_LEX_CSTRING *
 Sql_cmd_create_table::eligible_secondary_storage_engine(THD *) const {
   // Now check if the opened tables are available in a secondary
@@ -561,6 +573,18 @@ bool Sql_cmd_create_or_drop_index_base::execute(THD *thd) {
   /* Pop Strict_error_handler */
   if (thd->is_strict_mode()) thd->pop_internal_handler();
   return res;
+}
+
+bool Sql_cmd_create_index::reprepare_on_execute_required() const {
+  // Expressions in index/key clauses end up with being allocated on
+  // differing (incompatible) MEM_ROOTs and thus need to be reprepared.
+  // The incompatibility arises in the case of prepared statements as a parse
+  // tree MEM_ROOT whose lifetime is associated with the lifetime of the
+  // prepared statement ends up containing pointers to parse tree objects that
+  // have been allocated from a MEM_ROOT with a lifetime of the prepared
+  // statement's execution. It's benign (though wasteful) to reprepare other
+  // create index statements as well.
+  return true;
 }
 
 bool Sql_cmd_cache_index::execute(THD *thd) {

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1631,8 +1631,9 @@ int runMixed2(NDBT_Context *ctx, NDBT_Step *step) {
         bool commit = (exType == 1);
         bool abort = (exType == 2);
 
-        const char *exTypeStr =
-            ((exType == 0) ? "NoCommit" : (exType == 1) ? "Commit" : "Abort");
+        const char *exTypeStr = ((exType == 0)   ? "NoCommit"
+                                 : (exType == 1) ? "Commit"
+                                                 : "Abort");
 
         for (int failType = 0; failType < 4; failType++) {
           for (int failPos = 0; failPos < 2; failPos++) {
@@ -1653,11 +1654,10 @@ int runMixed2(NDBT_Context *ctx, NDBT_Step *step) {
                        : ((failType == 1) ? "Pk"
                                           : ((failType == 2) ? "Ix" : "Both")));
               for (int updateVia = 0; updateVia < 3; updateVia++) {
-                const char *updateViaStr =
-                    ((updateVia == 0)
-                         ? "None"
-                         : (updateVia == 1) ? "Pk"
-                                            : (updateVia == 2) ? "Ix" : "Both");
+                const char *updateViaStr = ((updateVia == 0)   ? "None"
+                                            : (updateVia == 1) ? "Pk"
+                                            : (updateVia == 2) ? "Ix"
+                                                               : "Both");
                 for (int updateOrder = 0; updateOrder < 2; updateOrder++) {
                   bool updateIxFirst = (updateOrder == 0);
                   g_err << endl
@@ -2815,17 +2815,17 @@ int runTestDeferredError(NDBT_Context *ctx, NDBT_Step *step) {
       NdbTransaction *pTrans = pNdb->startTransaction();
       CHK_RET_FAILED(pTrans != 0);
 
-      int nodeId = nodefail == 0
-                       ? 0
-                       : nodefail == 1
-                             ? res.getNode(NdbRestarter::NS_RANDOM)
-                             : nodefail == 2 ? pTrans->getConnectedNodeId() : 0;
+      int nodeId = nodefail == 0   ? 0
+                   : nodefail == 1 ? res.getNode(NdbRestarter::NS_RANDOM)
+                   : nodefail == 2 ? pTrans->getConnectedNodeId()
+                                   : 0;
 
       ndbout_c("errorno: %u(nf: %u - %u) j: %u : %s", errorno, nodefail, nodeId,
                j,
-               j == 0 ? "test before error insert"
-                      : j == 1 ? "test with error insert"
-                               : j == 2 ? "test after error insert" : "");
+               j == 0   ? "test before error insert"
+               : j == 1 ? "test with error insert"
+               : j == 2 ? "test after error insert"
+                        : "");
       if (j == 0 || j == 2) {
         // First time succeed
         // Last time succeed
@@ -3125,6 +3125,7 @@ int runRandomIndexScan(NDBT_Context *ctx, NDBT_Step *step) {
         << " scans using index " << iName << " and batchsize " << scanBatchSize
         << endl;
 
+  Uint32 rows = 0;
   for (Uint32 i = 0; i < iterations; i++) {
     // g_err << "Step " << step << " iteration " << i << endl;
 
@@ -3146,7 +3147,6 @@ int runRandomIndexScan(NDBT_Context *ctx, NDBT_Step *step) {
 
     CHECKRET(trans->execute(ExecType::NoCommit) == 0);
 
-    Uint32 rows = 0;
     int rc = 0;
     while ((rc = pOp->nextResult()) == 0) {
       rows++;
@@ -3158,6 +3158,7 @@ int runRandomIndexScan(NDBT_Context *ctx, NDBT_Step *step) {
 
     // g_err << "Found " << rows << " rows" << endl;
   }
+  g_err << "Found total " << rows << " rows" << endl;
 
   ctx->stopTest();
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -94,7 +94,7 @@ bool Cached_item_str::cmp() {
 }
 
 Cached_item_json::Cached_item_json(Item *item_arg)
-    : Cached_item(item_arg), m_value(new (*THR_MALLOC) Json_wrapper()) {}
+    : Cached_item(item_arg), m_value(new(*THR_MALLOC) Json_wrapper()) {}
 
 Cached_item_json::~Cached_item_json() {
   if (m_value != nullptr) ::destroy_at(m_value);

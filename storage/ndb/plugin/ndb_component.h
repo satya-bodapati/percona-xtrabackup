@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -113,6 +113,11 @@ class Ndb_component {
     has reported started or shutdown has been requested.
    */
   bool wait_for_server_started(void);
+
+  /**
+   * Performance Schema Interface name
+   */
+  const char *psi_name() { return m_psi_name; }
 
  private:
   enum ThreadState {

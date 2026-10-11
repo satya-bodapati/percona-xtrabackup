@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -363,8 +363,7 @@ static bool rtr_pcur_getnext_from_path(
         rw_lock_s_lock(&block->lock, UT_LOCATION_HERE);
       }
 
-      lock_prdt_lock(block, &prdt, index, LOCK_S, LOCK_PREDICATE,
-                     btr_cur->rtr_info->thr);
+      lock_prdt_lock(block, &prdt, index, btr_cur->rtr_info->thr);
 
       if (rw_latch == RW_NO_LATCH) {
         rw_lock_s_unlock(&(block->lock));

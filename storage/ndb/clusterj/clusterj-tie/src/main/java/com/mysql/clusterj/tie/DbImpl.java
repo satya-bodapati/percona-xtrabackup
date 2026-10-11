@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+ *  Copyright (c) 2010, 2026, Oracle and/or its affiliates.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License, version 2.0,
@@ -71,9 +71,6 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
     /** The ndb error detail buffer */
     private ByteBuffer errorBuffer;
 
-    /** The coordinated transaction identifier buffer */
-    private ByteBuffer coordinatedTransactionIdBuffer;
-
     /** The partition key scratch buffer */
     private ByteBuffer partitionKeyScratchBuffer;
 
@@ -135,8 +132,6 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
                 this.clusterConnection.byteBufferPoolForDBImplError.borrowBuffer();
         this.partitionKeyScratchBuffer =
                 this.clusterConnection.byteBufferPoolForPartitionKey.borrowBuffer();
-        this.coordinatedTransactionIdBuffer =
-                this.clusterConnection.byteBufferPoolForCoordinatedTransactionId.borrowBuffer();
         this.bufferManager = new BufferManager(this.clusterConnection.byteBufferPool);
         int returnCode = ndb.init(maxTransactions);
         handleError(returnCode, ndb);
@@ -183,7 +178,6 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
         }
         this.clusterConnection.byteBufferPoolForDBImplError.returnBuffer(this.errorBuffer);
         this.clusterConnection.byteBufferPoolForPartitionKey.returnBuffer(this.partitionKeyScratchBuffer);
-        this.clusterConnection.byteBufferPoolForCoordinatedTransactionId.returnBuffer(this.coordinatedTransactionIdBuffer);
         this.bufferManager.release();
         clusterConnection.close(this);
     }
@@ -196,9 +190,9 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
         return ndbDictionary;
     }
 
-    public ClusterTransaction startTransaction(String joinTransactionId) {
+    public ClusterTransaction startTransaction() {
         assertNotClosed("DbImpl.startTransaction()");
-        clusterTransaction = new ClusterTransactionImpl(clusterConnection, this, ndbDictionary, joinTransactionId);
+        clusterTransaction = new ClusterTransactionImpl(clusterConnection, this, ndbDictionary);
         return clusterTransaction;
     }
 
@@ -284,7 +278,7 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
             // return the borrowed buffers for the partition key
             for (int i = 0; i < keyPartsSize; ++i) {
                 KeyPart keyPart = keyParts.get(i);
-                bufferManager.returnPartitionKeyPartBuffer(keyPart.length, keyPart.buffer);
+                bufferManager.returnPartitionKeyPartBuffer(keyPart.buffer);
             }
         }
     }
@@ -307,32 +301,6 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
         }
         handleError (result, ndb);
         return result;
-    }
-
-    /** Return the coordinated transaction id buffer. 
-     * The buffer is allocated here because there is only one buffer 
-     * ever needed and it is only needed in one place, after the
-     * transaction is enlisted.
-     * @return the coordinated transaction id buffer
-     */
-    public ByteBuffer getCoordinatedTransactionIdBuffer() {
-        return coordinatedTransactionIdBuffer;
-    }
-
-    /** Join a transaction already in progress. The transaction might be
-     * on the same or a different node from this node. The usual case is
-     * for the transaction to be joined is on a different node.
-     * @param coordinatedTransactionId
-     * (from ClusterTransaction.getCoordinatedTransactionId())
-     * @return a transaction joined to the existing transaction
-     */
-    public NdbTransaction joinTransaction(String coordinatedTransactionId) {
-        if (logger.isDetailEnabled()) logger.detail("CoordinatedTransactionId: "
-                + coordinatedTransactionId);
-//        NdbTransaction result = ndb.joinTransaction(coordinatedTransactionId);
-//        handleError(result, ndb);
-//        return result;
-        throw new ClusterJFatalInternalException("Not Implemented");
     }
 
     /** Get the buffer manager for this DbImpl. All operations that need byte buffers
@@ -359,7 +327,7 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
         public static final int STRING_STORAGE_BUFFER_INITIAL_SIZE = 500;
 
         /** String storage buffer current size */
-        private int stringStorageBufferCurrentSize = STRING_BYTE_BUFFER_INITIAL_SIZE;
+        private int stringStorageBufferCurrentSize = STRING_STORAGE_BUFFER_INITIAL_SIZE;
 
         /** Shared buffer for string output operations */
         private ByteBuffer stringStorageBuffer;
@@ -383,10 +351,10 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
         /** Release resources for this buffer manager. */
         protected void release() {
             if (this.resultDataBuffer != null) {
-                pool.returnBuffer(resultDataBufferCurrentSize, this.resultDataBuffer);
+                pool.returnBuffer(this.resultDataBuffer);
             }
-            pool.returnBuffer(stringStorageBufferCurrentSize, stringStorageBuffer);
-            pool.returnBuffer(stringByteBufferCurrentSize, stringByteBuffer);
+            pool.returnBuffer(stringStorageBuffer);
+            pool.returnBuffer(stringByteBuffer);
         }
 
         /** Guarantee the size of the string storage buffer to be a minimum size. If the current
@@ -399,7 +367,7 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
                 if (logger.isDebugEnabled()) logger.debug(local.message("MSG_Reallocated_Byte_Buffer",
                         "string storage", stringStorageBufferCurrentSize, sizeNeeded));
                 // return the existing shared buffer to the pool
-                pool.returnBuffer(stringStorageBufferCurrentSize, stringStorageBuffer);
+                pool.returnBuffer(stringStorageBuffer);
                 stringStorageBuffer = pool.borrowBuffer(sizeNeeded);
                 stringStorageBufferCurrentSize = sizeNeeded;
             }
@@ -447,8 +415,8 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
          }
 
         /** Return a buffer */
-        public void returnBuffer(int length, ByteBuffer buffer) {
-            pool.returnBuffer(length, buffer);
+        public void returnBuffer(ByteBuffer buffer) {
+            pool.returnBuffer(buffer);
         }
 
         /** Guarantee the size of the string byte buffer to be a minimum size. If the current
@@ -458,7 +426,7 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
          */
         protected void guaranteeStringByteBufferSize(int sizeNeeded) {
             if (sizeNeeded > stringByteBufferCurrentSize) {
-                pool.returnBuffer(stringByteBufferCurrentSize, stringByteBuffer);
+                pool.returnBuffer(stringByteBuffer);
                 stringByteBufferCurrentSize = sizeNeeded;
                 stringByteBuffer = pool.borrowBuffer(sizeNeeded);
                 stringCharBuffer = stringByteBuffer.asCharBuffer();
@@ -490,7 +458,7 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
                         "result data", resultDataBufferCurrentSize, sizeNeeded));
                 // return the existing result data buffer to the pool
                 if (resultDataBuffer != null) {
-                    pool.returnBuffer(resultDataBufferCurrentSize, resultDataBuffer);
+                    pool.returnBuffer(resultDataBuffer);
                 }
                 resultDataBuffer = pool.borrowBuffer(sizeNeeded);
                 resultDataBufferCurrentSize = sizeNeeded;
@@ -506,8 +474,8 @@ class DbImpl implements com.mysql.clusterj.core.store.Db {
         }
 
         /** Return a buffer used for a partition key part */
-        public void returnPartitionKeyPartBuffer(int length, ByteBuffer buffer) {
-            pool.returnBuffer(length, buffer);
+        public void returnPartitionKeyPartBuffer(ByteBuffer buffer) {
+            pool.returnBuffer(buffer);
         }
     }
 

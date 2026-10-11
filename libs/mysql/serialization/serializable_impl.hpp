@@ -1,4 +1,4 @@
-// Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+// Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
@@ -31,11 +31,11 @@ template <typename Serializer_type>
 std::size_t Serializable<Derived_serializable_type>::get_size_internal() const {
   std::size_t calculated_size = 0;
   auto add_size_s = [&calculated_size](const auto &field,
-                                       auto field_id) -> auto {
+                                       auto field_id) -> auto{
     calculated_size += Serializer_type::get_size_serializable(field_id, field);
   };
   auto add_size_f = [&calculated_size](const auto &field,
-                                       auto field_id) -> auto {
+                                       auto field_id) -> auto{
     calculated_size += Serializer_type::get_size_field_def(field_id, field);
   };
   do_for_each_field(add_size_s, add_size_f);

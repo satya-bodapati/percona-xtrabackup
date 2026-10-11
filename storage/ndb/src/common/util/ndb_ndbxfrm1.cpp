@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -38,7 +38,7 @@
     }                                                                    \
   } while (0)
 #endif
-//#define RETURN(rv) REQUIRE(rv)
+// #define RETURN(rv) REQUIRE(rv)
 #define RETURN(rv) return (rv)
 
 const char ndb_ndbxfrm1::magic[8] = {'N', 'D', 'B', 'X', 'F', 'R', 'M', '1'};

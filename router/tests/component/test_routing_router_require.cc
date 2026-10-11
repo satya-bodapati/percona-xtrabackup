@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -618,7 +618,9 @@ static const RoutingRequireConfigInvalidParam routing_sharing_invalid_params[] =
            EXPECT_THAT(
                log, ::testing::HasSubstr(
                         "setting server_ssl_key= and server_ssl_cert=somevalue "
-                        "failed: Invalid argument"));
+                        "failed: "));
+           // Unixes:  Invalid argument
+           // windows: invalid argument
          }},
 
         {"server_ssl_key_no_cert",
@@ -638,7 +640,9 @@ static const RoutingRequireConfigInvalidParam routing_sharing_invalid_params[] =
            EXPECT_THAT(
                log, ::testing::HasSubstr(
                         "setting server_ssl_key=somevalue and server_ssl_cert= "
-                        "failed: Invalid argument"));
+                        "failed: "));
+           // Unixes:  Invalid argument
+           // windows: invalid argument
          }},
 };
 

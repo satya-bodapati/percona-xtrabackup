@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -110,15 +110,6 @@ class Loader {
  private:
   /** DDL context, shared by the loader threads. */
   ddl::Context &m_ctx;
-
-  /** If true then use parallel scan and index build. */
-  bool m_parallel{};
-
-  /** Sort buffer size. */
-  size_t m_sort_buffer_size{};
-
-  /** IO buffer size. */
-  size_t m_io_buffer_size{};
 
   /** Index builders. */
   Builders m_builders{};

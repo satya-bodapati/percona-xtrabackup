@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -729,6 +729,8 @@ class Query_expression {
   bool prepared;   ///< All query blocks in query expression are prepared
   bool optimized;  ///< All query blocks in query expression are optimized
   bool executed;   ///< Query expression has been executed
+  ///< Explain mode: query expression refers stored function
+  bool m_has_stored_program{false};
 
   /// Object to which the result for this query expression is sent.
   /// Not used if we materialize directly into a parent query expression's
@@ -772,6 +774,8 @@ class Query_expression {
   /// @return true for a query expression without UNION/INTERSECT/EXCEPT or
   /// multi-level ORDER, i.e. we have a "simple table".
   bool is_simple() const { return m_query_term->term_type() == QT_QUERY_BLOCK; }
+
+  bool has_stored_program() const { return m_has_stored_program; }
 
   /// Values for Query_expression::cleaned
   enum enum_clean_state {
@@ -1179,6 +1183,7 @@ class Query_block : public Query_term {
   Query_block *query_block() const override {
     return const_cast<Query_block *>(this);
   }
+  void label_children() override {}
   void destroy_tree() override { m_parent = nullptr; }
 
   bool open_result_tables(THD *, int) override;
@@ -1247,6 +1252,9 @@ class Query_block : public Query_term {
     for (Table_ref *tr = leaf_tables; tr != nullptr; tr = tr->next_leaf)
       tr->set_readonly();
   }
+
+  /// @returns number of tables in query block
+  size_t table_count() const { return m_table_list.elements; }
 
   /// @returns a map of all tables references in the query block
   table_map all_tables_map() const { return (1ULL << leaf_table_count) - 1; }
@@ -1347,8 +1355,11 @@ class Query_block : public Query_term {
   ORDER *find_in_group_list(Item *item, int *rollup_level) const;
   int group_list_size() const;
 
-  /// @returns true if query block contains window functions
+  /// @returns true if query block contains windows
   bool has_windows() const { return m_windows.elements > 0; }
+
+  /// @returns true if query block contains window functions
+  bool has_wfs();
 
   void invalidate();
 
@@ -1390,8 +1401,8 @@ class Query_block : public Query_term {
   auto visible_fields() const { return VisibleFields(fields); }
 
   /// Check privileges for views that are merged into query block
-  bool check_view_privileges(THD *thd, ulong want_privilege_first,
-                             ulong want_privilege_next);
+  bool check_view_privileges(THD *thd, Access_bitmask want_privilege_first,
+                             Access_bitmask want_privilege_next);
   /// Check privileges for all columns referenced from query block
   bool check_column_privileges(THD *thd);
 
@@ -1740,6 +1751,8 @@ class Query_block : public Query_term {
     @param    visitor  Select_lex_visitor Object
   */
   bool accept(Select_lex_visitor *visitor);
+
+  void prune_sj_exprs(Item_func_eq *item, mem_root_deque<Table_ref *> *nest);
 
   /**
     Cleanup this subtree (this Query_block and all nested Query_blockes and
@@ -2127,6 +2140,8 @@ class Query_block : public Query_term {
   */
   uint with_wild{0};
 
+  /// Original query table map before aj/sj processing.
+  table_map original_tables_map{};
   /// Number of leaf tables in this query block.
   uint leaf_table_count{0};
   /// Number of derived tables and views in this query block.
@@ -2224,6 +2239,10 @@ class Query_block : public Query_term {
   bool exclude_from_table_unique_test{false};
 
   bool no_table_names_allowed{false};  ///< used for global order by
+
+  /// Keeps track of the current ORDER BY expression we are resolving for
+  /// ORDER BY, if any. Not used for GROUP BY or windowing ordering.
+  int m_current_order_by_number{0};
 
   /// Hidden items added during optimization
   /// @note that using this means we modify resolved data during optimization
@@ -3725,13 +3744,20 @@ class Lex_input_stream {
   const int grammar_selector_token;
 
   bool text_string_is_7bit() const { return !(tok_bitmap & 0x80); }
+
+  /**
+    Next parse position at which to check for client disconnect.
+    Used by my_sql_parser_lex() to periodically call is_connected()
+    for large queries, without incurring syscall overhead on every token.
+  */
+  size_t m_next_connected_check_pos{0};
 };
 
 class LEX_COLUMN {
  public:
   String column;
-  uint rights;
-  LEX_COLUMN(const String &x, const uint &y) : column(x), rights(y) {}
+  Access_bitmask rights;
+  LEX_COLUMN(const String &x, const Access_bitmask &y) : column(x), rights(y) {}
 };
 
 enum class role_enum;
@@ -4987,4 +5013,12 @@ Table_ref *nest_join(THD *thd, Query_block *select, Table_ref *embedding,
                      mem_root_deque<Table_ref *> *jlist, size_t table_cnt,
                      const char *legend);
 void get_select_options_str(ulonglong options, std::string *str);
+
+template <typename T>
+inline bool WalkQueryExpression(Query_expression *query_expr, enum_walk walk,
+                                T &&functor) {
+  return query_expr->walk(&Item::walk_helper_thunk<T>, walk,
+                          reinterpret_cast<uchar *>(&functor));
+}
+
 #endif /* SQL_LEX_INCLUDED */

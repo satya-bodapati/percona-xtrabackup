@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -43,15 +43,18 @@ class Ndb_applier;
 class Thd_ndb {
   THD *const m_thd;
 
-  Thd_ndb(THD *);
+  Thd_ndb(THD *thd, const char *name, Ndb_cluster_connection *cc = nullptr);
   ~Thd_ndb();
 
   uint32 options;
   uint32 trans_options;
   class Ndb_DDL_transaction_ctx *m_ddl_ctx;
+  // Thread name that owns this connection (usually the PFS thread name)
+  const char *const m_thread_name;
 
  public:
-  static Thd_ndb *seize(THD *);
+  static Thd_ndb *seize(THD *thd, const char *name = nullptr,
+                        Ndb_cluster_connection *cc = nullptr);
   static void release(Thd_ndb *thd_ndb);
 
   // Keeps track of stats for tables taking part in transaction
@@ -91,6 +94,7 @@ class Thd_ndb {
   class Ndb_cluster_connection *connection;
   class Ndb *ndb;
   class ha_ndbcluster *m_handler;
+  bool m_autocommit; /* Whether transaction was started in autocommit mode */
 
   // Reference counter for external_lock() calls. The counter controls that
   // the handlerton is registered as being part of the MySQL transaction only at
@@ -389,6 +393,12 @@ class Thd_ndb {
   */
   void clear_ddl_transaction_ctx();
 
+  /*
+    @brief  Create a string to identify the owner thread of this Thd_ndb
+    @return String identification of the owner thread
+  */
+  std::string get_info_str() const;
+
  private:
   std::unique_ptr<Ndb_applier> m_applier;
 
@@ -419,6 +429,29 @@ class Thd_ndb {
      @return pointer to Ndb_applier for Thd_ndb which is replication applier
    */
   Ndb_applier *get_applier() const { return m_applier.get(); }
+};
+
+/**
+  @brief RAII style class for seizing and relasing a Thd_ndb
+*/
+class Thd_ndb_guard {
+  THD *const m_thd;
+  Thd_ndb *const m_thd_ndb;
+  Thd_ndb_guard() = delete;
+  Thd_ndb_guard(const Thd_ndb_guard &) = delete;
+
+ public:
+  Thd_ndb_guard(THD *thd, const char *name)
+      : m_thd(thd), m_thd_ndb(Thd_ndb::seize(m_thd, name)) {
+    thd_set_thd_ndb(m_thd, m_thd_ndb);
+  }
+
+  ~Thd_ndb_guard() {
+    Thd_ndb::release(m_thd_ndb);
+    thd_set_thd_ndb(m_thd, nullptr);
+  }
+
+  const Thd_ndb *get_thd_ndb() const { return m_thd_ndb; }
 };
 
 #endif

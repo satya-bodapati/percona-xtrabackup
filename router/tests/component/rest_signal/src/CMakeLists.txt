@@ -1,4 +1,4 @@
-# Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -27,7 +27,9 @@ ADD_HARNESS_PLUGIN(rest_signal
   SOURCES
   rest_signal_plugin.cc
   rest_signal_abort.cc
-  REQUIRES router_lib;http_server;rest_api_lib;rest_api
+  REQUIRES
+  rest_api_lib
+  rest_api
   DESTINATION "${ROUTER_INSTALL_PLUGINDIR}"
   NO_INSTALL
   )

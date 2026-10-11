@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -3911,8 +3911,6 @@ class Dbtup : public SimulatedBlock {
 
  private:
   void release_c_free_scan_lock();
-  bool getNextTcConRec(Uint32 &next, OperationrecPtr &opPtr, Uint32 max_loops);
-
   void checkPoolShrinkNeed(Uint32 pool_index,
                            const TransientFastSlotPool &pool);
   void sendPoolShrink(Uint32 pool_index);

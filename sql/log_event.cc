@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2233,9 +2233,9 @@ void Rows_log_event::print_verbose(IO_CACHE *file,
   const enum_row_image_type row_image_type =
       get_general_type_code() == mysql::binlog::event::WRITE_ROWS_EVENT
           ? enum_row_image_type::WRITE_AI
-          : get_general_type_code() == mysql::binlog::event::DELETE_ROWS_EVENT
-                ? enum_row_image_type::DELETE_BI
-                : enum_row_image_type::UPDATE_BI;
+      : get_general_type_code() == mysql::binlog::event::DELETE_ROWS_EVENT
+          ? enum_row_image_type::DELETE_BI
+          : enum_row_image_type::UPDATE_BI;
 
   if (m_extra_row_info.have_ndb_info() ||
       DBUG_EVALUATE_IF("simulate_error_in_ndb_info_print", 1, 0)) {
@@ -2628,8 +2628,10 @@ Slave_worker *Log_event::get_slave_worker(Relay_log_info *rli) {
              !is_mts_db_partitioned(rli));
 
       if (is_s_event || is_any_gtid_event(this)) {
-        Slave_job_item job_item = {this, rli->get_event_relay_log_number(),
-                                   rli->get_event_start_pos()};
+        Slave_job_item job_item = {this, rli->get_event_start_pos(), {'\0'}};
+        if (rli->get_event_relay_log_name())
+          strcpy(job_item.event_relay_log_name,
+                 rli->get_event_relay_log_name());
         // B-event is appended to the Deferred Array associated with GCAP
         rli->curr_group_da.push_back(job_item);
 
@@ -2664,8 +2666,9 @@ Slave_worker *Log_event::get_slave_worker(Relay_log_info *rli) {
        TODO: Make GITD event as B-event that is starts_group() to
        return true.
       */
-      Slave_job_item job_item = {this, rli->get_event_relay_log_number(),
-                                 rli->get_event_relay_log_pos()};
+      Slave_job_item job_item = {this, rli->get_event_relay_log_pos(), {'\0'}};
+      if (rli->get_event_relay_log_name())
+        strcpy(job_item.event_relay_log_name, rli->get_event_relay_log_name());
 
       // B-event is appended to the Deferred Array associated with GCAP
       rli->curr_group_da.push_back(job_item);
@@ -2693,8 +2696,9 @@ Slave_worker *Log_event::get_slave_worker(Relay_log_info *rli) {
         rli, &rli->workers, this);
     if (ret_worker == nullptr) {
       /* get_least_occupied_worker may return NULL if the thread is killed */
-      Slave_job_item job_item = {this, rli->get_event_relay_log_number(),
-                                 rli->get_event_start_pos()};
+      Slave_job_item job_item = {this, rli->get_event_start_pos(), {'\0'}};
+      if (rli->get_event_relay_log_name())
+        strcpy(job_item.event_relay_log_name, rli->get_event_relay_log_name());
       rli->curr_group_da.push_back(job_item);
 
       assert(thd->killed);
@@ -2845,8 +2849,9 @@ Slave_worker *Log_event::get_slave_worker(Relay_log_info *rli) {
         Their association with relay-log physical coordinates is provided
         by the same mechanism that applies to a regular event.
       */
-      Slave_job_item job_item = {this, rli->get_event_relay_log_number(),
-                                 rli->get_event_start_pos()};
+      Slave_job_item job_item = {this, rli->get_event_start_pos(), {'\0'}};
+      if (rli->get_event_relay_log_name())
+        strcpy(job_item.event_relay_log_name, rli->get_event_relay_log_name());
       rli->curr_group_da.push_back(job_item);
 
       assert(!ret_worker);
@@ -3666,6 +3671,55 @@ static bool is_sql_require_primary_key_needed(const LEX *lex) {
 }
 
 /**
+  Checks whether the statement represented by the given LEX object
+  is eligible for database-specific access privileges.
+
+  @param lex  pointer to the LEX object representing the statement being
+              executed.
+  @return     true if the command is eligible for database-specific
+              access privileges; false otherwise.
+ */
+bool static is_command_eligible_for_db_specific_privilege(const LEX *lex) {
+  enum enum_sql_command cmd = lex->sql_command;
+  bool ret{false};
+
+  switch (cmd) {
+    case SQLCOM_CREATE_DB:
+    case SQLCOM_CREATE_TABLE:
+    case SQLCOM_CREATE_INDEX:
+    case SQLCOM_ALTER_TABLE:
+    case SQLCOM_TRUNCATE:
+    case SQLCOM_DROP_TABLE:
+    case SQLCOM_DROP_INDEX:
+    case SQLCOM_DROP_DB:
+    case SQLCOM_ALTER_DB:
+    case SQLCOM_OPTIMIZE:
+    case SQLCOM_ANALYZE:
+    case SQLCOM_RENAME_TABLE:
+    case SQLCOM_REPAIR:
+    case SQLCOM_CREATE_EVENT:
+    case SQLCOM_ALTER_EVENT:
+    case SQLCOM_DROP_EVENT:
+    case SQLCOM_CREATE_PROCEDURE:
+    case SQLCOM_DROP_PROCEDURE:
+    case SQLCOM_ALTER_PROCEDURE:
+    case SQLCOM_CREATE_TRIGGER:
+    case SQLCOM_DROP_TRIGGER:
+    case SQLCOM_ALTER_FUNCTION:
+    case SQLCOM_CREATE_FUNCTION:
+    case SQLCOM_DROP_FUNCTION:
+    case SQLCOM_CREATE_SPFUNCTION:
+    case SQLCOM_CREATE_VIEW:
+    case SQLCOM_DROP_VIEW:
+      ret = true;
+      break;
+    default:
+      ret = false;
+  }
+  return ret;
+}
+
+/**
   Returns whether or not the statement held by the `LEX` object parameter
   requires `Q_DEFAULT_TABLE_ENCRYPTION` to be logged together with the
   statement.
@@ -3787,6 +3841,15 @@ Query_log_event::Query_log_event(THD *thd_arg, const char *query_arg,
   /* save the original thread id; we already know the server id */
   slave_proxy_id = thd_arg->variables.pseudo_thread_id;
   common_header->set_is_valid(query != nullptr);
+
+  DBUG_EXECUTE_IF("binlog_corrupt_query", {
+    /// Produce a corrupted query in the binary log by removing the first
+    /// character. Do this only for statements other than BEGIN and COMMIT.
+    if (strcmp(query, "BEGIN") != 0 && strcmp(query, "COMMIT") != 0) {
+      ++query;
+      --q_len;
+    }
+  });
 
   /*
   exec_time calculation has changed to use the same method that is used
@@ -4418,7 +4481,9 @@ static bool is_silent_error(THD *thd) {
 int Query_log_event::do_apply_event(Relay_log_info const *rli,
                                     const char *query_arg, size_t q_len_arg) {
   DBUG_TRACE;
-  int expected_error, actual_error = 0;
+  DBUG_EXECUTE_IF("simulate_error_in_ddl", error_code = 1051;);
+  const int expected_error = error_code;
+  int actual_error = 0;
   auto post_filters_actions_guard = create_scope_guard(
       [&]() { thd->rpl_thd_ctx.post_filters_actions().clear(); });
 
@@ -4497,14 +4562,26 @@ int Query_log_event::do_apply_event(Relay_log_info const *rli,
     char llbuff[22];
     if ((error =
              rows_event_stmt_cleanup(const_cast<Relay_log_info *>(rli), thd))) {
+      char buff[MAX_SLAVE_ERRMSG]{0};
+      const char *buff_end = buff + sizeof(buff);
+      char *slider = buff;
+      Diagnostics_area::Sql_condition_iterator it =
+          thd->get_stmt_da()->sql_conditions();
+      for (const Sql_condition *err = it++;
+           err != nullptr && slider < buff_end - 1; err = it++) {
+        slider += snprintf(slider, buff_end - slider, " %s, Error_code: %d;",
+                           err->message_text(), err->mysql_errno());
+      }
       const_cast<Relay_log_info *>(rli)->report(
           ERROR_LEVEL, error,
           "Error in cleaning up after an event preceding the commit; "
-          "the group log file/position: %s %s",
+          "%s the group log file/position: %s %s",
+          buff,
           const_cast<Relay_log_info *>(rli)->get_group_master_log_name_info(),
           llstr(const_cast<Relay_log_info *>(rli)
                     ->get_group_master_log_pos_info(),
                 llbuff));
+      goto compare_errors;
     }
     /*
       Executing a part of rli->stmt_done() logics that does not deal
@@ -4547,9 +4624,7 @@ int Query_log_event::do_apply_event(Relay_log_info const *rli,
     thd->set_query_id(next_query_id());
     DBUG_PRINT("query", ("%s", thd->query().str));
 
-    DBUG_EXECUTE_IF("simulate_error_in_ddl", error_code = 1051;);
-
-    if (ignored_error_code((expected_error = error_code)) ||
+    if (ignored_error_code((expected_error)) ||
         !unexpected_error_code(expected_error)) {
       if (flags2_inited)
         /*
@@ -4757,6 +4832,20 @@ int Query_log_event::do_apply_event(Relay_log_info const *rli,
 
       mysql_thread_set_secondary_engine(false);
 
+      {
+        auto f1 = [&]() {
+          Applier_security_context_guard sec_context{rli, thd};
+          if (!sec_context.skip_priv_checks() &&
+              !sec_context.has_access({SUPER_ACL}) &&
+              is_command_eligible_for_db_specific_privilege(thd->lex)) {
+            /* Refresh DB access cache */
+            if (mysql_change_db(thd, thd->db(), true)) return true;
+          }
+          return false;
+        };
+        thd->rpl_thd_ctx.post_filters_actions().push_back(f1);
+      }
+
       /* Execute the query (note that we bypass dispatch_command()) */
       Parser_state parser_state;
       if (!parser_state.init(thd, thd->query().str, thd->query().length)) {
@@ -4777,6 +4866,22 @@ int Query_log_event::do_apply_event(Relay_log_info const *rli,
         if (opt_log_slow_extra) {
           thd->copy_status_var(&query_start_status);
         }
+
+        /// If an error occurs while executing the statement, and the error is
+        /// to be ignored, the statement will not execute and hence will not be
+        /// written to the binary log. But since we succeed (by suppressing the
+        /// error), we must track the GTID. The GTID will be written in the
+        /// invocation of gtid_end_transaction later in this function, but in
+        /// order for that to work, we must not rollback GTID ownership while
+        /// rolling back the statement. Therefore we register this checker,
+        /// which blocks the gtid rollback in case the error is ignored. The
+        /// returned object is a scope guard that will unregister the checker.
+        auto unregister_guard =
+            thd->register_skip_gtid_rollback_checker([](const THD &thd) {
+              int error_code{0};
+              if (thd.is_error()) error_code = thd.get_stmt_da()->mysql_errno();
+              return ignored_error_code(error_code);
+            });
 
         dispatch_sql_command(thd, &parser_state);
 
@@ -5046,6 +5151,33 @@ int Query_log_event::do_apply_event(Relay_log_info const *rli,
   }
 
 end:
+  // Generate an empty GTID transaction if needed. This usually happens from
+  // within dispatch_sql_command: either during commit, if the transaction
+  // reaches commit, or after processing a potentially-committing statement,
+  // when mysql_execute_command invokes binlog_gtid_end_transaction. However,
+  // the generation of empty transactions in those places occurs only if the
+  // statement succeeds. If the statement fails and subsequently the error is
+  // ignored due to replica-skip-error, we need to call gtid_end_transaction
+  // here.
+  //
+  // The condition !thd->is_slave_error is needed so that we only generate empty
+  // GTID transactions when the error has been ignored.
+  //
+  // The condition that OPTION_BEGIN is clear is needed so that we do not
+  // generate empty GTID transactions while in the middle of processing a
+  // transaction.
+  //
+  // The condition !is_already_logged_transaction is needed so that we do not
+  // generate empty GTID transactions in the middle of auto-skipped
+  // transactions, in cases where the previous two conditions do not hold. One
+  // example of such a scenario is a GTID-skipped XA transaction, because the
+  // `XA START` statement (contrary to `BEGIN` in a non-XA transaction) will not
+  // execute and hence not open a new transaction.
+  if (!thd->is_slave_error &&
+      (thd->variables.option_bits & OPTION_BEGIN) == 0 &&
+      !is_already_logged_transaction(thd)) {
+    mysql_bin_log.gtid_end_transaction(thd);
+  }
 
   if (thd->temporary_tables) detach_temp_tables_worker(thd, rli);
   /*
@@ -5063,6 +5195,8 @@ end:
   thd->reset_query();
   thd->lex->sql_command = SQLCOM_END;
   DBUG_PRINT("info", ("end: query= 0"));
+  /* Restore original DB state (no default DB) after privilege refresh */
+  mysql_change_db(thd, NULL_CSTR, true);
 
   /* Mark the statement completed. */
   MYSQL_END_STATEMENT(thd->m_statement_psi, thd->get_stmt_da());
@@ -6819,7 +6953,9 @@ int User_var_log_event::do_apply_event(Relay_log_info const *rli) {
         val_len = 8;
         break;
       case DECIMAL_RESULT: {
-        if (val_len < 3) {
+        if (val_len < 3 ||
+            !mysql::binlog::event::is_user_var_decimal_metadata_valid(
+                val, val_len, DECIMAL_MAX_PRECISION, DECIMAL_MAX_SCALE)) {
           rli->report(ERROR_LEVEL, ER_REPLICA_FATAL_ERROR,
                       ER_THD(thd, ER_REPLICA_FATAL_ERROR),
                       "Invalid variable length at User var event");
@@ -8012,6 +8148,13 @@ int Rows_log_event::unpack_current_row(const Relay_log_info *const rli,
             auto field = table->field[column_index];
             if (field->is_field_for_functional_index())  // Always exclude
                                                          // functional indexes
+              return true;
+            if (!is_after_image &&
+                !bitmap_is_subset(
+                    &field->gcol_info->base_columns_map,
+                    &this->m_local_cols))  // Exclude generated columns for
+                                           // which the base columns are
+                                           // unavailable
               return true;
             if (!is_after_image &&  // Always exclude virtual generated columns
                 field->is_virtual_gcol())  // if not processing after-image
@@ -9382,7 +9525,8 @@ int Rows_log_event::do_scan_and_update(Relay_log_info const *rli) {
           }
         } while (this->get_general_type_code() ==
                      mysql::binlog::event::UPDATE_ROWS_EVENT &&
-                 !is_pk_present && (entry = m_hash.get(table, &m_local_cols)));
+                 !is_pk_present && entry &&
+                 (entry = m_hash.get(table, &m_local_cols)));
       } break;
 
       case HA_ERR_RECORD_DELETED:
@@ -9827,7 +9971,8 @@ int Rows_log_event::do_apply_event(Relay_log_info const *rli) {
     Applier_security_context_guard security_context{rli, thd};
     const char *privilege_missing = nullptr;
     if (!security_context.skip_priv_checks()) {
-      std::vector<std::tuple<ulong, const TABLE *, Rows_log_event *>> l;
+      std::vector<std::tuple<Access_bitmask, const TABLE *, Rows_log_event *>>
+          l;
       switch (get_general_type_code()) {
         case mysql::binlog::event::WRITE_ROWS_EVENT: {
           l.push_back(std::make_tuple(INSERT_ACL, this->m_table, this));
@@ -10543,7 +10688,11 @@ void Rows_log_event::print_helper(FILE *,
 int Table_map_log_event::save_field_metadata() {
   DBUG_TRACE;
   int index = 0;
-  for (auto it = m_column_view->begin(); it != m_column_view->end(); ++it) {
+  for (auto it = m_column_view->begin();
+       it != m_column_view->end() &&
+       DBUG_EVALUATE_IF("binlog_omit_last_column_from_table_map_event",
+                        it.filtered_pos() != this->m_colcnt, true);
+       ++it) {
     Field *field = *it;
     DBUG_PRINT("debug", ("field_type: %d", m_coltype[it.filtered_pos()]));
     index += field->save_field_metadata(&m_field_metadata[index]);
@@ -10676,7 +10825,13 @@ Table_map_log_event::Table_map_log_event(
 
   memset(m_null_bits, 0, num_null_bytes);
   Bit_writer bit_writer{this->m_null_bits};
-  for (auto field : *m_column_view) bit_writer.set(field->is_nullable());
+  for (auto it = m_column_view->begin();
+       it != m_column_view->end() &&
+       DBUG_EVALUATE_IF("binlog_omit_last_column_from_table_map_event",
+                        it.filtered_pos() != this->m_colcnt, true);
+       ++it) {
+    bit_writer.set((*it)->is_nullable());
+  }
   /*
     Marking event to require sequential execution in MTS
     if the query might have updated FK-referenced db.
@@ -10715,6 +10870,16 @@ Table_map_log_event::Table_map_log_event(
   assert(header()->type_code == mysql::binlog::event::TABLE_MAP_EVENT);
 #ifdef MYSQL_SERVER
   m_column_view = std::make_unique<cs::util::ReplicatedColumnsView>();
+
+  if (common_header->get_is_valid()) {
+    /*
+      Reject malformed TABLE_MAP_EVENT metadata during event parsing before
+      applier processing.
+    */
+    table_def parsed_table_def(m_coltype, m_colcnt, m_field_metadata,
+                               m_field_metadata_size, m_null_bits, m_flags);
+    common_header->set_is_valid(parsed_table_def.is_valid());
+  }
 #endif
 }
 

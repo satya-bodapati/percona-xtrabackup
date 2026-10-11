@@ -1,7 +1,7 @@
 #ifndef ITEM_SUM_INCLUDED
 #define ITEM_SUM_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1233,7 +1233,7 @@ class Item_sum_json : public Item_sum {
   */
   template <typename... Args>
   explicit Item_sum_json(unique_ptr_destroy_only<Json_wrapper> wrapper,
-                         Args &&... parent_args);
+                         Args &&...parent_args);
 
  public:
   ~Item_sum_json() override;

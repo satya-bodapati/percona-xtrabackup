@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -244,6 +244,10 @@ static void trx_init(trx_t *trx) {
 
   ++trx->version;
 }
+
+trx_guid_t::trx_guid_t(const trx_t &trx)
+    : m_immutable_id(reinterpret_cast<uint64_t>(&trx)),
+      m_version(trx.version) {}
 
 /** For managing the life-cycle of the trx_t instance that we get
 from the pool. */

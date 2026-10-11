@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -132,7 +132,8 @@ static u_int xdrmem_getpos(const XDR *xdrs) {
 /*
  * xdrs modified
  */
-static bool_t xdrmem_setpos(xdrs, pos) XDR *xdrs;
+static bool_t xdrmem_setpos(xdrs, pos)
+XDR *xdrs;
 u_int pos;
 {
   caddr_t newaddr = xdrs->x_base + pos;

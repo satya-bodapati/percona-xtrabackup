@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -30,7 +30,7 @@
 #include <string>
 #include <utility>
 
-#include "mysqlrouter/http_server_export.h"
+#include "mysqlrouter/http_server_lib_export.h"
 
 #include "helper/wait_variable.h"
 #include "mysql/harness/net_ts/internet.h"
@@ -38,7 +38,7 @@
 namespace http {
 namespace server {
 
-class HTTP_SERVER_EXPORT Bind {
+class HTTP_SERVER_LIB_EXPORT Bind {
  public:
   using io_context = net::io_context;
   using resolver = net::ip::tcp::resolver;

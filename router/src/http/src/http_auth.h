@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -30,7 +30,7 @@
 #include <system_error>
 #include <vector>
 
-#include "mysqlrouter/http_server_export.h"
+#include "mysqlrouter/http_server_lib_export.h"
 
 #include "http_auth_realm.h"
 
@@ -39,7 +39,7 @@
  *
  * @see https://tools.ietf.org/html/rfc7230#section-3.2.6
  */
-class HTTP_SERVER_EXPORT HttpQuotedString {
+class HTTP_SERVER_LIB_EXPORT HttpQuotedString {
  public:
   static std::string quote(const std::string &str);
 };
@@ -53,7 +53,7 @@ class HTTP_SERVER_EXPORT HttpQuotedString {
  *
  * @see https://tools.ietf.org/html/rfc7235#section-4.1
  */
-class HTTP_SERVER_EXPORT HttpAuthChallenge {
+class HTTP_SERVER_LIB_EXPORT HttpAuthChallenge {
  public:
   /**
    * construct challenge message.
@@ -104,7 +104,7 @@ class HTTP_SERVER_EXPORT HttpAuthChallenge {
  *
  * @see https://tools.ietf.org/html/rfc7235#section-4.2
  */
-class HTTP_SERVER_EXPORT HttpAuthCredentials {
+class HTTP_SERVER_LIB_EXPORT HttpAuthCredentials {
  public:
   /**
    * construct Authorization message from fields.

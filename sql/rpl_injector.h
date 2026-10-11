@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,13 +25,12 @@
 #define INJECTOR_H
 
 #include <stddef.h>
+#include <string_view>
 
-#include "lex_string.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
-#include "my_io.h"                              // FN_REFLEN
-#include "mysql/binlog/event/control_events.h"  // enum_incidents
-#include "sql/table.h"                          // TABLE
+#include "my_io.h"      // FN_REFLEN
+#include "sql/table.h"  // TABLE
 
 class THD;
 struct MY_BITMAP;
@@ -66,6 +65,15 @@ class injector {
     Delete the singleton instance (if allocated). Used during server shutdown.
   */
   static void free_instance();
+
+  /*
+    Return current binlog filename into provided buffer.
+
+    Writes an empty string if no binlog file is active.
+
+    Only buffers of size FN_REFLEN are supported (compile-time enforced).
+  */
+  static void get_current_binlog_filename(char (&filename)[FN_REFLEN]);
 
   /*
     A transaction where rows can be added.
@@ -146,8 +154,6 @@ class injector {
             m_is_transactional(is_transactional),
             m_skip_hash(skip_hash) {}
 
-      char const *db_name() const { return m_table->s->db.str; }
-      char const *table_name() const { return m_table->s->table_name.str; }
       TABLE *get_table() const { return m_table; }
       bool is_transactional() const { return m_is_transactional; }
       bool skip_hash() const { return m_skip_hash; }
@@ -334,9 +340,7 @@ class injector {
     const bool m_calc_writeset_hash{false};
   };
 
-  int record_incident(
-      THD *, mysql::binlog::event::Incident_event::enum_incident incident,
-      const LEX_CSTRING &message);
+  int record_incident(THD *, std::string_view message);
 
  private:
   explicit injector();

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -58,10 +58,11 @@ struct is_to_stream_writable<
  * only takes part in overload-resolution if T and E support 'os << v'
  */
 template <class T, class E>
-inline std::enable_if_t<impl::is_to_stream_writable<std::ostream, T>::value &&
-                            impl::is_to_stream_writable<std::ostream, E>::value,
-                        std::ostream &>
-operator<<(std::ostream &os, const stdx::expected<T, E> &res) {
+inline std::ostream &operator<<(std::ostream &os,
+                                const stdx::expected<T, E> &res)
+  requires((impl::is_to_stream_writable<std::ostream, T>::value &&
+            impl::is_to_stream_writable<std::ostream, E>::value))
+{
   if (res)
     os << res.value();
   else
@@ -76,9 +77,10 @@ operator<<(std::ostream &os, const stdx::expected<T, E> &res) {
  * only takes part in overload-resolution if E supports 'os << v'
  */
 template <class E>
-inline std::enable_if_t<impl::is_to_stream_writable<std::ostream, E>::value,
-                        std::ostream &>
-operator<<(std::ostream &os, const stdx::expected<void, E> &res) {
+inline std::ostream &operator<<(std::ostream &os,
+                                const stdx::expected<void, E> &res)  //
+  requires(impl::is_to_stream_writable<std::ostream, E>::value)
+{
   if (!res) os << res.error();
 
   return os;
@@ -90,9 +92,10 @@ operator<<(std::ostream &os, const stdx::expected<void, E> &res) {
  * only takes part in overload-resolution if E supports 'os << v'
  */
 template <class E>
-inline std::enable_if_t<impl::is_to_stream_writable<std::ostream, E>::value,
-                        std::ostream &>
-operator<<(std::ostream &os, const stdx::unexpected<E> &res) {
+inline std::ostream &operator<<(std::ostream &os,
+                                const stdx::unexpected<E> &res)  //
+  requires(impl::is_to_stream_writable<std::ostream, E>::value)
+{
   os << res.error();
 
   return os;

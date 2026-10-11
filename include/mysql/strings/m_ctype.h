@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -468,7 +468,7 @@ struct CHARSET_INFO {
 /*
   NOTE: You cannot use a CHARSET_INFO without it having been initialized first.
   In particular, they are not initialized when a unit test starts; do not use
-  these globals indiscriminately from there, and do not add more. Instead,
+  these globals indiscriminately from here, and do not add more. Instead,
   initialize them using my_collation_get_by_name().
 */
 

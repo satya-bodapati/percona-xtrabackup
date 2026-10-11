@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2024, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -99,23 +99,23 @@ constexpr uint32_t SEL_RETRY = 2;
  fields are compared with collation!
  @return true if the columns are equal */
 static bool row_sel_sec_rec_is_for_blob(
-    trx_t *trx,              /*!< in: the operating transaction */
-    ulint mtype,             /*!< in: main type */
-    ulint prtype,            /*!< in: precise type */
-    ulint mbminmaxlen,       /*!< in: minimum and maximum length of
-                             a multi-byte character */
-    const byte *clust_field, /*!< in: the locally stored part of
-                             the clustered index column, including
-                             the BLOB pointer; the clustered
-                             index record must be covered by
-                             a lock or a page latch to protect it
-                             against deletion (rollback or purge) */
-    ulint clust_len,         /*!< in: length of clust_field */
-    const byte *sec_field,   /*!< in: column in secondary index */
-    ulint sec_len,           /*!< in: length of sec_field */
-    ulint prefix_len,        /*!< in: index column prefix length
-                             in bytes */
-    dict_table_t *table)     /*!< in: table */
+    trx_t *trx,                /*!< in: the operating transaction */
+    ulint mtype,               /*!< in: main type */
+    ulint prtype,              /*!< in: precise type */
+    ulint mbminmaxlen,         /*!< in: minimum and maximum length of
+                               a multi-byte character */
+    const byte *clust_field,   /*!< in: the locally stored part of
+                               the clustered index column, including
+                               the BLOB pointer; the clustered
+                               index record must be covered by
+                               a lock or a page latch to protect it
+                               against deletion (rollback or purge) */
+    ulint clust_len,           /*!< in: length of clust_field */
+    const byte *sec_field,     /*!< in: column in secondary index */
+    ulint sec_len,             /*!< in: length of sec_field */
+    ulint prefix_len,          /*!< in: index column prefix length
+                               in bytes */
+    const dict_table_t *table) /*!< in: table */
 {
   ulint len;
   byte buf[REC_VERSION_56_MAX_INDEX_COL_LEN];
@@ -177,8 +177,8 @@ clustered record has been marked for deletion; only valid if DB_SUCCESS was
 returned
 @return DB_SUCCESS or error code */
 static dberr_t row_sel_sec_rec_is_for_clust_rec(
-    const rec_t *sec_rec, dict_index_t *sec_index, const rec_t *clust_rec,
-    dict_index_t *clust_index, que_thr_t *thr, bool &is_equal) {
+    const rec_t *sec_rec, const dict_index_t *sec_index, const rec_t *clust_rec,
+    const dict_index_t *clust_index, que_thr_t *thr, bool &is_equal) {
   const byte *sec_field;
   ulint sec_len;
   const byte *clust_field;
@@ -191,13 +191,14 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
   ulint *sec_offs = sec_offsets_;
   trx_t *trx = thr_get_trx(thr);
   dberr_t err = DB_SUCCESS;
+  const dict_table_t *const table = clust_index->table;
 
   is_equal = true;
 
   rec_offs_init(clust_offsets_);
   rec_offs_init(sec_offsets_);
 
-  if (rec_get_deleted_flag(clust_rec, dict_table_is_comp(clust_index->table))) {
+  if (rec_get_deleted_flag(clust_rec, dict_table_is_comp(table))) {
     /* The clustered index record is delete-marked;
     it is not visible in the read view.  Besides,
     if there are any externally stored columns,
@@ -229,19 +230,15 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
     /* For virtual column, its value will need to be
     reconstructed from base column in cluster index */
     if (col->is_virtual()) {
-      const dict_v_col_t *v_col;
-      const dtuple_t *row;
-      dfield_t *vfield;
+      const dict_v_col_t *v_col = reinterpret_cast<const dict_v_col_t *>(col);
 
-      v_col = reinterpret_cast<const dict_v_col_t *>(col);
+      const dtuple_t *const row =
+          row_build(ROW_COPY_POINTERS, clust_index, clust_rec, clust_offs,
+                    nullptr, nullptr, nullptr, &ext, heap);
 
-      row = row_build(ROW_COPY_POINTERS, clust_index, clust_rec, clust_offs,
-                      nullptr, nullptr, nullptr, &ext, heap);
-
-      vfield = innobase_get_computed_value(row, v_col, clust_index, &heap, heap,
-                                           nullptr, thr_get_trx(thr)->mysql_thd,
-                                           thr->prebuilt->m_mysql_table,
-                                           nullptr, nullptr, nullptr);
+      const dfield_t *const vfield = innobase_get_computed_value(
+          row, v_col, table, &heap, heap, thr_get_trx(thr)->mysql_thd,
+          thr->prebuilt->m_mysql_table);
 
       if (vfield == nullptr) {
         /* This may happen e.g. when this statement is executed in
@@ -284,8 +281,7 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
            (dict_table_has_atomic_blobs(sec_index->table) && sec_len == 0))) {
         if (!row_sel_sec_rec_is_for_blob(
                 trx, col->mtype, col->prtype, col->mbminmaxlen, clust_field,
-                clust_len, sec_field, sec_len, ifield->prefix_len,
-                clust_index->table)) {
+                clust_len, sec_field, sec_len, ifield->prefix_len, table)) {
           is_equal = false;
           goto func_exit;
         }
@@ -317,7 +313,12 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
                          reinterpret_cast<double *>(&tmp_mbr), nullptr);
       rtr_read_mbr(sec_field, &sec_mbr);
 
-      if (!mbr_equal_cmp(sec_index->rtr_srs.get(), &sec_mbr, &tmp_mbr)) {
+      /* We use mbr_equal_physically() here because during UPDATE we have
+      skipped updating Spatial Index only when existing MBR was matching
+      physically to MBR of updated geometry.
+      Checking for logical equality here will result in duplicate results
+      if the MBR was logically equal but physically different. */
+      if (!mbr_equal_physically(&sec_mbr, &tmp_mbr)) {
         is_equal = false;
         goto func_exit;
       }
@@ -2687,9 +2688,10 @@ void row_sel_field_store_in_mysql_format_func(
       happens for end range comparison. So length can
       vary according to secondary index record length. */
       ut_ad((templ->is_virtual && !field) ||
-            (field && field->prefix_len
+            ((field && field->prefix_len)
                  ? field->prefix_len == len
-                 : clust_templ_for_sec ? 1 : mysql_col_len == len));
+                 : (clust_templ_for_sec || mysql_col_len == len)));
+
       memcpy(dest, data, len);
   }
 }
@@ -2726,6 +2728,8 @@ void row_sel_field_store_in_mysql_format_func(
   ulint len;
   ulint clust_field_no = 0;
   bool clust_templ_for_sec = (sec_field_no != ULINT_UNDEFINED);
+  const dict_index_t *index_used =
+      (clust_templ_for_sec) ? prebuilt_index : rec_index;
 
   ut_ad(templ);
   ut_ad(prebuilt->default_rec);
@@ -2735,8 +2739,7 @@ void row_sel_field_store_in_mysql_format_func(
   ut_ad(clust_templ_for_sec || field_no == templ->clust_rec_field_no ||
         field_no == templ->rec_field_no || field_no == templ->icp_rec_field_no);
 
-  ut_ad(rec_offs_validate(
-      rec, clust_templ_for_sec == true ? prebuilt_index : rec_index, offsets));
+  ut_ad(rec_offs_validate(rec, index_used, offsets));
 
   /* If sec_field_no is present then extract the data from record
   using secondary field no. */
@@ -2745,7 +2748,7 @@ void row_sel_field_store_in_mysql_format_func(
     field_no = sec_field_no;
   }
 
-  if (rec_offs_nth_extern(rec_index, offsets, field_no)) {
+  if (rec_offs_nth_extern(index_used, offsets, field_no)) {
     /* Copy an externally stored field to a temporary heap */
 
     ut_a(!prebuilt->trx->has_search_latch);
@@ -2802,8 +2805,8 @@ void row_sel_field_store_in_mysql_format_func(
 
     if (lob_undo != nullptr) {
       ulint local_len;
-      const byte *field_data = rec_get_nth_field_instant(rec, offsets, field_no,
-                                                         rec_index, &local_len);
+      const byte *field_data = rec_get_nth_field_instant(
+          rec, offsets, field_no, index_used, &local_len);
       const byte *field_ref =
           field_data + local_len - BTR_EXTERN_FIELD_REF_SIZE;
 
@@ -2824,7 +2827,7 @@ void row_sel_field_store_in_mysql_format_func(
   } else {
     /* Field is stored in the row. */
 
-    data = rec_get_nth_field_instant(rec, offsets, field_no, rec_index, &len);
+    data = rec_get_nth_field_instant(rec, offsets, field_no, index_used, &len);
 
     if (len == UNIV_SQL_NULL) {
       /* MySQL assumes that the field for an SQL
@@ -3409,8 +3412,7 @@ static bool sel_restore_position_for_mysql(
   ut_ad(!success || pcur->m_rel_pos == BTR_PCUR_ON);
 #ifdef UNIV_DEBUG
   if (pcur->m_pos_state == BTR_PCUR_IS_POSITIONED_OPTIMISTIC) {
-    ut_ad(pcur->m_rel_pos == BTR_PCUR_BEFORE ||
-          pcur->m_rel_pos == BTR_PCUR_AFTER);
+    ut_ad(pcur->m_rel_pos == BTR_PCUR_BEFORE);
   } else {
     ut_ad(pcur->m_pos_state == BTR_PCUR_IS_POSITIONED);
     ut_ad((pcur->m_rel_pos == BTR_PCUR_ON) == pcur->is_on_user_rec());
@@ -3880,12 +3882,17 @@ static bool row_search_end_range_check(byte *mysql_rec, const rec_t *rec,
     for (ulint i = 0; i < prebuilt->n_template; ++i) {
       const auto &templ = prebuilt->mysql_template[i];
 
-      if (templ.is_virtual && templ.icp_rec_field_no != ULINT_UNDEFINED &&
-          !row_sel_store_mysql_field(
-              mysql_rec, prebuilt, rec, prebuilt->index, prebuilt->index,
-              offsets, templ.icp_rec_field_no, &templ, ULINT_UNDEFINED, nullptr,
-              prebuilt->blob_heap)) {
-        return (false);
+      if (templ.is_virtual && templ.icp_rec_field_no != ULINT_UNDEFINED) {
+        ut_a(!templ.is_multi_val);
+        bool stored = row_sel_store_mysql_field(
+            mysql_rec, prebuilt, rec, prebuilt->index, prebuilt->index, offsets,
+            templ.icp_rec_field_no, &templ, ULINT_UNDEFINED, nullptr,
+            prebuilt->blob_heap);
+        /* The only reason row_sel_store_mysql_field might return false
+        is when it encounters an externally stored value (blob). However
+        such values can't be fields of secondary indexes. */
+        ut_ad(stored);
+        ut_o(if (!stored) return false);
       }
     }
   }
@@ -3895,10 +3902,10 @@ static bool row_search_end_range_check(byte *mysql_rec, const rec_t *rec,
       record_buffer->set_out_of_range(true);
     }
 
-    return (true);
+    return true;
   }
 
-  return (false);
+  return false;
 }
 
 /** Traverse to next/previous record.
@@ -4964,10 +4971,15 @@ rec_loop:
     /** Compare the last record of the page with end range
     passed to InnoDB when there is no ICP and number of
     loops in row_search_mvcc for rows found but not
-    reporting due to search views etc. */
+    reporting due to search views etc.
+    When scanning a multi-value index, we don't perform the
+    check because we cannot convert the indexed value
+    (single scalar element) into the primary index (virtual)
+    column type (array of values).  */
     if (prev_rec != nullptr && !prebuilt->innodb_api &&
         prebuilt->m_mysql_handler->end_range != nullptr &&
-        prebuilt->idx_cond == false && end_loop >= 100) {
+        prebuilt->idx_cond == false && end_loop >= 100 &&
+        !(clust_templ_for_sec && index->is_multi_value())) {
       dict_index_t *key_index = prebuilt->index;
 
       if (end_range_cache == nullptr) {
@@ -5546,7 +5558,14 @@ rec_loop:
                                       UT_LOCATION_HERE, &heap);
       rtr_get_mbr_from_rec(rec, index_offsets, &index_mbr);
 
-      if (mbr_equal_cmp(index->rtr_srs.get(), &clust_mbr, &index_mbr)) {
+      /* We use mbr_equal_physically() because we are comparing
+      MBR between Clustured Index & Spatial Index to identify duplicates.
+      As during UPDATE we check for MBR being physically equal, check
+      for duplicate should also happen physically.*/
+      if (mbr_equal_physically(&clust_mbr, &index_mbr)) {
+        ut_ad(!rec_get_deleted_flag(clust_rec, comp));
+        /* Duplicate because it has the same MBR as the record in PK,
+        but the record in PK is not delete marked, while ours is. */
         *is_dup_rec = true;
       }
     }
@@ -5630,9 +5649,14 @@ rec_loop:
 
       /* If we are filling a server-provided buffer, and the
       server has pushed down an end range condition, evaluate
-      the condition to prevent that we read too many rows. */
+      the condition to prevent that we read too many rows.
+      When scanning a multi-value index, we don't perform the
+      check because we cannot convert the indexed value
+      (single scalar element) into the primary index (virtual)
+      column type (array of values). */
       if (record_buffer != nullptr &&
-          prebuilt->m_mysql_handler->end_range != nullptr) {
+          prebuilt->m_mysql_handler->end_range != nullptr &&
+          !(clust_templ_for_sec && index->is_multi_value())) {
         /* If the end-range condition refers to a
         virtual column and we are reading from the
         clustered index, next_buf does not have the

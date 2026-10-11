@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -396,9 +396,8 @@ dberr_t Arch_File_Ctx::open(bool read_only, lsn_t start_lsn, uint file_index,
     option = exists ? OS_FILE_OPEN : OS_FILE_CREATE_PATH;
   }
 
-  m_file =
-      os_file_create(innodb_arch_file_key, m_name_buf, option, OS_FILE_NORMAL,
-                     OS_CLONE_LOG_FILE, read_only, &success);
+  m_file = os_file_create(innodb_arch_file_key, m_name_buf, option,
+                          OS_CLONE_LOG_FILE, read_only, &success);
 
   if (!success) {
     return (DB_CANNOT_OPEN_FILE);

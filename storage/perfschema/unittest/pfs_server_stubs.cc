@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -57,9 +57,7 @@ void compute_digest_hash(const sql_digest_storage *, unsigned char *) {}
 
 void reset_status_vars() {}
 
-struct System_status_var *get_thd_status_var(THD *, bool *) {
-  return nullptr;
-}
+struct System_status_var *get_thd_status_var(THD *, bool *) { return nullptr; }
 
 #ifndef NDEBUG
 void thd_mem_cnt_alloc(THD *, size_t, const char *) {}

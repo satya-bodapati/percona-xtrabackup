@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -189,10 +189,11 @@ bool SimplePropertiesSectionWriter::reset() {
 }
 
 bool SimplePropertiesSectionWriter::putWord(Uint32 val) {
-  return putWords(&val, 1);
+  return putWordsFromChar((char *)&val, 1);
 }
 
-bool SimplePropertiesSectionWriter::putWords(const Uint32 *src, Uint32 len) {
+bool SimplePropertiesSectionWriter::putWordsFromChar(const char *src,
+                                                     Uint32 len) {
   Uint32 left = SectionSegment::DataLength - m_pos;
 
   while (len >= left) {
@@ -205,7 +206,7 @@ bool SimplePropertiesSectionWriter::putWords(const Uint32 *src, Uint32 len) {
       m_currentSegment = next.p;
 
       len -= left;
-      src += left;
+      src += 4 * left;
       m_sz += left;
 
       left = SectionSegment::DataLength;

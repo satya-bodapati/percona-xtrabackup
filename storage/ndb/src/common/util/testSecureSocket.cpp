@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -773,9 +773,7 @@ class IovList {
   IovList(const IovList &) = default;
   void set_count(int n) { nbuf = n; }
   int count() const { return nbuf; }
-  struct iovec &iov(int n) {
-    return m_iovec[n];
-  }
+  struct iovec &iov(int n) { return m_iovec[n]; }
   void free_all() {
     for (int n = 0; n < nbuf; n++) free(iov(n).iov_base);
   }

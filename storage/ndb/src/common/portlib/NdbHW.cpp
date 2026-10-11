@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -37,7 +37,7 @@
 #include "ndb_config.h"
 #include "util/require.h"
 
-//#define DEBUG_HW(arglist) do { printf arglist ; } while (0)
+// #define DEBUG_HW(arglist) do { printf arglist ; } while (0)
 #define DEBUG_HW(arglist) \
   do {                    \
   } while (0)

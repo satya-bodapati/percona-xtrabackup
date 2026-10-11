@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -134,6 +134,7 @@ class table_data_locks : public PFS_engine_table {
   PFS_data_lock_container m_container;
   PSI_engine_data_lock_iterator *m_iterator[COUNT_DATA_LOCK_ENGINES];
 
+  PFS_pk_data_locks *m_opened_pk;
   PFS_index_data_locks *m_opened_index;
 };
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -133,9 +133,9 @@ const std::string &Auth_id::host() const { return m_host; }
 
   @returns Name for the privilege represented by LSB
 */
-std::string get_one_priv(ulong &revoke_privs) {
+std::string get_one_priv(Access_bitmask &revoke_privs) {
   std::string priv;
-  ulong lsb;
+  Access_bitmask lsb;
   if (revoke_privs != 0) {
     // find out the least significant bit(lsb)
     lsb = revoke_privs & ~(revoke_privs - 1);

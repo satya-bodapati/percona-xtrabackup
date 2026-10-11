@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -73,10 +73,6 @@ public interface ClusterTransaction {
     public boolean isEnlisted();
 
     public void setPartitionKey(PartitionKey partitionKey);
-
-    public String getCoordinatedTransactionId();
-
-    public void setCoordinatedTransactionId(String coordinatedTransactionId);
 
     public void setLockMode(LockMode lockmode);
 

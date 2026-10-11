@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -24,7 +24,7 @@
 #ifndef XCOM_H_CMAKE
 #define XCOM_H_CMAKE
 
-#include <config.h>
+#include "my_config.h"
 
 /*Definitions*/
 #cmakedefine HAVE_RPC_INLINE_T 1

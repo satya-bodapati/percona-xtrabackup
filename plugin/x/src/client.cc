@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -893,7 +893,6 @@ void Client::set_is_interactive(const bool flag) {
    The method can be called from different thread/xpl_client.
  */
 bool Client::is_handler_thd(const THD *thd) const {
-  log_debug("is_handler_thd(this:%p)", this);
   DEBUG_SYNC(const_cast<THD *>(thd), "syncpoint_is_handled_by_thd");
 
   // When accessing the session we need to hold it in

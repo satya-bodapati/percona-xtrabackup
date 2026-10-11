@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -62,6 +62,8 @@ class ROUTING_EXPORT MySQLRoutingBase {
   virtual void stop_socket_acceptors() = 0;
 
   virtual bool is_running() const = 0;
+
+  virtual mysqlrouter::ServerMode purpose() const = 0;
 };
 
 #endif  // ROUTING_MYSQL_ROUTING_BASE_INCLUDED

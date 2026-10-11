@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -367,15 +367,6 @@ If this is a high priority transaction,
 kill all transactions that are blocking this transaction from acquiring locks.
 @param[in,out] trx      High priority transaction */
 void trx_kill_blocking(trx_t *trx);
-
-/** Provides an id of the transaction which does not change over time.
-Contrast this with trx->id and trx_get_id_for_print(trx) which change value once
-a transaction can no longer be treated as read-only and becomes read-write.
-@param[in]  trx   The transaction for which you want an immutable id
-@return the transaction's immutable id */
-static inline uint64_t trx_immutable_id(const trx_t *trx) {
-  return (uint64_t{reinterpret_cast<uintptr_t>(trx)});
-}
 
 /**
 Check if redo/noredo rseg is modified for insert/update.

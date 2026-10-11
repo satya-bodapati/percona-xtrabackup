@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -134,18 +134,36 @@ static bool is_trx_unsafe_for_parallel_slave(const THD *thd) {
 }
 
 /**
+  Check if the current statement is a CREATE TABLE ... SELECT (CTAS)
+  or any other transactional DDL that should be treated similarly.
+
+  @param thd Current THD handle.
+  @return true  if the statement is a CTAS or a transactional DDL.
+  @return false otherwise.
+*/
+[[nodiscard]] static bool is_create_table_as_query_block(THD *thd) {
+  return ((thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
+           (thd->lex->query_block != nullptr) &&
+           !thd->lex->query_block->field_list_is_empty()) ||
+          thd->m_transactional_ddl.inited());
+}
+
+/**
   Get the sequence_number for a transaction, and get the last_commit based
   on parallel committing transactions.
 
   @param[in]     thd             Current THD from which to extract trx context.
+  @param[in]     parallelization_barrier The transaction is a
+                                 parallelization_barrier and subseqent
+                                 transactions should depend on it.
   @param[in,out] sequence_number Sequence number of current transaction.
   @param[in,out] commit_parent   Commit_parent of current transaction,
                                  pre-filled with the commit_parent calculated
                                  by the logical clock logic.
 */
-void Commit_order_trx_dependency_tracker::get_dependency(THD *thd,
-                                                         int64 &sequence_number,
-                                                         int64 &commit_parent) {
+void Commit_order_trx_dependency_tracker::get_dependency(
+    THD *thd, bool parallelization_barrier, int64 &sequence_number,
+    int64 &commit_parent) {
   Transaction_ctx *trn_ctx = thd->get_transaction();
 
   assert(trn_ctx->sequence_number > m_max_committed_transaction.get_offset());
@@ -170,7 +188,7 @@ void Commit_order_trx_dependency_tracker::get_dependency(THD *thd,
         std::max(trn_ctx->last_committed, m_last_blocking_transaction) -
         m_max_committed_transaction.get_offset();
 
-  if (is_trx_unsafe_for_parallel_slave(thd))
+  if (is_trx_unsafe_for_parallel_slave(thd) || parallelization_barrier)
     m_last_blocking_transaction = trn_ctx->sequence_number;
 }
 
@@ -232,6 +250,11 @@ void Writeset_trx_dependency_tracker::get_dependency(THD *thd,
          they can be executed in parallel.
        */
        is_empty_transaction_in_binlog_cache(thd)) &&
+      /*
+        'CREATE TABLE ... AS SELECT' is considered a DML, though in reality
+        it is DDL + DML, which write-sets do not capture all dependencies.
+      */
+      !is_create_table_as_query_block(thd) &&
       // binlog format must be ROW
       thd->variables.binlog_format == BINLOG_FORMAT_ROW &&
       // must not use foreign keys
@@ -299,11 +322,12 @@ void Writeset_trx_dependency_tracker::rotate(int64 start) {
   Get the dependencies in a transaction, the main entry point for the
   dependency tracking work.
 */
-void Transaction_dependency_tracker::get_dependency(THD *thd,
-                                                    int64 &sequence_number,
-                                                    int64 &commit_parent) {
+void Transaction_dependency_tracker::get_dependency(
+    THD *thd, bool parallelization_barrier, int64 &sequence_number,
+    int64 &commit_parent) {
   sequence_number = commit_parent = 0;
-  m_commit_order.get_dependency(thd, sequence_number, commit_parent);
+  m_commit_order.get_dependency(thd, parallelization_barrier, sequence_number,
+                                commit_parent);
   m_writeset.get_dependency(thd, sequence_number, commit_parent);
 }
 

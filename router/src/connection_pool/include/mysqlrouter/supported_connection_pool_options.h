@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -27,11 +27,17 @@
 #define MYSQLROUTER_CONNECTION_POOL_SUPPORTED_OPTIONS_INCLUDED
 
 #include <array>
-#include <string_view>
 
-static constexpr std::array<const char *, 2> connection_pool_supported_options{
-    "idle_timeout",
-    "max_idle_server_connections",
+namespace connection_pool {
+namespace options {
+constexpr const char kIdleTimeout[]{"idle_timeout"};
+constexpr const char kMaxIdleServerConnections[]{"max_idle_server_connections"};
+}  // namespace options
+}  // namespace connection_pool
+
+static constexpr std::array connection_pool_supported_options{
+    connection_pool::options::kIdleTimeout,
+    connection_pool::options::kMaxIdleServerConnections,
 };
 
 #endif /* MYSQLROUTER_ROUTING_SUPPORTED_ROUTING_INCLUDED */

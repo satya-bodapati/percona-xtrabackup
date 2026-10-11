@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -184,6 +184,18 @@ static inline void mysql_thread_set_secondary_engine(bool secondary
                                                      [[maybe_unused]]) {
 #ifdef HAVE_PSI_THREAD_INTERFACE
   PSI_THREAD_CALL(set_thread_secondary_engine)(secondary);
+#endif
+}
+
+/**
+  Set the INFO attribute in the thread instrumentation.
+  @param str query string
+  @param len query length
+*/
+static inline void mysql_thread_set_info(const char *str [[maybe_unused]],
+                                         int len [[maybe_unused]]) {
+#ifdef HAVE_PSI_THREAD_INTERFACE
+  PSI_THREAD_CALL(set_thread_info)(str, len);
 #endif
 }
 

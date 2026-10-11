@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -1199,10 +1199,6 @@ void log_buffer_flush_to_disk(log_t &log, bool sync) {
   /* Google's patch introduced log_buffer_sync_in_background which was calling
   log_write_up_to, and this is the left-over from that. */
   log_write_up_to(log, lsn, sync);
-}
-
-void log_buffer_flush_to_disk(bool sync) {
-  log_buffer_flush_to_disk(*log_sys, sync);
 }
 
 void log_buffer_sync_in_background() {

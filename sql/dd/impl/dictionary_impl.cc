@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -622,8 +622,8 @@ bool create_native_table(THD *thd, const Plugin_table *pt) {
     return true;
 
   thd->mark_plugin_fake_ddl(true);
-  ulong master_access = thd->security_context()->master_access();
-  thd->security_context()->set_master_access(~(ulong)0);
+  Access_bitmask master_access = thd->security_context()->master_access();
+  thd->security_context()->set_master_access(ALL_ACCESS);
   {
     Disable_binlog_guard guard(thd);
 

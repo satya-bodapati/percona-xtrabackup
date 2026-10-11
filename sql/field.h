@@ -1,7 +1,7 @@
 #ifndef FIELD_INCLUDED
 #define FIELD_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -776,6 +776,15 @@ class Field {
 
    */
   bool is_created_from_null_item;
+  /**
+    If true, it's a Create_field_wrapper (a sub-class of Field used during
+    CREATE/ALTER that we mustn't cast to other sub-classes of Field that
+    aren't on a direct path of inheritance, e.g. Field_enum).
+
+    @see Create_field_wrapper::is_wrapper_field
+  */
+  virtual bool is_wrapper_field() const { return false; }
+
   /**
      True if this field belongs to some index (unlike part_of_key, the index
      might have only a prefix).
@@ -1934,6 +1943,7 @@ class Create_field_wrapper final : public Field {
   Field *clone(MEM_ROOT *mem_root) const final {
     return new (mem_root) Create_field_wrapper(*this);
   }
+  bool is_wrapper_field() const final { return true; }
   /* purecov: end */
 };
 
@@ -3692,9 +3702,10 @@ class Field_blob : public Field_longstr {
         m_keep_old_value(false) {
     set_flag(BLOB_FLAG);
     if (set_packlength) {
-      packlength = len_arg <= 255
-                       ? 1
-                       : len_arg <= 65535 ? 2 : len_arg <= 16777215 ? 3 : 4;
+      packlength = len_arg <= 255        ? 1
+                   : len_arg <= 65535    ? 2
+                   : len_arg <= 16777215 ? 3
+                                         : 4;
     }
   }
 
@@ -4236,21 +4247,21 @@ class Field_typed_array final : public Field_json {
   int key_cmp(const uchar *, const uchar *) const override { return -1; }
   /**
    * @brief This function will behave similarly to MEMBER OF json operation,
-   *        unlike regular key_cmp. The key value will be checked against
-   *        members of the array and the presence of the key will be considered
-   *        as the record matching the given key. This particular definition is
-   *        used in descending ref index scans. Descending index scan uses
-   *        handler::ha_index_prev() function to read from the storage engine
-   *        which does not compare the index key with the search key [unlike
-   *        handler::ha_index_next_same()]. Hence each retrieved record needs
-   *        to be validated to find a stop point. Refer key_cmp_if_same() and
-   *        RefIterator<true>::Read() for more details.
+   *        unlike regular key_cmp. In case of multi-valued indexes a record
+   *        not matching the MEMBER OF condition indicates out of range, so the
+   *        function returns 1 for not found.
+   *        This definition is used in descending ref index scans.
+   *        Descending index scan uses handler::ha_index_prev() function to read
+   *        from the storage engine which does not compare the index key with
+   *        the search key [unlike handler::ha_index_next_same()]. Hence each
+   *        retrieved record needs to be validated to find a stop point. Refer
+   *        key_cmp_if_same() and RefIterator<true>::Read() for more details.
    *
    * @param   key_ptr         Pointer to the key
    * @param   key_length      Key length
    * @return
    *      0   Key found in the record
-   *      -1  Key not found in the record
+   *      1   Key not found in the record
    */
   int key_cmp(const uchar *key_ptr, uint key_length) const override;
   /**

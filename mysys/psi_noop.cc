@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -53,6 +53,7 @@
 #define HAVE_PSI_SYSTEM_INTERFACE
 #define HAVE_PSI_TLS_CHANNEL_INTERFACE
 #define HAVE_PSI_SERVER_TELEMETRY_TRACES_INTERFACE
+#define HAVE_PSI_SERVER_TELEMETRY_LOGS_INTERFACE
 
 #ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
@@ -72,6 +73,7 @@
 #include "mysql/psi/psi_error.h"
 #include "mysql/psi/psi_file.h"
 #include "mysql/psi/psi_idle.h"
+#include "mysql/psi/psi_logger_client.h"
 #include "mysql/psi/psi_mdl.h"
 #include "mysql/psi/psi_memory.h"
 #include "mysql/psi/psi_metric.h"
@@ -565,6 +567,8 @@ static void set_metadata_lock_status_noop(PSI_metadata_lock *,
 static void set_metadata_lock_duration_noop(PSI_metadata_lock *,
                                             opaque_mdl_duration) {}
 
+static void set_metadata_lock_type_noop(PSI_metadata_lock *, opaque_mdl_type) {}
+
 static void destroy_metadata_lock_noop(PSI_metadata_lock *) {}
 
 static PSI_metadata_locker *start_metadata_wait_noop(
@@ -576,8 +580,9 @@ static void end_metadata_wait_noop(PSI_metadata_locker *, int) {}
 
 static PSI_mdl_service_t psi_mdl_noop = {
     create_metadata_lock_noop,       set_metadata_lock_status_noop,
-    set_metadata_lock_duration_noop, destroy_metadata_lock_noop,
-    start_metadata_wait_noop,        end_metadata_wait_noop};
+    set_metadata_lock_duration_noop, set_metadata_lock_type_noop,
+    destroy_metadata_lock_noop,      start_metadata_wait_noop,
+    end_metadata_wait_noop};
 
 struct PSI_mdl_bootstrap *psi_mdl_hook = nullptr;
 PSI_mdl_service_t *psi_mdl_service = &psi_mdl_noop;
@@ -1034,6 +1039,31 @@ PSI_metric_service_t *psi_metric_service = &psi_metric_noop;
 
 void set_psi_metric_service(void *psi) {
   psi_metric_service = (PSI_metric_service_t *)psi;
+}
+
+// ===========================================================================
+
+static void register_logger_client_noop(PSI_logger_info_v1 *, size_t,
+                                        const char *) {}
+
+static void unregister_logger_client_noop(PSI_logger_info_v1 *, size_t) {}
+
+static PSI_logger *check_enabled_noop(PSI_logger_key, OTELLogLevel) {
+  return nullptr;
+}
+
+static void log_emit_noop(PSI_logger *, OTELLogLevel, const char *, time_t,
+                          const log_attribute_t *, size_t) {}
+
+static PSI_logs_client_service_t psi_logs_client_noop = {
+    register_logger_client_noop, unregister_logger_client_noop,
+    check_enabled_noop, log_emit_noop};
+
+struct PSI_logs_client_bootstrap *psi_logs_client_hook = nullptr;
+PSI_logs_client_service_t *psi_logs_client_service = &psi_logs_client_noop;
+
+void set_psi_logs_client_service(void *psi) {
+  psi_logs_client_service = (PSI_logs_client_service_t *)psi;
 }
 
 // ===========================================================================

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2024, Oracle and/or its affiliates.
+  Copyright (c) 2024, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -28,14 +28,14 @@
 
 #include <atomic>
 
-#include "mysqlrouter/http_server_export.h"
+#include "mysqlrouter/http_server_lib_export.h"
 
 namespace http {
 namespace server {
 
-HTTP_SERVER_EXPORT extern std::atomic<uint64_t> http_connections_created;
-HTTP_SERVER_EXPORT extern std::atomic<uint64_t> http_connections_closed;
-HTTP_SERVER_EXPORT extern std::atomic<uint64_t> http_connections_reused;
+HTTP_SERVER_LIB_EXPORT extern std::atomic<uint64_t> http_connections_created;
+HTTP_SERVER_LIB_EXPORT extern std::atomic<uint64_t> http_connections_closed;
+HTTP_SERVER_LIB_EXPORT extern std::atomic<uint64_t> http_connections_reused;
 
 }  // namespace server
 }  // namespace http

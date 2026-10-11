@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1294,9 +1294,9 @@ bool Item_field::check_function_as_value_generator(uchar *checker_args) {
     func_args->err_code =
         (func_args->source == VGS_GENERATED_COLUMN)
             ? ER_GENERATED_COLUMN_REF_AUTO_INC
-            : (func_args->source == VGS_DEFAULT_EXPRESSION)
-                  ? ER_DEFAULT_VAL_GENERATED_REF_AUTO_INC
-                  : ER_CHECK_CONSTRAINT_REFERS_AUTO_INCREMENT_COLUMN;
+        : (func_args->source == VGS_DEFAULT_EXPRESSION)
+            ? ER_DEFAULT_VAL_GENERATED_REF_AUTO_INC
+            : ER_CHECK_CONSTRAINT_REFERS_AUTO_INCREMENT_COLUMN;
     return true;
   }
 
@@ -2004,7 +2004,7 @@ void Item_splocal::print(const THD *thd, String *str, enum_query_type) const {
 }
 
 bool Item_splocal::set_value(THD *thd, sp_rcontext *ctx, Item **it) {
-  return ctx->set_variable(thd, get_var_idx(), it);
+  return ctx->set_variable(thd, false, get_var_idx(), it);
 }
 
 /*****************************************************************************
@@ -3076,9 +3076,9 @@ const char *Item_ident::full_name() const {
       m_orig_field_name != nullptr ? m_orig_field_name : field_name;
   char *tmp;
   if (table_name == nullptr || f_name == nullptr)
-    return f_name != nullptr
-               ? f_name
-               : item_name.is_set() ? item_name.ptr() : "tmp_field";
+    return f_name != nullptr    ? f_name
+           : item_name.is_set() ? item_name.ptr()
+                                : "tmp_field";
   if (db_name && db_name[0]) {
     tmp = pointer_cast<char *>(
         (*THR_MALLOC)
@@ -3107,12 +3107,12 @@ void Item_ident::print(const THD *thd, String *str, enum_query_type query_type,
   if (lower_case_table_names == 1 ||
       // mode '2' does not apply to aliases:
       (lower_case_table_names == 2 && !alias_name_used())) {
-    if (table_name_arg && table_name_arg[0]) {
+    if (!(query_type & QT_NO_TABLE) && table_name_arg && table_name_arg[0]) {
       my_stpcpy(t_name_buff, table_name_arg);
       my_casedn_str(files_charset_info, t_name_buff);
       t_name = t_name_buff;
     }
-    if (db_name_arg && db_name_arg[0]) {
+    if (!(query_type & QT_NO_DB) && db_name_arg && db_name_arg[0]) {
       my_stpcpy(d_name_buff, db_name_arg);
       my_casedn_str(files_charset_info, d_name_buff);
       d_name = d_name_buff;
@@ -3120,9 +3120,9 @@ void Item_ident::print(const THD *thd, String *str, enum_query_type query_type,
   }
 
   if (table_name_arg == nullptr || f_name == nullptr || !f_name[0]) {
-    const char *nm = (f_name != nullptr && f_name[0])
-                         ? f_name
-                         : item_name.is_set() ? item_name.ptr() : "tmp_field";
+    const char *nm = (f_name != nullptr && f_name[0]) ? f_name
+                     : item_name.is_set()             ? item_name.ptr()
+                                                      : "tmp_field";
     append_identifier(thd, str, nm, strlen(nm));
     return;
   }
@@ -4101,11 +4101,10 @@ bool Item_param::set_str(const char *str, size_t length) {
     - when the source string is a binary string, keep it as-is and perform
       no conversion.
   */
-  set_collation_actual(collation_source() == &my_charset_bin
-                           ? &my_charset_bin
-                           : collation.collation != &my_charset_bin
-                                 ? collation.collation
-                                 : current_thd->variables.collation_connection);
+  set_collation_actual(collation_source() == &my_charset_bin ? &my_charset_bin
+                       : collation.collation != &my_charset_bin
+                           ? collation.collation
+                           : current_thd->variables.collation_connection);
 
   m_param_state = STRING_VALUE;
   return false;
@@ -6334,11 +6333,16 @@ Item *Item_field::replace_item_field(uchar *arg) {
 
     // The field is an outer reference, so we cannot reuse transformed query
     // block's Item_field; make a new one for this query block
+    if (info->m_outer_field != nullptr)  // have made one already, reuse it
+      return info->m_outer_field;
+
     THD *const thd = current_thd;
     Item_field *outer_field = new (thd->mem_root) Item_field(thd, info->m_item);
     if (outer_field == nullptr) return nullptr; /* purecov: inspected */
     outer_field->depended_from = info->m_trans_block;
     outer_field->context = &info->m_curr_block->context;
+    outer_field->hidden = hidden;
+    info->m_outer_field = outer_field;  // for reuse
     return outer_field;
   }
 
@@ -7224,9 +7228,9 @@ bool Item_float::eq(const Item *arg, bool) const {
 }
 
 static inline uint char_val(char X) {
-  return (uint)(X >= '0' && X <= '9'
-                    ? X - '0'
-                    : X >= 'A' && X <= 'Z' ? X - 'A' + 10 : X - 'a' + 10);
+  return (uint)(X >= '0' && X <= '9'   ? X - '0'
+                : X >= 'A' && X <= 'Z' ? X - 'A' + 10
+                                       : X - 'a' + 10);
 }
 
 Item_hex_string::Item_hex_string() { hex_string_init("", 0); }
@@ -7638,6 +7642,10 @@ bool Item::update_null_value() {
   @param buffer Buffer, in case item needs a large one
 
   @returns false if success, true if error
+
+  If evaluation results in a NULL value, the NULL
+  value indicator is set for the item and return value is false (as for
+  a successful execution).
 */
 
 bool Item::evaluate(THD *thd, String *buffer) {
@@ -7703,10 +7711,7 @@ bool Item::evaluate(THD *thd, String *buffer) {
       break;
     }
   }
-  const bool result = thd->is_error();
-  // Convention: set NULL value indicator on error
-  if (result) null_value = true;
-  return result;
+  return thd->is_error();
 }
 
 /**
@@ -7793,6 +7798,7 @@ bool Item::clean_up_after_removal(uchar *arg) {
 
   if (reference_count() > 1) {
     (void)decrement_ref_count();
+    ctx->stop_at(this);
   }
   return false;
 }
@@ -8325,12 +8331,17 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
           // Add the view reference to the select expression list as hidden
           // item.
           m_ref_item = qb->add_hidden_item(*reference);
+          // Increment the reference count as the expression is now part
+          // of the select list. The call to link_referenced_item()
+          // later will account for the reference from this Item_ref object.
+          (*reference)->increment_ref_count();
           *reference = this;
         } else {
           Item_field *fld = new Item_field(
               thd, context, from_field->table->pos_in_table_list, from_field);
           if (fld == nullptr) return true;
           m_ref_item = qb->add_hidden_item(fld);
+          fld->increment_ref_count();
         }
       }
     }
@@ -8836,6 +8847,55 @@ bool Item_view_ref::fix_fields(THD *thd, Item **reference) {
 }
 
 /**
+  Return the set of tables this view column logically depends on.
+
+  For a view/derived-table column that has been merged, the
+  underlying expression may itself be another view reference or
+  an arbitrary expression. In most cases, the dependency set is
+  simply the `used_tables()` of the referenced expression
+
+  There are two important refinements:
+
+  - If the view column (or its underlying field) is an outer
+    reference, we report OUTER_REF_TABLE_BIT so the optimizer can
+    treat it as referring to an outer query block.
+
+  - If the referenced expression is constant for the duration of
+    execution but the view/derived table is on the inner side of an
+    outer join (indicated by `first_inner_table`), the value may
+    still depend on whether the inner table has been null-complemented
+    (via `has_null_row()`). In this case we ensure the inner table’s
+    map is included, so the expression is not treated as an
+    unconditional constant during optimization.
+*/
+table_map Item_view_ref::used_tables() const {
+  // If this view column itself is an outer reference, report it as such.
+  if (depended_from != nullptr) return OUTER_REF_TABLE_BIT;
+  Item *inner_item = ref_item();
+  table_map inner_map = inner_item->used_tables();
+  // Note that we do not use const_for_execution() function so
+  // as to avoid multiple and recursive calls to used_tables, as this could
+  // create a problem when views are created using other views.
+  if (!(inner_map & ~INNER_TABLE_BIT) && first_inner_table != nullptr) {
+    if (inner_item->type() == Item::FIELD_ITEM) {
+      const Item_field *field = down_cast<const Item_field *>(inner_item);
+      // Const table elimination has converted field to a const value.
+      // Nevertheless, we cannot handle it as a true const value in other parts
+      // of the code, and thus have to report it as if it were original,
+      // ie. an outer reference or a regular table field.
+      return field->depended_from != nullptr ? OUTER_REF_TABLE_BIT
+                                             : field->table_ref->map();
+    }
+    // Constant value on inner side of outer join wrapped in one or more
+    // Item_view_ref levels) depends on the inner table.
+    return first_inner_table->map();
+  }
+  // In all other cases, used tables are exactly those of the underlying
+  // expression referenced by this view column.
+  return inner_map;
+}
+
+/**
   Prepare referenced outer field then call usual Item_ref::fix_fields
 
   @param thd         thread handler
@@ -9031,23 +9091,18 @@ bool Item_view_ref::collect_item_field_or_view_ref_processor(uchar *arg) {
   if (info->is_stopped(this)) return false;
   // We collect this view ref
   // (1) If its qualifying table is in the transformed query block
-  // (2) If its underlying field's qualifying table is in the transformed
-  // query block
-  // (3) If this view ref is an outer reference dependent on the
+  // (2) If this view ref is an outer reference dependent on the
   // transformed query block
   Item *item = nullptr;
   item = (context->query_block == info->m_transformed_block)  // 1
              ? this
-             : ((real_item()->type() == Item::FIELD_ITEM &&
-                 (down_cast<Item_field *>(real_item())->context->query_block ==
-                  info->m_transformed_block))  // 2
-                    ? this->real_item()
-                    : ((depended_from == info->m_transformed_block)  // 3
-                           ? this
-                           : nullptr));
+             : ((depended_from == info->m_transformed_block)  // 2
+                    ? this
+                    : nullptr);
   bool error = false;
-  if (item != nullptr)
+  if (item != nullptr) {
     error = info->m_item_fields_or_view_refs->push_back(item);
+  }
   if (error) return true;
   info->stop_at(this);
   return false;
@@ -9076,8 +9131,12 @@ Item *Item_view_ref::replace_item_view_ref(uchar *arg) {
 
     // The is an outer reference, so we cannot reuse transformed query
     // block's Item_field; make a new one for this query block
+    if (info->m_outer_field != nullptr)  // have made one already, reuse it
+      return info->m_outer_field;
     new_field->depended_from = info->m_trans_block;
     new_field->context = &info->m_curr_block->context;
+    new_field->hidden = hidden;
+    info->m_outer_field = new_field;
     return new_field;
   }
   return this;
@@ -9180,9 +9239,23 @@ bool Item_default_value::fix_fields(THD *thd, Item **) {
   return false;
 }
 
+void Item_default_value::cleanup() {
+  Item::cleanup();
+
+  if (!fixed || arg == nullptr) return;
+  // Field is cloned into plan, but table must be re-bound on next execution
+  if (table_ref != nullptr) {
+    field->table = nullptr;
+  }
+}
+
 void Item_default_value::bind_fields() {
   if (!fixed || arg == nullptr) return;
 
+  // Re-bind table pointer from table reference object
+  if (table_ref != nullptr) {
+    field->table = table_ref->table;
+  }
   field->move_field_offset(
       (ptrdiff_t)(field->table->s->default_values - m_rowbuffer_saved));
   m_rowbuffer_saved = field->table->s->default_values;
@@ -9423,8 +9496,8 @@ bool Item_trigger_field::eq(const Item *item, bool) const {
              down_cast<const Item_trigger_field *>(item)->field_name);
 }
 
-bool Item_trigger_field::set_value(THD *thd, sp_rcontext * /*ctx*/, Item **it) {
-  Item *item = sp_prepare_func_item(thd, it);
+bool Item_trigger_field::set_value(THD *thd, sp_rcontext *, Item **it) {
+  Item *item = sp_prepare_func_item(thd, true, it);
   if (item == nullptr) return true;
 
   if (!fixed) {
@@ -10103,7 +10176,7 @@ longlong Item_cache_datetime::val_int() { return val_int_from_decimal(); }
 
 Item_cache_json::Item_cache_json()
     : Item_cache(MYSQL_TYPE_JSON),
-      m_value(new (*THR_MALLOC) Json_wrapper()),
+      m_value(new(*THR_MALLOC) Json_wrapper()),
       m_is_sorted(false) {}
 
 Item_cache_json::~Item_cache_json() {

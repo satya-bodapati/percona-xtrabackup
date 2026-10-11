@@ -1,4 +1,4 @@
-/* Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -111,6 +111,27 @@ int Ndb::init(int aMaxNoOfTransactions) {
    */
   theFirstTransId |=
       theImpl->m_ndb_cluster_connection.get_next_transid(theNdbBlockNumber);
+
+  /**
+   * Initialise current connect index and node iterator to get balanced
+   * node selection offset for first request using a new Ndb object
+   */
+  {
+    /**
+     * Use ndb_cluster_connection given id to provide RR variation
+     * of 'starting offset' for unhinted TC node choice.
+     */
+    const Uint32 tcNodeChoiceOffset =
+        (nodeId + theImpl->theCurrentConnectIndex) %
+        (theImpl->theNoOfDBnodes ? theImpl->theNoOfDBnodes : MAX_NDB_NODES);
+
+    /* Configure RR + proximity aware unhinted iterators */
+    theImpl->theCurrentConnectIndex = tcNodeChoiceOffset;
+    theImpl->m_ndb_cluster_connection.init_get_next_node(theImpl->m_node_iter);
+    for (Uint32 i = 0; i < tcNodeChoiceOffset; i++) {
+      theImpl->m_ndb_cluster_connection.get_next_node(theImpl->m_node_iter);
+    }
+  }
 
   /* Init cached min node version */
   theFacade->lock_poll_mutex();
@@ -500,6 +521,8 @@ void NdbImpl::trp_deliver_signal(const NdbApiSignal *aSignal,
 #ifdef NDB_NO_DROPPED_SIGNAL
           abort();
 #endif
+          g_eventLogger->warning(
+              "Received TRANSID_AI with wrong magic number: %u", magicNumber);
           return;
         }
         tCon = tRec->getTransaction(type);
@@ -1336,8 +1359,7 @@ Uint32 Ndb::pollCompleted(NdbTransaction **aCopyArray) {
 }  // Ndb::pollCompleted()
 
 void Ndb::check_send_timeout() {
-  const Uint32 timeout =
-      theImpl->get_ndbapi_config_parameters().m_waitfor_timeout;
+  const Uint32 timeout = theImpl->get_waitfor_timeout();
   const Uint64 current_time = NdbTick_CurrentMillisecond();
   assert(current_time >= the_last_check_time);
 #ifndef NDEBUG
@@ -1368,7 +1390,7 @@ void Ndb::check_send_timeout() {
                             t2);
         // abort();
 #endif
-        a_con->theReleaseOnClose = true;
+        a_con->theForceReleaseOnClose = true;
         a_con->theError.code = 4012;
         a_con->setOperationErrorCodeAbort(4012);
         a_con->theCommitStatus = NdbTransaction::NeedAbort;

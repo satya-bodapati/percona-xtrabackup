@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -69,9 +69,8 @@ struct Parallel_cursor : public Cursor {
   /** Copy the row data, by default only the pointers are copied.
   @param[in] thread_id          Scan thread ID.
   @param[in,out] row            Row to copy.
-  @return DB_SUCCESS or error code. */
-  [[nodiscard]] virtual dberr_t copy_row(size_t thread_id,
-                                         Row &row) noexcept override;
+  */
+  virtual void copy_row(size_t thread_id, Row &row) noexcept override;
 
   /** @return true if EOF reached. */
   [[nodiscard]] virtual bool eof() const noexcept override { return m_eof; }
@@ -205,8 +204,9 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
           for (size_t j = i + 1; j < batch_insert.size(); ++j) {
             batch_insert[j]->batch_insert_deep_copy_tuples(thread_id);
           }
-          thread_ctx->savepoint();
+          thread_ctx->save_previous_user_record_as_last_processed();
           latches_released = true;
+          DEBUG_SYNC_C("ddl_batch_inserter_latches_released");
         }
         return DB_SUCCESS;
       });
@@ -219,7 +219,8 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
     }
 
     if (latches_released) {
-      return thread_ctx->restore_from_savepoint();
+      /* Resume from the savepoint (above). */
+      thread_ctx->restore_to_first_unprocessed();
     }
 
     return DB_SUCCESS;
@@ -235,25 +236,26 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
       const auto err = builder->add_row(*this, row, thread_id, [&]() {
         if (!latches_released &&
             thread_ctx->get_state() != Parallel_reader::State::THREAD) {
-          thread_ctx->savepoint();
+          thread_ctx->save_current_user_record_as_last_processed();
           latches_released = true;
+          DEBUG_SYNC_C("ddl_bulk_inserter_latches_released");
         }
         return DB_SUCCESS;
       });
 
       if (err != DB_SUCCESS && err != DB_END_OF_INDEX) {
+        for (auto current_builder : builders) {
+          /* Discard returned error as it is same as err */
+          static_cast<void>(current_builder->handle_error(err));
+        }
         return err;
-      }
-
-      if (builder->stage() != nullptr) {
-        builder->stage()->end_phase_read_pk();
       }
     }
 
     if (latches_released) {
       ut_a(row.m_ptr != nullptr);
       /* Resume from the savepoint (above). */
-      return thread_ctx->restore_from_savepoint();
+      thread_ctx->restore_to_last_processed_user_record();
     }
 
     return DB_SUCCESS;
@@ -273,6 +275,10 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
   /* Called when a thread finishes traversing a page and when it completes. */
   reader.set_finish_callback([&](Thread_ctx *thread_ctx) {
+    if (reader.is_error_set()) {
+      return reader.get_error_state();
+    }
+
     dberr_t err{DB_SUCCESS};
     const auto thread_id = thread_ctx->m_thread_id;
 
@@ -356,7 +362,7 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
         /* We only need to copy the data when the heap is emptied.
         @see Parallel_cursor::copy_row */
-        auto err = row.build(m_ctx, m_index, heap, ROW_COPY_POINTERS);
+        auto err = row.build(m_ctx, heap);
 
         if (err != DB_SUCCESS) {
           return err;
@@ -379,8 +385,6 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
           << "Resource not available to create threads for parallel scan."
           << " Falling back to single thread mode.";
 
-      reader.release_threads(n_threads);
-
       /* No need to for the extra thread states, release them. */
       for (auto builder : builders) {
         builder->fallback_to_single_thread();
@@ -390,18 +394,21 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
     }
   }
 
+  /* We completed reading the PK, now we can call its end
+  in order to calculate metrics based on it. */
+  for (auto &builder : builders) {
+    if (builder->stage() != nullptr) {
+      builder->stage()->end_phase_read_pk();
+    }
+  }
   return cleanup(m_heaps, err);
 }
 
-dberr_t Parallel_cursor::copy_row(size_t thread_id, Row &row) noexcept {
+void Parallel_cursor::copy_row(size_t thread_id, Row &row) noexcept {
   ut_a(!eof());
 
   auto heap = m_heaps[thread_id];
-
-  row.m_offsets = rec_get_offsets(row.m_rec, index(), nullptr, ULINT_UNDEFINED,
-                                  UT_LOCATION_HERE, &heap);
-
-  return row.build(m_ctx, index(), heap, ROW_COPY_DATA);
+  row.deep_copy(heap);
 }
 
 Cursor *Cursor::create_cursor(ddl::Context &ctx) noexcept {

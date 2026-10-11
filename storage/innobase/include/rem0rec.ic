@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2024, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -496,7 +496,7 @@ static inline bool rec_get_node_ptr_flag(
 /** The following function is used to get the order number
  of an old-style record in the heap of the index page.
  @return heap order number */
-static inline ulint rec_get_heap_no_old(
+[[nodiscard]] static inline uint16_t rec_get_heap_no_old(
     const rec_t *rec) /*!< in: physical record */
 {
   return (rec_get_bit_field_2(rec, REC_OLD_HEAP_NO, REC_HEAP_NO_MASK,
@@ -516,7 +516,7 @@ static inline void rec_set_heap_no_old(
 /** The following function is used to get the order number
  of a new-style record in the heap of the index page.
  @return heap order number */
-static inline ulint rec_get_heap_no_new(
+[[nodiscard]] static inline uint16_t rec_get_heap_no_new(
     const rec_t *rec) /*!< in: physical record */
 {
   return (rec_get_bit_field_2(rec, REC_NEW_HEAP_NO, REC_HEAP_NO_MASK,
@@ -764,12 +764,12 @@ static inline ulint rec_get_converted_size(const dict_index_t *index,
         dtuple_get_n_fields(dtuple) ==
             (((dtuple_get_info_bits(dtuple) & REC_NEW_STATUS_MASK) ==
               REC_STATUS_NODE_PTR)
-                 ? dict_index_get_n_unique_in_tree_nonleaf(index) + 1
+                 ? dict_index_get_n_unique_in_tree_nonleaf(index) + 1U
                  : dict_index_get_n_fields(index)) ||
         /* a record for older SYS_INDEXES table
         (missing merge_threshold column) is acceptable. */
         (index->table->id == DICT_INDEXES_ID &&
-         dtuple_get_n_fields(dtuple) == dict_index_get_n_fields(index) - 1));
+         dtuple_get_n_fields(dtuple) == dict_index_get_n_fields(index) - 1U));
 
   if (dict_table_is_comp(index->table)) {
     return (rec_get_converted_size_comp(

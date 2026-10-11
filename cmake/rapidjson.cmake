@@ -1,4 +1,4 @@
-# Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -125,7 +125,8 @@ MACRO (MYSQL_CHECK_RAPIDJSON)
   TARGET_COMPILE_DEFINITIONS(rapidjson INTERFACE
     RAPIDJSON_NO_SIZETYPEDEFINE
     RAPIDJSON_SCHEMA_USE_INTERNALREGEX=0
-    RAPIDJSON_SCHEMA_USE_STDREGEX=1)
+    RAPIDJSON_SCHEMA_USE_STDREGEX=1
+    RAPIDJSON_HAS_STDSTRING=1)
 
   IF(WITH_RAPIDJSON STREQUAL "bundled")
     TARGET_INCLUDE_DIRECTORIES(rapidjson SYSTEM BEFORE INTERFACE

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -414,7 +414,8 @@ bool Ndb_schema_dist_client::log_schema_op(const char *query,
     std::string invalid_identifier;
     if (!check_identifier_limits(invalid_identifier)) {
       m_thd_ndb->push_warning("INTERNAL ERROR: identifier limits exceeded");
-      assert(false);  // Catch in debug
+      // Catch in debug, but allow failure from opening ndb_schema table
+      assert(invalid_identifier == "<open failed>");
       return false;
     }
   }

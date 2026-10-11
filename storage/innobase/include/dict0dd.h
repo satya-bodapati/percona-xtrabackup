@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -65,6 +65,7 @@ Data dictionary interface */
 #ifndef UNIV_HOTBACKUP
 class THD;
 class MDL_ticket;
+class Dirs_in_datadir;
 
 struct CHARSET_INFO;
 
@@ -415,6 +416,16 @@ in dd::Table
 @return true if consistent, otherwise false */
 bool dd_instant_columns_consistent(const dd::Table &dd_table);
 #endif /* UNIV_DEBUG */
+
+/** Scan through all the keys to identify the key parts which are
+greater than the maximum size supported by the table record format.
+@param table         MySQL table definition.
+@param max_part_len  Maximum index part length allowed.
+@param visitor       Function wrapper to invoke lambda expression.
+*/
+void dd_visit_keys_with_too_long_parts(
+    const TABLE *table, const size_t max_part_len,
+    std::function<void(const KEY &)> visitor);
 
 /** Determine if a dd::Table has any INSTANT ADD column(s) in V1
 @param[in]      table   dd::Table
@@ -1273,6 +1284,13 @@ dict_table_t *dd_table_open_on_name(THD *thd, MDL_ticket **mdl,
                                     ulint ignore_err, int *error = nullptr);
 
 /** Returns a cached table object based on table id.
+This function does NOT move the table to the front of MRU, because currently it
+is called in contexts where we don't really mean to "use" the table, and believe
+that it would actually hurt performance if we moved it to the front, such as:
+1. The table would be evicted soon anyway.
+2. A batch of FTS tables would be opened from background thread,
+   and it is not proper to move these tables to mru.
+3. All tables in memory will be accessed sequentially, so it is useless to move.
 @param[in]      table_id        table id
 @param[in]      dict_locked     true=data dictionary locked
 @return table, NULL if does not exist */
@@ -1319,6 +1337,15 @@ operation.
 @retval DB_SUCCESS on success. */
 dberr_t dd_tablespace_rename(dd::Object_id dd_space_id, bool is_system_cs,
                              const char *new_space_name, const char *new_path);
+
+/** Update the data directory flag in dd::Table key strings
+@param[in]      object_id       dd tablespace object id
+@param[in]      path            path where the ibd file is located currently
+@param[in]      dirs_in_datadir full paths for dirs directly under datadir
+@retval DB_SUCCESS on success. */
+dberr_t dd_update_table_and_partitions_after_dir_change(
+    dd::Object_id object_id, std::string path,
+    const Dirs_in_datadir &dirs_in_datadir);
 
 /** Create metadata for specified tablespace, acquiring exclusive MDL first
 @param[in,out]  dd_client       data dictionary client

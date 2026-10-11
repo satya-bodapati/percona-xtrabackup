@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -179,8 +179,8 @@ DEFINE_BOOL_METHOD(mysql_dynamic_loader_scheme_file_imp::load,
       return true;
     }
 
-    guard_library.commit();
-    guard_library_set.commit();
+    guard_library.release();
+    guard_library_set.release();
 
     return false;
   } catch (...) {

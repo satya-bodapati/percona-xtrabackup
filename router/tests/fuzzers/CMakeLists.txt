@@ -1,4 +1,4 @@
-# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -35,15 +35,13 @@ IF(LIBFUZZER_COMPILE_FLAGS)
 
     LINK_LIBRARIES
     harness-library
-    mysqlclient
-    OpenSSL::SSL OpenSSL::Crypto
 
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     SKIP_INSTALL
     )
   TARGET_INCLUDE_DIRECTORIES(routertest_fuzz_router_uri
     PRIVATE
-    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:router_utils,INCLUDE_DIRECTORIES>
     )
   LIBFUZZER_ADD_TEST(routertest_fuzz_router_uri
     INITIAL_CORPUS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/corpus/fuzz_router_uri
@@ -63,15 +61,13 @@ IF(LIBFUZZER_COMPILE_FLAGS)
 
     LINK_LIBRARIES
     harness-library
-    mysqlclient
-    OpenSSL::SSL OpenSSL::Crypto
 
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     SKIP_INSTALL
     )
   TARGET_INCLUDE_DIRECTORIES(routertest_fuzz_router_uri_tostring
     PRIVATE
-    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:router_utils,INCLUDE_DIRECTORIES>
     )
   LIBFUZZER_ADD_TEST(routertest_fuzz_router_uri_tostring
     INITIAL_CORPUS_DIR

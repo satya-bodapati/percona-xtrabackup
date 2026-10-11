@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1947,6 +1947,7 @@ static dberr_t row_update_inplace_for_intrinsic(const upd_node_t *node) {
       row_upd_changes_field_size_or_external(index, offsets, node->update);
 
   if (size_changes) {
+    pcur.close();
     mtr_commit(&mtr);
     return (DB_FAIL);
   }
@@ -1957,6 +1958,7 @@ static dberr_t row_update_inplace_for_intrinsic(const upd_node_t *node) {
   evicted from the buffer pool it is flushed and we don't lose
   the changes */
   mtr.set_modified();
+  pcur.close();
   mtr_commit(&mtr);
 
   return (DB_SUCCESS);
@@ -2943,6 +2945,11 @@ dberr_t row_create_index_for_mysql(
     err = dict_index_add_to_cache_w_vcol(table, index, nullptr, FIL_NULL,
                                          trx_is_strict(trx));
 
+    if (err == DB_TOO_BIG_RECORD) {
+      ib::error() << "Cannot create the table " << table->name
+                  << " because the record size will exceed the maximum allowed "
+                     "size for a record.";
+    }
     if (err != DB_SUCCESS) {
       goto error_handling;
     }
@@ -3236,8 +3243,8 @@ already_dropped:
  it. Also, if there are running foreign key checks on the table, we drop the
  table lazily.
  @return true if the table was not yet in the drop list, and was added there */
-static bool row_add_table_to_background_drop_list(const char *name [
-    [maybe_unused]]) /*!< in: table name */
+static bool row_add_table_to_background_drop_list(
+    const char *name [[maybe_unused]]) /*!< in: table name */
 {
   /* WL6049, remove after WL6049. */
   ut_d(ut_error);
@@ -4598,6 +4605,8 @@ dberr_t row_scan_index_for_mysql(row_prebuilt_t *prebuilt, dict_index_t *index,
 #ifdef UNIV_DEBUG
 skip_parallel_read:
 #endif /* UNIV_DEBUG */
+
+  DBUG_EXECUTE_IF("ib_die_if_not_parallel_read", ut_error;);
 
   bool contains_null;
   rec_t *rec = nullptr;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -36,7 +36,7 @@
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_sys.h"  // my_write, my_malloc
-//#include "sql_plugin.h"                         // st_plugin_int
+// #include "sql_plugin.h"                         // st_plugin_int
 
 #define STRING_BUFFER 100
 

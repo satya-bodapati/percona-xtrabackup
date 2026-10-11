@@ -1,4 +1,4 @@
-/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -158,7 +158,10 @@ DEFINE_BOOL_METHOD(mysql_string_imp::convert_from_buffer,
     CHARSET_INFO *cs =
         get_charset_by_csname(charset_name, MY_CS_PRIMARY, MYF(0));
 
-    if (!cs || res->copy(in_buffer, length, cs)) return true;
+    if (!cs || res->copy(in_buffer, length, cs)) {
+      delete[] res;
+      return true;
+    }
     *out_string = (my_h_string)res;
     return false;
   } catch (...) {

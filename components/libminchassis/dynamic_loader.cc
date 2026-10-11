@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -733,7 +733,7 @@ bool mysql_dynamic_loader_imp::load_do_load_component_by_scheme(
   }
 
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }
@@ -866,7 +866,7 @@ bool mysql_dynamic_loader_imp::load_do_register_services(
   bool res =
       mysql_dynamic_loader_imp::load_do_resolve_dependencies(loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }
@@ -912,7 +912,7 @@ bool mysql_dynamic_loader_imp::load_do_resolve_dependencies(
   bool res = mysql_dynamic_loader_imp::load_do_initialize_components(
       loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }
@@ -958,7 +958,7 @@ bool mysql_dynamic_loader_imp::load_do_initialize_components(
 
   bool res = mysql_dynamic_loader_imp::load_do_commit(loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }

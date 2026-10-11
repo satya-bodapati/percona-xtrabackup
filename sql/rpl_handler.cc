@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -580,8 +580,9 @@ int Trans_delegate::before_commit(THD *thd, bool all,
   param.original_server_version = &(thd->variables.original_server_version);
   param.immediate_server_version = &(thd->variables.immediate_server_version);
   param.is_create_table_as_query_block =
-      (thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
-       !thd->lex->query_block->field_list_is_empty());
+      ((thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
+        !thd->lex->query_block->field_list_is_empty()) ||
+       thd->m_transactional_ddl.inited());
   param.thd = thd;
 
   bool is_real_trans =

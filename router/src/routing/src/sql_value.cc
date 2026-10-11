@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -90,14 +90,14 @@ static_assert(!is_number("-."));
 
 }  // namespace
 
-std::string Value::to_string() const {
-  if (!value_.has_value()) return "NULL";
+std::string sql_value_to_string(const std::optional<std::string> &val) {
+  if (!val.has_value()) return "NULL";
 
-  if (is_number(*value_)) return *value_;
+  if (is_number(*val)) return *val;
 
   std::ostringstream oss;
 
-  oss << std::quoted(*value_);
+  oss << std::quoted(*val);
 
   return oss.str();
 }

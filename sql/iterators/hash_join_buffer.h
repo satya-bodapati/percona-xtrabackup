@@ -1,7 +1,7 @@
 #ifndef SQL_ITERATORS_HASH_JOIN_BUFFER_H_
 #define SQL_ITERATORS_HASH_JOIN_BUFFER_H_
 
-/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -219,7 +219,7 @@ class HashJoinRowBuffer {
 /// External interface to the corresponding member in HashJoinRowBuffer
 LinkedImmutableString StoreLinkedImmutableStringFromTableBuffers(
     MEM_ROOT *mem_root, MEM_ROOT *overflow_mem_root,
-    pack_rows::TableCollection tables, LinkedImmutableString next_ptr,
+    const pack_rows::TableCollection &tables, LinkedImmutableString next_ptr,
     size_t row_size_upper_bound, bool *full);
 
 #endif  // SQL_ITERATORS_HASH_JOIN_BUFFER_H_

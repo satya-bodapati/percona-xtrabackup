@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1430,7 +1430,7 @@ void clone_update_gtid_status(std::string &gtids) {
   std::string recovery_file(CLONE_INNODB_RECOVERY_FILE);
   if (!file_exists(recovery_file)) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
   /* Open status file to append GTID. */
   std::ofstream status_file;
@@ -2441,7 +2441,7 @@ static void clone_init_compression(THD *thd) {
 
   if (dc->fetch_global_component_ids<dd::Table>(&dd_table_ids)) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   for (auto dd_table_id : dd_table_ids) {

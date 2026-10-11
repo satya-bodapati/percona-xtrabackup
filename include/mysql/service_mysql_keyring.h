@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -86,7 +86,7 @@ extern "C" struct mysql_keyring_service_st {
     @sa my_key_generate, st_mysql_keyring::mysql_key_generate
   */
   int (*my_key_generate_func)(const char *, const char *, const char *, size_t);
-} * mysql_keyring_service;
+} *mysql_keyring_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

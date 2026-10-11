@@ -1,4 +1,4 @@
-/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -182,7 +182,7 @@ inline void ResolveQueryBlock(
     tl->table = fake_table;
     tl->set_tableno(num_tables++);
     tl->set_updatable();
-    tl->grant.privilege = ~0UL;
+    tl->grant.privilege = ~(Access_bitmask)0;
   }
 
   // Find all Item_field objects, and resolve them to fields in the fake tables.

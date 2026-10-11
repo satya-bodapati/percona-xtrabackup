@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -29,6 +29,7 @@
 #include <memory>
 #include <vector>
 
+#include "mysqlrouter/datatypes.h"
 #include "tcp_address.h"
 
 struct QuarantineRoutingCallbacks {
@@ -49,11 +50,13 @@ struct QuarantineRoutingCallbacks {
 };
 
 struct AvailableDestination {
-  AvailableDestination(mysql_harness::TCPAddress a, std::string i)
-      : address{std::move(a)}, id{std::move(i)} {}
+  AvailableDestination(mysql_harness::TCPAddress a, std::string i,
+                       mysqlrouter::ServerMode m)
+      : address{std::move(a)}, id{std::move(i)}, mode(m) {}
 
   mysql_harness::TCPAddress address;
   std::string id;
+  mysqlrouter::ServerMode mode;
 };
 
 using AllowedNodes = std::vector<AvailableDestination>;

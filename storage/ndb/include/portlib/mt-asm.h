@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -36,7 +36,7 @@
  * with realtime and is thus disabled by default, but can be activated for
  * special builds.
  */
-//#define NDB_USE_SPINLOCK
+// #define NDB_USE_SPINLOCK
 
 #if defined(__GNUC__)
 /********************
@@ -127,7 +127,7 @@ static inline int xcng(volatile unsigned *addr, int val) {
 /**
  * Use generic defaults for mb(), rmb(), wmb() see further down.
  */
-//#define NDB_HAVE_XCNG
+// #define NDB_HAVE_XCNG
 #define NDB_HAVE_CPU_PAUSE
 #define cpu_pause() __asm__ __volatile__("yield")
 

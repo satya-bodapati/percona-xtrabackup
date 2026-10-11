@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -28,19 +28,22 @@
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
 #include <chrono>
+#include <memory>
+#include <system_error>
 #include <tuple>
 #include <utility>
 
+#include "harness_assert.h"
 #include "mysql/harness/net_ts/buffer.h"
-#include "mysql/harness/net_ts/impl/poll.h"
-#include "mysql/harness/net_ts/impl/socket.h"
 #include "mysql/harness/net_ts/socket.h"
 
 #include "mysqlrouter/classic_protocol_codec.h"
 #include "mysqlrouter/classic_protocol_frame.h"
 #include "mysqlrouter/classic_protocol_message.h"
 
-static void connection_quit(ConnectionBase *conn, SSL *ssl) {
+void ConnectionPool::ConnectionCloser::async_close() { async_send_quit(); }
+
+void ConnectionPool::ConnectionCloser::async_send_quit() {
   // try a best effort approach to send a COM_QUIT to the server before
   // closing.
   namespace cl = classic_protocol;
@@ -48,74 +51,134 @@ static void connection_quit(ConnectionBase *conn, SSL *ssl) {
   using Frm = cl::frame::Frame<Msg>;
 
   constexpr Frm frm{0 /* seq-id */, {}};
-  std::array<std::byte, cl::Codec<Frm>(frm, {}).size()> quit_msg{};
-  auto enc_res = cl::Codec<Frm>(frm, {}).encode(net::buffer(quit_msg));
+
+  auto &snd_buf = conn_.channel().send_plain_buffer();
+
+  auto frame_size = cl::Codec<Frm>(frm, {}).size();
+  snd_buf.resize(frame_size);
+
+  auto enc_res = cl::Codec<Frm>(frm, {}).encode(net::buffer(snd_buf));
   if (!enc_res) {
     // ignore
   }
 
-  auto fd = conn->native_handle();
+  conn_.channel().flush_to_send_buf();
 
-  if (ssl != nullptr) {
-    // encrypt the COM_QUIT message and append the TLS shutdown-alert.
-    (void)SSL_write(ssl, quit_msg.data(), quit_msg.size());
-    (void)SSL_shutdown(ssl);
+  if (conn_.channel().ssl() != nullptr) {
+    conn_.channel().tls_shutdown();
+  }
 
-    auto *bio = SSL_get_wbio(ssl);
+  conn_.async_send(
+      [&](std::error_code ec, size_t transferred [[maybe_unused]]) {
+        if (ec) {
+          // something failed.
 
-    std::vector<uint8_t> wbuf(BIO_pending(bio));
-    const auto read_res = BIO_read(bio, wbuf.data(), wbuf.size());
+          before_close_(conn_);
+          return;
+        }
 
-    assert(read_res > 0);
+        conn_.async_recv([&](std::error_code ec, size_t transferred) {
+          await_quit_response(ec, transferred);
+        });
+      });
+}
 
-    if (read_res > 0) {
-      (void)net::impl::socket::write(fd, wbuf.data(), wbuf.size());
+void ConnectionPool::ConnectionCloser::await_quit_response(std::error_code ec,
+                                                           size_t transferred
+                                                           [[maybe_unused]]) {
+  // wait for the server's response.
+  //
+  // Either it closes the socket or sends a TLS shutdown reply.
+
+  if (ec) {
+    if (ec == net::stream_errc::eof && conn_.channel().ssl() != nullptr) {
+      // call the TLS shutdown a 2nd time to ensure that the session can be
+      // reused.
+      conn_.channel().tls_shutdown();
     }
 
-  } else {
-    (void)net::impl::socket::write(fd, quit_msg.data(), quit_msg.size());
+    before_close_(conn_);
+    return;
   }
 
-  auto shutdown_res = net::impl::socket::shutdown(
-      fd, static_cast<int>(net::socket_base::shutdown_both));
-  if (shutdown_res) {
-    using namespace std::chrono_literals;
+  conn_.channel().recv_buffer().clear();
 
-    // if shutdown fails, the other side already closed the socket.
-    //
-    // otherwise, wait a bit to make sure that the quit-msg left the router
-    // before closing the socket.
-
-    // wait max 1ms.
-    std::array<net::impl::poll::poll_fd, 1> fds{{{fd, POLLIN, 0}}};
-    net::impl::poll::poll(fds.data(), fds.size(), 1ms);
-  }
-
-  // connection can be closed.
-  (void)conn->close();  // will cancel the async_read()
+  // receive until the socket gets closed.
+  conn_.async_recv([&](std::error_code ec, size_t transferred) {
+    await_quit_response(ec, transferred);
+  });
 }
-
-void PooledConnectionBase::remove_me() {
-  // call the remove_ callback once.
-  if (remover_) std::exchange(remover_, nullptr)();
-}
-
-void PooledConnectionBase::reset() { remover_ = nullptr; }
 
 void ConnectionPool::add(ConnectionPool::ServerSideConnection conn) {
-  pool_([&](auto &pool) {
-    if (pool.size() >= max_pooled_connections_) {
-      connection_quit(conn.connection().get(), conn.channel().ssl());
+  auto is_full_res = add_if_not_full(std::move(conn));
+  if (is_full_res) {
+    // pool is full, move the connection to the "for-close" pool
+    // where it a COM_QUIT will be sent and the connection get closed
+    // asynchronously.
+    async_close_connection(std::move(*is_full_res));
+  }
+}
 
-      return;
+void ConnectionPool::async_close_connection(
+    ConnectionPool::ServerSideConnection conn) {
+  for_close_([&](auto &pool) {
+    auto &closer = pool.emplace_back(std::move(conn));
+
+    closer.before_close([this](const auto &to_be_closed_conn) {
+      for_close_([&to_be_closed_conn](auto &pool) {
+        auto fd = to_be_closed_conn.native_handle();
+        auto removed = std::erase_if(pool, [fd](auto &el) {
+          return el.connection().native_handle() == fd;
+        });
+
+        if (removed != 1) {
+          harness_assert_this_should_not_execute();
+        }
+      });
+    });
+
+    closer.async_close();
+  });
+}
+
+void ConnectionPool::remove_pooled_connection(
+    std::string ep,
+    std::shared_ptr<PooledConnection<ServerSideConnection>> pooled_conn) {
+  pool_([ep, pooled_conn = std::move(pooled_conn), this](auto &pool) {
+    auto conn = pooled_conn->release();
+    if (conn.is_open()) {
+      // move it to the async-closer.
+      async_close_connection(std::move(conn));
     }
 
-    conn.prepare_for_pool();
+    auto range = pool.equal_range(ep);
+    for (auto cur = range.first; cur != range.second; ++cur) {
+      if (cur->second == pooled_conn) {
+        pool.erase(cur);
+        break;
+      }
+    }
+  });
+}
 
-    auto it = pool.emplace(conn.endpoint(), std::move(conn));
+void ConnectionPool::remove_stashed_connection(
+    std::string ep,
+    std::shared_ptr<PooledConnection<ServerSideConnection>> pooled_conn) {
+  stash_([ep, pooled_conn = std::move(pooled_conn), this](auto &stash) {
+    auto conn = pooled_conn->release();
 
-    it->second.remover([this, it]() { erase(it); });
-    it->second.async_idle(idle_timeout_);
+    if (conn.is_open()) {
+      // move it to the async-closer.
+      async_close_connection(std::move(conn));
+    }
+
+    auto range = stash.equal_range(ep);
+    for (auto cur = range.first; cur != range.second; ++cur) {
+      if (cur->second.pooled_conn == pooled_conn) {
+        stash.erase(cur);
+        break;
+      }
+    }
   });
 }
 
@@ -129,10 +192,17 @@ ConnectionPool::add_if_not_full(ConnectionPool::ServerSideConnection conn) {
 
         conn.prepare_for_pool();
 
-        auto it = pool.emplace(conn.endpoint(), std::move(conn));
+        auto endpoint = conn.endpoint();
+        auto it = pool.emplace(
+            std::move(endpoint),
+            std::make_shared<PooledConnection<ServerSideConnection>>(
+                std::move(conn)));
 
-        it->second.remover([this, it]() { erase(it); });
-        it->second.async_idle(idle_timeout_);
+        it->second->pool_remover_ =
+            [this, ep = it->first](
+                const std::shared_ptr<PooledConnection<ServerSideConnection>> &
+                    pooled_conn) { remove_pooled_connection(ep, pooled_conn); };
+        it->second->async_idle(it->second, idle_timeout_);
 
         return std::nullopt;
       });
@@ -142,18 +212,26 @@ void ConnectionPool::stash(ServerSideConnection conn, ConnectionIdentifier from,
                            std::chrono::milliseconds delay) {
   conn.prepare_for_pool();
 
-  return stash_(
-      [this, ep = conn.endpoint(), &conn, from,
-       after = std::chrono::steady_clock::now() + delay](auto &stash) {
-        auto it = stash.emplace(
-            std::piecewise_construct,                            //
-            std::forward_as_tuple(ep),                           // key
-            std::forward_as_tuple(std::move(conn), from, after)  // val
-        );
+  return stash_([this, ep = conn.endpoint(), &conn, from,
+                 after =
+                     std::chrono::steady_clock::now() + delay](auto &stash) {
+    auto it = stash.emplace(
+        std::piecewise_construct,   //
+        std::forward_as_tuple(ep),  // key
+        std::forward_as_tuple(
+            std::make_unique<PooledConnection<ServerSideConnection>>(
+                std::move(conn)),
+            from, after)  // val
+    );
 
-        it->second.pooled_conn.remover([this, it]() { erase_from_stash(it); });
-        it->second.pooled_conn.async_idle(idle_timeout_);
-      });
+    auto pooled_conn = it->second.pooled_conn;
+
+    pooled_conn->pool_remover_ =
+        [this, ep = it->first](
+            const std::shared_ptr<PooledConnection<ServerSideConnection>>
+                &pooled_conn) { remove_stashed_connection(ep, pooled_conn); };
+    pooled_conn->async_idle(pooled_conn, idle_timeout_);
+  });
 }
 
 void ConnectionPool::discard_all_stashed(ConnectionIdentifier from) {
@@ -167,11 +245,10 @@ void ConnectionPool::discard_all_stashed(ConnectionIdentifier from) {
         continue;
       }
 
-      // stop all callbacks.
-      val.pooled_conn.reset();
+      auto server_conn = val.pooled_conn->release();
 
       // move the connection to the pool.
-      add(std::move(val.pooled_conn.connection()));
+      add(std::move(server_conn));
 
       cur = pool.erase(cur);
     }
@@ -190,20 +267,17 @@ std::optional<ConnectionPool::ServerSideConnection> ConnectionPool::unstash_if(
         ignore_sharing_delay
             ? std::find_if(key_range.first, key_range.second,
                            [pred](const auto &kv) {
-                             return pred(kv.second.pooled_conn.connection());
+                             return pred(kv.second.pooled_conn->connection());
                            })
             : std::find_if(key_range.first, key_range.second,
                            [pred, now = std::chrono::steady_clock::now()](
                                const auto &kv) {
                              return now >= kv.second.after &&
-                                    pred(kv.second.pooled_conn.connection());
+                                    pred(kv.second.pooled_conn->connection());
                            });
     if (kv_it == key_range.second) return std::nullopt;
 
-    kv_it->second.pooled_conn.reset();
-
-    ServerSideConnection server_conn =
-        std::move(kv_it->second.pooled_conn.connection());
+    ServerSideConnection server_conn = kv_it->second.pooled_conn->release();
 
     stash.erase(kv_it);
 
@@ -223,10 +297,7 @@ ConnectionPool::unstash_mine(const std::string &ep,
         [conn_id](const auto &kv) { return kv.second.conn_id == conn_id; });
     if (kv_it == key_range.second) return std::nullopt;
 
-    kv_it->second.pooled_conn.reset();
-
-    ServerSideConnection server_conn =
-        std::move(kv_it->second.pooled_conn.connection());
+    ServerSideConnection server_conn = kv_it->second.pooled_conn->release();
 
     stash.erase(kv_it);
 

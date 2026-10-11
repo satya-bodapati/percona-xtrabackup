@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -54,23 +54,17 @@ namespace logging {
 const size_t kLogMessageMaxSize = 4096;
 
 /**
- * Section name and option name used in config file (and later in configuration
- * object) to specify log level, best explained by example:
- *
- *  v----------------------- kConfigSectionLogger
- * [logger]
- * v------------------------ kConfigOptionLogLevel
- * level = DEBUG
- * v------------------------ kConfigOptionLogFilename
- * filename = foo.log
- * v------------------------ kConfigOptionLogTimestampPrecision
- * timestamp_precision = second|sec|s|millisecond|msec|ms|
- *                       microsecond|usec|us|nanosecond|nsec|ns
+ * option name used in config file (and later in configuration
+ * object) to specify log level.
  */
-constexpr char kConfigOptionLogFilename[] = "filename";
-constexpr char kConfigOptionLogDestination[] = "destination";
-constexpr char kConfigOptionLogLevel[] = "level";
-constexpr char kConfigOptionLogTimestampPrecision[] = "timestamp_precision";
+namespace options {
+constexpr char kFilename[] = "filename";
+constexpr char kDestination[] = "destination";
+constexpr char kLevel[] = "level";
+constexpr char kTimestampPrecision[] = "timestamp_precision";
+constexpr char kSinks[] = "sinks";
+}  // namespace options
+
 constexpr char kConfigSectionLogger[] = "logger";
 
 constexpr char kNone[] = "";

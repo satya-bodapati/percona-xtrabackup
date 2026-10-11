@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -104,7 +104,7 @@ class Component_malloc_allocator {
   void deallocate(pointer p, size_type) { my_free(p); }
 
   template <class U, class... Args>
-  void construct(U *p, Args &&... args) {
+  void construct(U *p, Args &&...args) {
     assert(p != nullptr);
     try {
       ::new ((void *)p) U(std::forward<Args>(args)...);

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -384,7 +384,8 @@ static int ndbcluster_global_schema_lock(THD *thd,
   }
 
   if (thd_ndb->global_schema_lock_trans) {
-    ndb_log_verbose(19, "Global schema lock acquired");
+    ndb_log_info("Global schema lock acquired (%s)",
+                 thd_ndb->get_info_str().c_str());
 
     // Count number of global schema locks taken by this thread
     thd_ndb->schema_locks_count++;
@@ -487,7 +488,7 @@ static int ndbcluster_global_schema_unlock(THD *thd, bool record_gsl) {
       return -1;
     }
 
-    ndb_log_verbose(19, "Global schema lock release");
+    ndb_log_info("Global schema lock release");
   }
   return 0;
 }
@@ -600,7 +601,8 @@ bool Ndb_global_schema_lock_guard::try_lock(void) {
                    true /* no_wait */);
 
   if (thd_ndb->global_schema_lock_trans != nullptr) {
-    ndb_log_verbose(19, "Global schema lock acquired");
+    ndb_log_info("Global schema lock acquired (%s)",
+                 thd_ndb->get_info_str().c_str());
 
     // Count number of global schema locks taken by this thread
     thd_ndb->schema_locks_count++;
@@ -640,7 +642,7 @@ bool Ndb_global_schema_lock_guard::unlock() {
       thd_ndb->push_warning("Failed to release global schema lock");
       return false;
     }
-    ndb_log_verbose(19, "Global schema lock release");
+    ndb_log_info("Global schema lock release");
   }
   return true;
 }

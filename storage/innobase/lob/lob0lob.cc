@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -527,12 +527,13 @@ dberr_t btr_store_big_rec_extern_fields(trx_t *trx, btr_pcur_t *pcur,
         if (op == lob::OPCODE_UPDATE && upd != nullptr) {
           /* Get the corresponding upd_field_t
           object.*/
-          upd_field_t *uf = upd->get_field_by_field_no(field_no, index);
+          const upd_field_t *const uf =
+              upd->get_field_by_field_no(field_no, index);
 
           if (uf != nullptr) {
             /* Update the LOB reference
             stored in upd_field_t */
-            dfield_t *new_val = &uf->new_val;
+            const dfield_t *const new_val = &uf->new_val;
 
             if (dfield_is_ext(new_val)) {
               byte *field_ref = new_val->blobref();
@@ -579,12 +580,13 @@ dberr_t btr_store_big_rec_extern_fields(trx_t *trx, btr_pcur_t *pcur,
         if (op == lob::OPCODE_UPDATE && upd != nullptr) {
           /* Get the corresponding upd_field_t
           object.*/
-          upd_field_t *uf = upd->get_field_by_field_no(field_no, index);
+          const upd_field_t *const uf =
+              upd->get_field_by_field_no(field_no, index);
 
           if (uf != nullptr) {
             /* Update the LOB reference
             stored in upd_field_t */
-            dfield_t *new_val = &uf->new_val;
+            const dfield_t *const new_val = &uf->new_val;
             if (dfield_is_ext(new_val)) {
               byte *field_ref = new_val->blobref();
               blobref.copy(field_ref);
@@ -1287,7 +1289,7 @@ bool rec_check_lobref_space_id(dict_index_t *index, const rec_t *rec,
       continue;
     }
 
-    byte *data = rec_get_nth_field(index, rec, offsets, i, &len);
+    const byte *data = rec_get_nth_field(index, rec, offsets, i, &len);
 
     if (len == UNIV_SQL_NULL) {
       continue;
@@ -1297,9 +1299,8 @@ bool rec_check_lobref_space_id(dict_index_t *index, const rec_t *rec,
       ulint local_len = len - BTR_EXTERN_FIELD_REF_SIZE;
       ut_ad(len >= BTR_EXTERN_FIELD_REF_SIZE);
 
-      byte *field_ref = data + local_len;
-      ref_t ref(field_ref);
-      if (!ref.check_space_id(index)) {
+      const byte *field_ref = data + local_len;
+      if (!ref_t{const_cast<byte *>(field_ref)}.check_space_id(index)) {
         return (false);
       }
     }

@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -41,7 +41,6 @@
 #include "my_table_map.h"  // table_map
 
 constexpr const int MAX_ALIAS_NAME{256};
-constexpr const int MAX_FIELD_NAME{34}; /* Max column name length +2 */
 
 constexpr const unsigned int MAX_KEY{MAX_INDEXES}; /* Max used keys */
 constexpr const unsigned int MAX_REF_PARTS{16};    /* Max parts used as ref */

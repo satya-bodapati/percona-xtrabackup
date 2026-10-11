@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -173,6 +173,10 @@ bool PT_joined_table::contextualize_tabs(Parse_context *pc) {
         static_cast<PT_joined_table_type>((m_type & ~JTT_RIGHT) | JTT_LEFT);
     std::swap(m_left_pt_table, m_right_pt_table);
   }
+
+  char buff[NAME_LEN + 1];
+  if (check_stack_overrun(pc->thd, STACK_MIN_SIZE, pointer_cast<uchar *>(buff)))
+    return true; /* purecov: inspected */
 
   if (m_left_pt_table->contextualize(pc) || m_right_pt_table->contextualize(pc))
     return true;
@@ -1491,6 +1495,30 @@ static Surrounding_context qt2sc(Query_term_type qtt) {
   return SC_TOP;
 }
 
+/// Append the children of 'lower' to those of 'setop'.  To avoid excessive
+/// space usage of a large number of similar set ops: instead of the "obvious"
+/// method of copying the operands of the child's array to the parent's array,
+/// we may use the (possibly much) larger lower setop's child array as a basis,
+/// inserting setop's childen at the front and then std::move'ing that (now
+/// discarded) array to be setop's child array.  This makes the space
+/// allocation ~= linear instead of O(N*N/2) in the worst case (N: # of set
+/// operations).
+void PT_set_operation::merge_children(Query_term_set_op *setop,
+                                      Query_term_set_op *lower) {
+  if (lower->m_children.size() <= setop->m_children.size()) {
+    for (auto child : lower->m_children) {
+      setop->m_children.push_back(child);
+    }
+  } else {
+    const size_t lim = setop->m_children.size() - 1;
+    for (size_t i = 0; i < setop->m_children.size(); ++i) {
+      lower->m_children.push_front(setop->m_children[lim - i]);
+    }
+    setop->m_children = std::move(lower->m_children);
+    // lower->m_children is now empty.
+  }
+}
+
 /**
   Possibly merge lower syntactic levels of set operations (UNION, INTERSECT and
   EXCEPT) into setop, and set new last DISTINCT index for setop. We only ever
@@ -1653,8 +1681,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
         // distinct
         last_distinct = count + lower->m_children.size() - 1;
         count = count + lower->m_children.size();
-        // fold in children
-        for (auto child : lower->m_children) setop->m_children.push_back(child);
+        merge_children(setop, lower);
       } else {
         // similar kind of set operation, but contains limit, so do not merge
         count++;
@@ -1693,8 +1720,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
             }
             last_distinct = count + lower->m_last_distinct;
             count = count + lower->m_children.size();
-            for (auto child : lower->m_children)
-              setop->m_children.push_back(child);
+            merge_children(setop, lower);
           }
         } else {
           // upper and lower level are both ALL, so ok to merge, unless we have
@@ -1705,8 +1731,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
               first_distinct = count + lower->m_first_distinct;
             }
             count = count + lower->m_children.size();
-            for (auto child : lower->m_children)
-              setop->m_children.push_back(child);
+            merge_children(setop, lower);
           } else {
             // do not merge INTERSECT ALL: the execution time logic can only
             // handle binary INTERSECT ALL.
@@ -1725,7 +1750,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
           first_distinct = count + lower->m_first_distinct;
         }
         count = count + lower->m_children.size();
-        for (auto child : lower->m_children) setop->m_children.push_back(child);
+        merge_children(setop, lower);
       } else {
         // do not merge
         count++;
@@ -1745,13 +1770,16 @@ bool PT_set_operation::contextualize_setop(Parse_context *pc,
   pc->m_stack.push_back(QueryLevel(pc->mem_root, context));
   if (super::do_contextualize(pc)) return true;
 
-  if (m_lhs->contextualize(pc)) return true;
+  if (m_list[0]->contextualize(pc)) return true;
 
-  pc->select = pc->thd->lex->new_set_operation_query(pc->select);
-
-  if (pc->select == nullptr || m_rhs->contextualize(pc)) return true;
-
-  pc->thd->lex->pop_context();
+  List_iterator<PT_query_expression_body> it(m_list);
+  PT_query_expression_body *elt;
+  it++;  // skip first
+  while ((elt = it++)) {
+    pc->select = pc->thd->lex->new_set_operation_query(pc->select);
+    if (pc->select == nullptr || elt->contextualize(pc)) return true;
+    pc->thd->lex->pop_context();
+  }
 
   QueryLevel ql = pc->m_stack.back();
   pc->m_stack.pop_back();
@@ -1773,6 +1801,7 @@ bool PT_set_operation::contextualize_setop(Parse_context *pc,
   if (setop == nullptr) return true;
 
   merge_descendants(pc, setop, ql);
+  setop->label_children();
 
   Query_expression *qe = pc->select->master_query_expression();
   if (setop->set_block(qe->create_post_processing_block(setop))) return true;
@@ -1951,9 +1980,10 @@ bool PT_foreign_key_definition::do_contextualize(Table_ddl_parse_context *pc) {
     is used. If both are missing name of generated supporting index is
     automatically produced.
   */
-  const LEX_CSTRING key_name = to_lex_cstring(
-      m_constraint_name.str ? m_constraint_name
-                            : m_key_name.str ? m_key_name : NULL_STR);
+  const LEX_CSTRING key_name =
+      to_lex_cstring(m_constraint_name.str ? m_constraint_name
+                     : m_key_name.str      ? m_key_name
+                                           : NULL_STR);
 
   if (key_name.str && check_string_char_length(key_name, "", NAME_CHAR_LEN,
                                                system_charset_info, true)) {
@@ -3850,6 +3880,11 @@ bool PT_table_factor_table_ident::do_contextualize(Parse_context *pc) {
   THD *thd = pc->thd;
   Yacc_state *yyps = &thd->m_parser_state->m_yacc;
 
+  if (pc->select->table_count() >= MAX_TABLES) {
+    my_error(ER_TOO_MANY_TABLES, MYF(0), static_cast<int>(MAX_TABLES));
+    return true;
+  }
+
   m_table_ref = pc->select->add_table_to_list(
       thd, table_ident, opt_table_alias, 0, yyps->m_lock_type, yyps->m_mdl_type,
       opt_key_definition, opt_use_partition, nullptr, pc);
@@ -4263,6 +4298,11 @@ bool PT_select_var_list::do_contextualize(Parse_context *pc) {
 }
 
 bool PT_query_expression::do_contextualize(Parse_context *pc) {
+  if (!pc->thd->lex->opt_hints_global)
+    pc->thd->lex->opt_hints_global =
+        new (pc->thd->mem_root) Opt_hints_global(pc->thd->mem_root);
+  pc->thd->lex->opt_hints_global->deferred_hints =
+      new (pc->thd->mem_root) PT_hint_list(pc->thd->mem_root);
   pc->m_stack.push_back(
       QueryLevel(pc->mem_root, SC_QUERY_EXPRESSION, m_order != nullptr));
   if (contextualize_safe(pc, m_with_clause))
@@ -4379,6 +4419,7 @@ bool PT_query_expression::do_contextualize(Parse_context *pc) {
     } break;
   }
 
+  contextualize_deferred_hints(pc);
   return false;
 }
 
@@ -5134,7 +5175,9 @@ PT_install_component::PT_install_component(
 
 Sql_cmd *PT_install_component::make_cmd(THD *thd) {
   thd->lex->sql_command = SQLCOM_INSTALL_COMPONENT;
-
+  thd->lex->expr_allows_subquery = false;
+  auto f =
+      create_scope_guard([thd]() { thd->lex->expr_allows_subquery = true; });
   if (!m_set_elements->is_empty()) {
     Parse_context pc(thd, thd->lex->current_query_block());
     for (auto &elt : *m_set_elements) {

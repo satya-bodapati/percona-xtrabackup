@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -482,7 +482,9 @@ int runOperations(NDBT_Context *ctx, NDBT_Step *step) {
 
     for (unsigned k = 0; k <= i + 1; k++) {
       if (verify_savepoint(ctx, pNdb, k,
-                           k > 0 ? seq[k - 1] : initial_row ? o_INS : o_DONE,
+                           k > 0         ? seq[k - 1]
+                           : initial_row ? o_INS
+                                         : o_DONE,
                            transactionId) != NDBT_OK)
         return NDBT_FAILED;
     }

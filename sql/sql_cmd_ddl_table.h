@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -75,6 +75,7 @@ class Sql_cmd_create_table final : public Sql_cmd_ddl_table {
 
   bool execute(THD *thd) override;
   bool prepare(THD *thd) override;
+  bool reprepare_on_execute_required() const override;
 
  private:
   Table_ref *query_expression_tables;
@@ -99,6 +100,7 @@ class Sql_cmd_create_index final : public Sql_cmd_create_or_drop_index_base {
   enum_sql_command sql_command_code() const override {
     return SQLCOM_CREATE_INDEX;
   }
+  bool reprepare_on_execute_required() const override;
 };
 
 class Sql_cmd_drop_table final : public Sql_cmd_ddl {

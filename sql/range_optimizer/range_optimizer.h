@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -122,9 +122,9 @@ class QUICK_RANGE {
     kr->key = (const uchar *)min_key;
     kr->length = min_length;
     kr->keypart_map = min_keypart_map;
-    kr->flag = ((flag & NEAR_MIN) ? HA_READ_AFTER_KEY
-                                  : (flag & EQ_RANGE) ? HA_READ_KEY_EXACT
-                                                      : HA_READ_KEY_OR_NEXT);
+    kr->flag = ((flag & NEAR_MIN)   ? HA_READ_AFTER_KEY
+                : (flag & EQ_RANGE) ? HA_READ_KEY_EXACT
+                                    : HA_READ_KEY_OR_NEXT);
   }
 
   /**

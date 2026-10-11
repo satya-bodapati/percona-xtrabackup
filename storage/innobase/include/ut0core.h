@@ -1,4 +1,4 @@
-/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -106,7 +106,7 @@ types of head, tail...
 */
 template <typename Head, typename... Tail>
 static bool verify_fmt_match(const char *fmt, Head &&head [[maybe_unused]],
-                             Tail &&... tail) {
+                             Tail &&...tail) {
   using H =
       typename std::remove_cv<typename std::remove_reference<Head>::type>::type;
   const char *pos = get_first_format(fmt);

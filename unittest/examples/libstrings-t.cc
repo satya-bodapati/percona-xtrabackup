@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -22,12 +22,6 @@
  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <iostream>
-
-// Visual studio gave Command-Line Warning D9025 for
-// -UMYSQL_PROJECT on the command line.
-#if defined(UNDEFINE_MYSQL_PROJECT)
-#undef MYSQL_PROJECT
-#endif
 
 #include "mysql/strings/collations.h"
 #include "mysql/strings/m_ctype.h"

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1114,7 +1114,7 @@ dberr_t row_import::match_index_columns(THD *thd, const dict_index_t *index)
     ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
             "Index %s not found in tablespace meta-data file.", index->name());
 
-    return (DB_ERROR);
+    return DB_ERROR;
   }
 
   if (cfg_index->m_n_fields != index->n_fields) {
@@ -1123,22 +1123,46 @@ dberr_t row_import::match_index_columns(THD *thd, const dict_index_t *index)
             " tablespace metadata file value %lu",
             (ulong)index->n_fields, (ulong)cfg_index->m_n_fields);
 
-    return (DB_ERROR);
+    return DB_ERROR;
   }
 
   cfg_index->m_srv_index = index;
+
+  if (cfg_index->m_n_nullable != index->n_nullable) {
+    ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Index %s's nullability of %u doesn't match tablespace metadata "
+            "file value of " ULINTPF,
+            index->name(), index->n_nullable, cfg_index->m_n_nullable);
+
+    return DB_ERROR;
+  }
 
   const dict_field_t *field = index->fields;
   const dict_field_t *cfg_field = cfg_index->m_fields;
 
   for (ulint i = 0; i < index->n_fields; ++i, ++field, ++cfg_field) {
     if (strcmp(field->name(), cfg_field->name()) != 0) {
-      ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
-              "Index field name %s doesn't match tablespace metadata"
-              " field name %s for field position %lu",
-              field->name(), cfg_field->name(), (ulong)i);
+      bool allow = false;
+      if (dict_index_is_sdi(index)) {
+        /* SDI-only compatibility: accept legacy swap between
+           compressed_len and uncompressed_len, regardless of position. */
+        const bool swap_mismatch =
+            (strcmp(field->name(), "uncompressed_len") == 0 &&
+             strcmp(cfg_field->name(), "compressed_len") == 0) ||
+            (strcmp(field->name(), "compressed_len") == 0 &&
+             strcmp(cfg_field->name(), "uncompressed_len") == 0);
 
-      err = DB_ERROR;
+        allow = swap_mismatch;
+      }
+
+      if (!allow) {
+        ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+                "Index field name %s doesn't match tablespace metadata"
+                " field name %s for field position %lu",
+                field->name(), cfg_field->name(), (ulong)i);
+
+        err = DB_ERROR;
+      }
     }
 
     if (cfg_field->prefix_len != field->prefix_len) {
@@ -1175,7 +1199,7 @@ dberr_t row_import::match_index_columns(THD *thd, const dict_index_t *index)
     }
   }
 
-  return (err);
+  return err;
 }
 
 /** Check if the column default values of table schema that was
@@ -1759,7 +1783,38 @@ dberr_t row_import::add_instant_dropped_columns(dict_table_t *target_table) {
       index->get_field(i)->col = target_table->get_col(mapping[i]);
     }
   }
+
   ut::delete_arr(mapping);
+
+  /* Correct field mapping for secondary indexes too. */
+  for (auto *secondary_index : m_table->indexes) {
+    if (secondary_index == index) continue;
+
+    auto secondary_mapping =
+        std::make_unique<uint16_t[]>(secondary_index->n_fields);
+
+    for (size_t i = 0; i < secondary_index->n_fields; i++) {
+      secondary_mapping[i] = secondary_index->get_field(i)->col->ind;
+    }
+
+    /* Allocate memory for n_fields (secondary_index->n_fields). No need to
+     allocate for n_dropped_cols, because instant column drop is not supported
+     for columns that are part of secondary index. */
+    {
+      dict_field_t *fields = secondary_index->fields;
+      secondary_index->fields = (dict_field_t *)mem_heap_alloc(
+          secondary_index->heap,
+          1 + secondary_index->n_fields * sizeof(dict_field_t));
+      memcpy(secondary_index->fields, fields,
+             1 + secondary_index->n_fields * sizeof(dict_field_t));
+
+      /* Fix field->col pointers with the mapping created. */
+      for (size_t i = 0; i < secondary_index->n_fields; i++) {
+        secondary_index->get_field(i)->col =
+            target_table->get_col(secondary_mapping[i]);
+      }
+    }
+  }
 
   /* Set initial/current/total_col_count for table */
   target_table->initial_col_count = m_initial_column_count;
@@ -1965,13 +2020,22 @@ dberr_t row_import::adjust_instant_metadata_in_taregt_table(
   m_table->current_row_version = m_current_row_version;
 
   ut_ad(m_table->has_row_versions());
-  dict_index_t &first_index = *m_table->first_index();
-  first_index.row_versions = true;
-  first_index.rec_cache.offsets = nullptr;
-  first_index.rec_cache.nullable_cols = 0;
-  /* Recreate fields array for clustered index */
-  first_index.create_fields_array();
-  first_index.create_nullables(m_table->current_row_version);
+
+  /* Reset field cache for every index, because it becomes invalid in case
+   of instant column add or drop. */
+  for (auto *index : m_table->indexes) {
+    if (index == m_table->first_index()) {
+      ut_ad(index->is_clustered());
+
+      index->row_versions = true;
+
+      /* Recreate fields array for clustered index */
+      index->create_fields_array();
+      index->create_nullables(m_table->current_row_version);
+    }
+    index->rec_cache.offsets = nullptr;
+    index->rec_cache.nullable_cols = 0;
+  }
 
   /* FIXME: Force to discard the table, in case of any rollback later. */
   //    m_table->discard_after_ddl = true;
@@ -2100,11 +2164,18 @@ dberr_t row_import::set_instant_info(THD *thd,
   ut_ad(m_table->has_instant_cols());
   m_table->set_upgraded_instant();
 
-  dict_index_t &first_index = *m_table->first_index();
-  first_index.instant_cols = true;
-  first_index.rec_cache.offsets = nullptr;
-  first_index.rec_cache.nullable_cols = 0;
-  first_index.set_instant_nullable(m_n_instant_nullable);
+  /* Reset field cache for every index, because it becomes invalid in case
+   of instant columns. */
+  for (auto *index : m_table->indexes) {
+    if (index == m_table->first_index()) {
+      ut_ad(index->is_clustered());
+      index->instant_cols = true;
+      index->set_instant_nullable(m_n_instant_nullable);
+    }
+    index->rec_cache.offsets = nullptr;
+    index->rec_cache.nullable_cols = 0;
+  }
+
   /* FIXME: Force to discard the table, in case of any rollback later. */
   //    m_table->discard_after_ddl = true;
 
@@ -4307,9 +4378,8 @@ help to detect the missing .cfg file for a table with instant added columns.
 @return DB_SUCCESS or error code. */
 dberr_t row_import_check_corruption(dict_table_t *table, THD *thd,
                                     bool missing) {
-  dberr_t err = DB_SUCCESS;
-  if (!btr_validate_index(table->first_index(), nullptr, false)) {
-    err = DB_CORRUPTION;
+  dict_index_t *clust_index = table->first_index();
+  if (!btr_validate_index(clust_index, nullptr, true)) {
     if (missing) {
       ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
               "Clustered index validation failed. Because"
@@ -4321,9 +4391,22 @@ dberr_t row_import_check_corruption(dict_table_t *table, THD *thd,
               "Clustered index validation failed, due to"
               " data file corruption.");
     }
+    return DB_CORRUPTION;
   }
 
-  return (err);
+  /* Check secondary indexes for corruption. If an index is found corrupt, mark
+  it but allow IMPORT to continue as the corrupt index can be recreated from the
+  clustered index. Any FTS index is already marked corrupt and skipped. */
+  for (dict_index_t *index = clust_index->next(); index != nullptr;
+       index = index->next()) {
+    if (!index->is_corrupted() && !btr_validate_index(index, nullptr, true)) {
+      ib_errf(thd, IB_LOG_LEVEL_WARN, ER_INNODB_INDEX_CORRUPT,
+              "Index '%s' is found to be corrupt and should be recreated.",
+              index->name());
+      dict_set_corrupted(index);
+    }
+  }
+  return DB_SUCCESS;
 }
 
 /** Imports a tablespace. The space id in the .ibd file must match the space id

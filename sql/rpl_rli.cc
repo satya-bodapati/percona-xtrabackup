@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -140,7 +140,6 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
       transaction_parser(mysql::binlog::event::Transaction_boundary_parser::
                              TRX_BOUNDARY_PARSER_APPLIER),
       group_relay_log_pos(0),
-      event_relay_log_number(0),
       event_relay_log_pos(0),
       group_source_log_seen_start_pos(false),
       group_source_log_start_pos(0),
@@ -158,8 +157,6 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
       m_is_applier_source_position_info_invalid(false),
       is_group_master_log_pos_invalid(false),
       log_space_total(0),
-      ignore_log_space_limit(false),
-      sql_force_rotate_relay(false),
       last_master_timestamp(0),
       slave_skip_counter(0),
       abort_pos_wait(0),
@@ -2682,23 +2679,6 @@ ulong Relay_log_info::adapt_to_master_version_updown(ulong master_version,
   return master_version;
 }
 
-void Relay_log_info::relay_log_number_to_name(uint number,
-                                              char name[FN_REFLEN + 1]) {
-  char *str = nullptr;
-  char relay_bin_channel[FN_REFLEN + 1];
-  const char *relay_log_basename_channel = add_channel_to_relay_log_name(
-      relay_bin_channel, FN_REFLEN + 1, relay_log_basename);
-
-  /* str points to closing null of relay log basename channel */
-  str = strmake(name, relay_log_basename_channel, FN_REFLEN + 1);
-  *str++ = '.';
-  sprintf(str, "%06u", number);
-}
-
-uint Relay_log_info::relay_log_name_to_number(const char *name) {
-  return static_cast<uint>(atoi(fn_ext(name) + 1));
-}
-
 bool is_mts_db_partitioned(Relay_log_info *rli) {
   return (rli->current_mts_submode->get_type() == MTS_PARALLEL_TYPE_DB_NAME);
 }
@@ -3418,6 +3398,18 @@ MDL_lock_guard::~MDL_lock_guard() {
 
 bool MDL_lock_guard::is_locked() { return this->m_request.ticket != nullptr; }
 
+static bool is_client_binlog_statement(Relay_log_info const *rli,
+                                       THD const *thd [[maybe_unused]]) {
+  assert(rli != nullptr);
+  assert(thd != nullptr);
+  assert(rli->info_thd == thd);
+
+  const bool belongs_to_client = rli->belongs_to_client();
+  assert(!belongs_to_client || thd->rli_fake == rli);
+
+  return belongs_to_client;
+}
+
 Applier_security_context_guard::Applier_security_context_guard(
     Relay_log_info const *rli, THD const *thd)
     : m_target{rli},
@@ -3426,16 +3418,10 @@ Applier_security_context_guard::Applier_security_context_guard(
       m_previous{nullptr},
       m_privilege_checks_none{
           this->m_target->get_privilege_checks_username().length() == 0 &&
-          (this->m_thd->lex == nullptr ||
-           this->m_thd->lex->binlog_stmt_arg.length == 0 ||
-           this->m_thd->lex->binlog_stmt_arg.length >= 2048 ||
-           this->m_thd->lex->binlog_stmt_arg.str == nullptr)} {
+          !is_client_binlog_statement(this->m_target, this->m_thd)} {
   DBUG_TRACE;
 
-  if (this->m_thd->lex != nullptr &&
-      this->m_thd->lex->binlog_stmt_arg.length != 0 &&
-      this->m_thd->lex->binlog_stmt_arg.length < 2048 &&
-      this->m_thd->lex->binlog_stmt_arg.str != nullptr) {
+  if (is_client_binlog_statement(this->m_target, this->m_thd)) {
     Security_context *standing_ctx = this->m_thd->security_context();
     if (standing_ctx != nullptr &&
         (standing_ctx->check_access(SUPER_ACL) ||
@@ -3482,7 +3468,7 @@ bool Applier_security_context_guard::skip_priv_checks() const {
 }
 
 bool Applier_security_context_guard::has_access(
-    std::initializer_list<ulong> extra_privileges) const {
+    std::initializer_list<Access_bitmask> extra_privileges) const {
   if (this->m_privilege_checks_none) return true;
   if (this->m_current == nullptr) return false;
 
@@ -3506,12 +3492,12 @@ bool Applier_security_context_guard::has_access(
 }
 
 bool Applier_security_context_guard::has_access(
-    std::vector<std::tuple<ulong, TABLE const *, Rows_log_event *>>
+    std::vector<std::tuple<Access_bitmask, TABLE const *, Rows_log_event *>>
         &extra_privileges) const {
   if (this->m_privilege_checks_none) return true;
   if (this->m_current == nullptr) return false;
 
-  ulong priv{0};
+  Access_bitmask priv{0};
   TABLE const *table{nullptr};
 
   if (this->m_thd->variables.binlog_row_image == BINLOG_ROW_IMAGE_FULL) {

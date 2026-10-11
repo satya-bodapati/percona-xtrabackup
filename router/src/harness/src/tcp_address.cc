@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -58,9 +58,10 @@ static constexpr int8_t from_digit(char c) {
  * - does not handle prefixes like 0x for hex, no 0 for octal.
  */
 template <class T>
-static std::enable_if_t<std::is_unsigned<T>::value,
-                        stdx::expected<T, std::error_code>>
-from_chars(const std::string &value, int base = 10) {
+static stdx::expected<T, std::error_code> from_chars(const std::string &value,
+                                                     int base = 10)
+  requires(std::is_unsigned_v<T>)
+{
   if (value.empty()) {
     return stdx::unexpected(make_error_code(std::errc::invalid_argument));
   }

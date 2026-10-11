@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -53,15 +53,17 @@ STRING(REPLACE "-Wsuggest-override" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
 ADD_LIBRARY(routertest_helpers STATIC ${helper_sources})
 
-TARGET_LINK_LIBRARIES(routertest_helpers harness-library router_lib
-  rest_api_lib mock_server_rest_client)
+TARGET_LINK_LIBRARIES(routertest_helpers
+  harness-library
+  router_utils
+  router_mysql
+  mock_server_rest_client
+  )
 TARGET_INCLUDE_DIRECTORIES(routertest_helpers
   PUBLIC
-  helpers
+  ${CMAKE_CURRENT_SOURCE_DIR}/helpers
   ${PROJECT_SOURCE_DIR}/src/harness/shared/include/
   )
-
-
 
 ADD_SUBDIRECTORY(component)
 ADD_SUBDIRECTORY(fuzzers)

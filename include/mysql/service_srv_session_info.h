@@ -1,6 +1,6 @@
 #ifndef MYSQL_SERVICE_SRV_SESSION_INFO_INCLUDED
 #define MYSQL_SERVICE_SRV_SESSION_INFO_INCLUDED
-/*  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/*  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
@@ -56,7 +56,7 @@ extern "C" struct srv_session_info_service_st {
 
   unsigned int (*session_count)();
   unsigned int (*thread_count)(const void *plugin);
-} * srv_session_info_service;
+} *srv_session_info_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 #define srv_session_info_get_thd(session) \

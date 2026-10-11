@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -47,6 +47,7 @@ SET(test_files
   test_auth_digest.cc
   test_classic_quit_sender.cc
   test_classic_reset_connection_sender.cc
+  test_processor_diagnostics.cc
   test_sql_splitting_allowed.cc
   test_start_transaction_parser.cc
   )
@@ -63,6 +64,7 @@ FOREACH(test_file ${test_files})
       ${CMAKE_CURRENT_SOURCE_DIR}/../../harness/tests  # mock_io_service.h
   )
 ENDFOREACH()
+DOWNGRADE_STRINGOP_WARNINGS(routertest_routing_setup_tcp_service)
 
 ADD_TEST_FILE(${CMAKE_CURRENT_SOURCE_DIR}/plugin/test_plugin.cc
   MODULE "routing"

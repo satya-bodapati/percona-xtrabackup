@@ -1,7 +1,7 @@
 #ifndef SQL_OPTIMIZER_INCLUDED
 #define SQL_OPTIMIZER_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -328,7 +328,9 @@ class JOIN {
   /**
     The cost of best complete join plan found so far during optimization,
     after optimization phase - cost of picked join order (not taking into
-    account the changes made by test_if_skip_sort_order()).
+    account the changes made by test_if_skip_sort_order(). Exception: Single
+    table query cost is updated after access change in
+    test_if_skip_sort_order()).
   */
   double best_read{0.0};
   /**

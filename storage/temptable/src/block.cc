@@ -1,4 +1,4 @@
-/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -34,7 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #define TEMPTABLE_PFS_MEMORY
 
 /* Enabling this causes ~ 4% performance drop in sysbench distinct ranges. */
-//#define TEMPTABLE_PFS_MEMORY_COUNT_LOGICAL
+// #define TEMPTABLE_PFS_MEMORY_COUNT_LOGICAL
 #endif /* HAVE_PSI_MEMORY_INTERFACE */
 
 namespace temptable {

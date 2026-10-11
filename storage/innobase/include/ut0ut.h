@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2024, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -414,8 +414,8 @@ constexpr bool can_type_fit_value(const U value) {
 template <typename T, typename U>
 T clamp(U x) {
   return can_type_fit_value<T>(x) ? T(x)
-                                  : x < 0 ? std::numeric_limits<T>::min()
-                                          : std::numeric_limits<T>::max();
+         : x < 0                  ? std::numeric_limits<T>::min()
+                                  : std::numeric_limits<T>::max();
 }
 
 }  // namespace ut

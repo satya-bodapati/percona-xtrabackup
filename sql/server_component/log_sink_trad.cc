@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -291,9 +291,8 @@ int log_sink_trad(void *instance [[maybe_unused]], log_line *ll) {
         label_len = strlen(label);
       }
 
+      char buff_local_time[iso8601_size];
       if (!(out_types & LOG_ITEM_LOG_TIMESTAMP)) {
-        char buff_local_time[iso8601_size];
-
         make_iso8601_timestamp(buff_local_time, my_micro_time(),
                                iso8601_sysvar_logtimestamps);
         iso_timestamp = buff_local_time;

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -37,7 +37,7 @@ extern "C" struct my_thread_scheduler_service {
   int (*connection_handler_set)(struct Connection_handler_functions *,
                                 struct THD_event_functions *);
   int (*connection_handler_reset)();
-} * my_thread_scheduler_service;
+} *my_thread_scheduler_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

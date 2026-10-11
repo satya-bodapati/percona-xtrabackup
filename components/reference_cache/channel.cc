@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -146,7 +146,7 @@ bool channel_imp::factory_deinit() {
   delete channel_by_name_hash;
   delete channels;
   channels = nullptr;
-  release_guard.rollback();
+  release_guard.reset();
   mysql_rwlock_destroy(&LOCK_channels);
   return false;
 }
@@ -352,7 +352,7 @@ bool channel_imp::service_notification(const char **services,
     }
   }
 
-  release_guard.rollback();
+  release_guard.reset();
   /*
     At this point, a service load/unload operation is in progress.
     Further,

@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+ Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -68,7 +68,7 @@ extern "C" {
 
 // ---------------------------------------------------------------------------
 
-//#include "com_mysql_ndbjtie_mysql_CharsetMap.h"
+// #include "com_mysql_ndbjtie_mysql_CharsetMap.h"
 
 /*
  * Class:     com_mysql_ndbjtie_mysql_CharsetMap
@@ -206,7 +206,7 @@ JNIEXPORT jint JNICALL Java_com_mysql_ndbjtie_mysql_CharsetMap_recode(
 
 // ---------------------------------------------------------------------------
 
-//#include "com_mysql_ndbjtie_mysql_Utils.h"
+// #include "com_mysql_ndbjtie_mysql_Utils.h"
 
 /*
  * Class:     com_mysql_ndbjtie_mysql_Utils

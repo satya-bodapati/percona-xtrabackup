@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2005, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -37,21 +37,21 @@
 #define JAM_FILE_ID 408
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_LCP 1
-//#define DEBUG_LCP_DEL2 1
-//#define DEBUG_LCP_DEL_EXTRA 1
-//#define DEBUG_LCP_SKIP_EXTRA 1
-//#define DEBUG_LCP_KEEP 1
-//#define DEBUG_LCP_REL 1
-//#define DEBUG_NR_SCAN 1
-//#define DEBUG_NR_SCAN_EXTRA 1
-//#define DEBUG_LCP_SCANNED_BIT 1
-//#define DEBUG_LCP_FILTER 1
-//#define DEBUG_LCP_DEL 1
-//#define DEBUG_LCP_DELAY 1
-//#define DEBUG_LCP_SKIP 1
-//#define DEBUG_LCP_DEL 1
-//#define DEBUG_LCP_SKIP 1
+// #define DEBUG_LCP 1
+// #define DEBUG_LCP_DEL2 1
+// #define DEBUG_LCP_DEL_EXTRA 1
+// #define DEBUG_LCP_SKIP_EXTRA 1
+// #define DEBUG_LCP_KEEP 1
+// #define DEBUG_LCP_REL 1
+// #define DEBUG_NR_SCAN 1
+// #define DEBUG_NR_SCAN_EXTRA 1
+// #define DEBUG_LCP_SCANNED_BIT 1
+// #define DEBUG_LCP_FILTER 1
+// #define DEBUG_LCP_DEL 1
+// #define DEBUG_LCP_DELAY 1
+// #define DEBUG_LCP_SKIP 1
+// #define DEBUG_LCP_DEL 1
+#define LCP_EXTRA_DEBUG 1
 #endif
 
 #ifdef DEBUG_LCP_DELAY
@@ -1022,6 +1022,18 @@ Uint32 Dbtup::prepare_lcp_scan_page(ScanOp &scan, Local_key &key,
           m_curr_fragptr.p->fragmentId, key.m_page_no);
     }
 #endif
+
+#ifdef LCP_EXTRA_DEBUG
+    {
+      LCPEXTRADEBUG(
+          c_backup,
+          "scanNext : reset scanned bit on tab(%u,%u), page: %u, row_count: "
+          "%llu, lcp page already scanned",
+          m_curr_fragptr.p->fragTableId, m_curr_fragptr.p->fragmentId,
+          key.m_page_no, m_curr_fragptr.p->m_row_count);
+    }
+#endif
+
     reset_lcp_scanned_bit(next_ptr);
     c_backup->skip_page_lcp_scanned_bit();
     /* Either 2) or 3) as described above */
@@ -1049,11 +1061,36 @@ Uint32 Dbtup::prepare_lcp_scan_page(ScanOp &scan, Local_key &key,
         instance(), m_curr_fragptr.p->fragTableId, m_curr_fragptr.p->fragmentId,
         key.m_page_no, is_last_lcp_state_A, pos.m_lcp_scan_changed_rows_page));
 
+#ifdef LCP_EXTRA_DEBUG
+    {
+      LCPEXTRADEBUG(
+          c_backup,
+          "prepare_lcp_scan_page case 1) tab(%u,%u) page(%u), row_count: "
+          "%llu"
+          " is_last_lcp_state_A: %u, CHANGED: %u",
+          m_curr_fragptr.p->fragTableId, m_curr_fragptr.p->fragmentId,
+          key.m_page_no, m_curr_fragptr.p->m_row_count, is_last_lcp_state_A,
+          pos.m_lcp_scan_changed_rows_page);
+    }
+#endif
+
     set_last_lcp_state(prev_ptr, true);
     if (!need_record_dropped_change) {
       jam();
       /* Coverage tested */
       /* LCP case 1b) and 1c) above goes this way */
+
+#ifdef LCP_EXTRA_DEBUG
+      {
+        LCPEXTRADEBUG(
+            c_backup,
+            "prepare_lcp_scan_page case 1b) and 1c) tab(%u,%u) page(%u), "
+            "row_count: %llu",
+            m_curr_fragptr.p->fragTableId, m_curr_fragptr.p->fragmentId,
+            key.m_page_no, m_curr_fragptr.p->m_row_count);
+      }
+#endif
+
       scan.m_last_seen = __LINE__;
       pos.m_get = ScanPos::Get_next_page_mm;
       c_backup->skip_empty_page_lcp();
@@ -1062,6 +1099,18 @@ Uint32 Dbtup::prepare_lcp_scan_page(ScanOp &scan, Local_key &key,
       jam();
       /* Coverage tested */
       /* 1a) as described above */
+
+#ifdef LCP_EXTRA_DEBUG
+      {
+        LCPEXTRADEBUG(c_backup,
+                      "prepare_lcp_scan_page case 1a) tab(%u,%u) page(%u), "
+                      "row_count: %llu",
+                      m_curr_fragptr.p->fragTableId,
+                      m_curr_fragptr.p->fragmentId, key.m_page_no,
+                      m_curr_fragptr.p->m_row_count);
+      }
+#endif
+
       scan.m_last_seen = __LINE__;
       pos.m_get = ScanPos::Get_next_page_mm;
       c_backup->record_dropped_empty_page_lcp();
@@ -1074,6 +1123,17 @@ Uint32 Dbtup::prepare_lcp_scan_page(ScanOp &scan, Local_key &key,
      * on the pos object to ensure that we know when a row
      * needs to be DELETE by ROWID or if it needs to be ignored.
      */
+
+#ifdef LCP_EXTRA_DEBUG
+    {
+      LCPEXTRADEBUG(
+          c_backup,
+          "prepare_lcp_scan_page case 4) tab(%u,%u) page(%u), row_count: %llu",
+          m_curr_fragptr.p->fragTableId, m_curr_fragptr.p->fragmentId,
+          key.m_page_no, m_curr_fragptr.p->m_row_count);
+    }
+#endif
+
     pos.m_is_last_lcp_state_D = get_last_lcp_state(prev_ptr);
     scan.m_last_seen = __LINE__;
   }
@@ -1094,7 +1154,6 @@ Uint32 Dbtup::handle_lcp_skip_page(ScanOp &scan, Local_key key, Page *page) {
                 instance(), m_curr_fragptr.p->fragTableId,
                 m_curr_fragptr.p->fragmentId, key.m_page_no,
                 pos.m_lcp_scan_changed_rows_page, pos.m_is_last_lcp_state_D));
-
   page->clear_page_to_skip_lcp();
   set_last_lcp_state(m_curr_fragptr.p, key.m_page_no,
                      true /* Set state to D */);
@@ -1964,6 +2023,19 @@ bool Dbtup::scanNext(Signal *signal, ScanOpPtr scanPtr) {
           if (bits & ScanOp::SCAN_LCP) {
             if (pagePtr.p->is_page_to_skip_lcp()) {
               Uint32 ret_val = handle_lcp_skip_page(scan, key, pagePtr.p);
+
+#ifdef LCP_EXTRA_DEBUG
+              {
+                LCPEXTRADEBUG(
+                    c_backup,
+                    "scanNext : Clear LCP_SKIP on tab(%u,%u), page: %u, "
+                    "row_count: %llu"
+                    "handle_lcp_skip_page ret: %u",
+                    m_curr_fragptr.p->fragTableId, m_curr_fragptr.p->fragmentId,
+                    key.m_page_no, m_curr_fragptr.p->m_row_count, ret_val);
+              }
+#endif
+
               if (ret_val == ZSCAN_FOUND_PAGE_END) {
                 jamDebug();
                 break;
@@ -2001,6 +2073,18 @@ bool Dbtup::scanNext(Signal *signal, ScanOpPtr scanPtr) {
             }
           }
           /* LCP normal case 4a) above goes here */
+
+          // #ifdef LCP_EXTRA_DEBUG
+          //           {
+          //             LCPEXTRADEBUG(c_backup,
+          //                           "scanNext : tab(%u,%u), page: %u,
+          //                           row_count: %llu",
+          //                           m_curr_fragptr.p->fragTableId,
+          //                           m_curr_fragptr.p->fragmentId,
+          //                           key.m_page_no,
+          //                           m_curr_fragptr.p->m_row_count);
+          //           }
+          // #endif
 
         nopage:
           pos.m_page = pagePtr.p;
@@ -2586,12 +2670,12 @@ bool Dbtup::scanNext(Signal *signal, ScanOpPtr scanPtr) {
      * than 100 signals.
      */
     jam();
-    //#ifdef VM_TRACE
+    // #ifdef VM_TRACE
     c_debug_count++;
     if (c_debug_count % 10000 == 0) {
       DEB_LCP_DELAY(("(%u)TupScan delayed 10000 times", instance()));
     }
-    //#endif
+    // #endif
     sendSignalWithDelay(reference(), GSN_CONTINUEB, signal, BOUNDED_DELAY, 2);
   }
   return false;

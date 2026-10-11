@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -248,7 +248,7 @@ bool Sql_cmd_show_schema_base::check_privileges(THD *thd) {
   assert(dst_db_name != nullptr);
 
   // Get user's global and db-level privileges.
-  ulong global_db_privs;
+  Access_bitmask global_db_privs;
   if (check_access(thd, SELECT_ACL, dst_db_name, &global_db_privs, nullptr,
                    false, false))
     return true;
@@ -410,7 +410,8 @@ bool Sql_cmd_show_create_table::execute_inner(THD *thd) {
       access is granted. We need to check if first_table->grant.privilege
       contains any table-specific privilege.
     */
-    DBUG_PRINT("debug", ("tbl->grant.privilege: %lx", tbl->grant.privilege));
+    DBUG_PRINT("debug",
+               ("tbl->grant.privilege: %" PRIx32, tbl->grant.privilege));
     if (check_some_access(thd, TABLE_OP_ACLS, tbl) ||
         (tbl->grant.privilege & TABLE_OP_ACLS) == 0) {
       my_error(ER_TABLEACCESS_DENIED_ERROR, MYF(0), "SHOW",
@@ -1562,7 +1563,9 @@ void append_identifier(const THD *thd, String *packet, const char *name,
     if (!to_length) to_length = 1;
     if (to_length == 1 && chr == static_cast<uchar>(quote_char))
       packet->append(&quote_char, 1, system_charset_info);
-    packet->append(to_name, to_length, system_charset_info);
+    packet->append(to_name,
+                   std::min(to_length, static_cast<size_t>(name_end - to_name)),
+                   system_charset_info);
   }
   packet->append(&quote_char, 1, system_charset_info);
 }
@@ -2307,11 +2310,24 @@ bool store_create_info(THD *thd, Table_ref *table_list, String *packet,
   packet->append(STRING_WITH_LEN("\n)"));
 
   /**
-    Append START TRANSACTION for CREATE SELECT on SE supporting atomic DDL.
-    This is done only while binlogging CREATE TABLE AS SELECT.
+    Append START TRANSACTION clause for:
+    a. CREATE TABLE AS SELECT if the SE supports atomic DDL.
+    b. CREATE TABLE ... START TRANSACTION
+      - HA_CREATE_INFO::m_transactional_ddl indicates if the table should be
+        created and not committed at the end of the statement. This flag is
+        set for CREATE TABLE ... START TRANSACTION statement only.
+
+    These checks also ensure we do not append 'START TRANSACTION' clause for
+    'SHOW CREATE TABLE' query or the normal 'CREATE TABLE' query without the
+    'START TRANSACTION' clause where the query needs to be rewritten (for eg:
+    adding GIPK information on a table without primary key when
+    sql_generate_invisible_primary_key is enabled).
   */
-  if (!thd->lex->query_block->field_list_is_empty() &&
-      (create_info_arg->db_type->flags & HTON_SUPPORTS_ATOMIC_DDL)) {
+  if ((!thd->lex->query_block->field_list_is_empty()  // contains SELECT clause
+       &&
+       (create_info_arg->db_type->flags & HTON_SUPPORTS_ATOMIC_DDL))  // case a
+      || (create_info_arg && create_info_arg->m_transactional_ddl)    // case b
+  ) {
     packet->append(STRING_WITH_LEN(" START TRANSACTION"));
   }
 
@@ -2773,8 +2789,8 @@ class thread_info_compare {
 
 static const char *thread_state_info(THD *invoking_thd, THD *inspected_thd) {
   DBUG_TRACE;
-  if (inspected_thd->get_protocol()->get_rw_status()) {
-    if (inspected_thd->get_protocol()->get_rw_status() == 2)
+  if (inspected_thd->get_protocol_rw_status()) {
+    if (inspected_thd->get_protocol_rw_status() == 2)
       return "Sending to client";
     if (inspected_thd->get_command() == COM_SLEEP) return "";
     return "Receiving from client";
@@ -2874,9 +2890,9 @@ class List_process_list : public Do_THD_Impl {
         thd_info->host = host;
       } else
         thd_info->host = m_client_thd->mem_strdup(
-            inspect_sctx_host_or_ip.str[0]
-                ? inspect_sctx_host_or_ip.str
-                : inspect_sctx_host.length ? inspect_sctx_host.str : "");
+            inspect_sctx_host_or_ip.str[0] ? inspect_sctx_host_or_ip.str
+            : inspect_sctx_host.length     ? inspect_sctx_host.str
+                                           : "");
     }  // We've copied the security context, so release the lock.
 
     DBUG_EXECUTE_IF("processlist_acquiring_dump_threads_LOCK_thd_data", {
@@ -4079,11 +4095,10 @@ static int get_schema_tmp_table_columns_record(THD *thd, Table_ref *tables,
 
     // COLUMN_KEY
     pos = pointer_cast<const uchar *>(
-        field->is_flag_set(PRI_KEY_FLAG)
-            ? "PRI"
-            : field->is_flag_set(UNIQUE_KEY_FLAG)
-                  ? "UNI"
-                  : field->is_flag_set(MULTIPLE_KEY_FLAG) ? "MUL" : "");
+        field->is_flag_set(PRI_KEY_FLAG)        ? "PRI"
+        : field->is_flag_set(UNIQUE_KEY_FLAG)   ? "UNI"
+        : field->is_flag_set(MULTIPLE_KEY_FLAG) ? "MUL"
+                                                : "");
     table->field[TMP_TABLE_COLUMNS_COLUMN_KEY]->store(
         (const char *)pos, strlen((const char *)pos), cs);
 
@@ -4397,7 +4412,7 @@ static int get_schema_tmp_table_keys_record(THD *thd, Table_ref *tables,
       // Expression for functional key parts
       if (key_part->field != nullptr &&
           key_part->field->is_field_for_functional_index()) {
-        Value_generator *gcol = key_info->key_part->field->gcol_info;
+        Value_generator *gcol = key_part->field->gcol_info;
 
         table->field[TMP_TABLE_KEYS_EXPRESSION]->store(
             gcol->expr_str.str, gcol->expr_str.length, cs);
@@ -4772,7 +4787,7 @@ bool mysql_schema_table(THD *thd, LEX *lex, Table_ref *table_list) {
     Query_block *sel = lex->current_query_block();
     Field_translator *transl;
 
-    const ulonglong want_privilege_saved = thd->want_privilege;
+    const Access_bitmask want_privilege_saved = thd->want_privilege;
     thd->want_privilege = SELECT_ACL;
     const enum enum_mark_columns save_mark_used_columns =
         thd->mark_used_columns;
@@ -4964,7 +4979,7 @@ ST_FIELD_INFO tmp_table_keys_fields_info[] = {
     {"INDEX_SCHEMA", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 0, nullptr, 0},
     {"INDEX_NAME", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 0, "Key_name", 0},
     {"SEQ_IN_INDEX", 2, MYSQL_TYPE_LONGLONG, 0, 0, "Seq_in_index", 0},
-    {"COLUMN_NAME", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 0, "Column_name", 0},
+    {"COLUMN_NAME", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 1, "Column_name", 0},
     {"COLLATION", 1, MYSQL_TYPE_STRING, 0, 1, "Collation", 0},
     {"CARDINALITY", MY_INT64_NUM_DECIMAL_DIGITS, MYSQL_TYPE_LONGLONG, 0, 1,
      "Cardinality", 0},

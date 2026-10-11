@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -98,6 +98,9 @@ class Shard_naked_latch_guard : private ut::Non_copyable {
 
   explicit Shard_naked_latch_guard(ut::Location location,
                                    const page_id_t &page_id);
+
+  explicit Shard_naked_latch_guard(ut::Location location,
+                                   hash_table_t *hash_table, uint64_t cell_id);
 
   ~Shard_naked_latch_guard();
 

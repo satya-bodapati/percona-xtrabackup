@@ -1,4 +1,4 @@
-# Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -97,8 +97,8 @@ IF(APPLE)
       MESSAGE(FATAL_ERROR "obool -L ${FILE_NAME} result: ${OTOOL_RESULT}")
     ENDIF()
     STRING(REPLACE "\n" ";" OTOOL_OUTPUT_LIST "${OTOOL_OUTPUT}")
-    # Skip header, and the library itself
-    LIST(REMOVE_AT OTOOL_OUTPUT_LIST 0 1)
+    # Skip header
+    LIST(REMOVE_AT OTOOL_OUTPUT_LIST 0)
     SET(DEPENDENCIES)
     FOREACH(LINE ${OTOOL_OUTPUT_LIST})
       IF(${LINE} MATCHES "@rpath")
@@ -119,6 +119,27 @@ IF(APPLE)
 ENDIF(APPLE)
 
 IF(LINUX)
+  # Parse output of 'ldd ${FILE_NAME}' and return anything starting with lib.
+  FUNCTION(FIND_LIBRARY_DEPENDENCIES FILE_NAME RETURN_VALUE)
+    SET(${RETURN_VALUE} PARENT_SCOPE)
+    EXECUTE_PROCESS(COMMAND
+      ldd "${FILE_NAME}"
+      OUTPUT_VARIABLE LDD_OUTPUT
+      RESULT_VARIABLE LDD_RESULT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    STRING(REPLACE "\n" ";" LDD_OUTPUT_LIST "${LDD_OUTPUT}")
+    SET(DEPENDENCIES)
+    FOREACH(LINE ${LDD_OUTPUT_LIST})
+      STRING(REGEX MATCH "^[\t ]+(lib[-+_A-Za-z0-9\\.]+).*" UNUSED ${LINE})
+      IF(CMAKE_MATCH_1)
+        # MESSAGE(STATUS "xxx ${FILE_NAME} ${CMAKE_MATCH_1}")
+        LIST(APPEND DEPENDENCIES ${CMAKE_MATCH_1})
+      ENDIF()
+    ENDFOREACH()
+    SET(${RETURN_VALUE} ${DEPENDENCIES} PARENT_SCOPE)
+  ENDFUNCTION(FIND_LIBRARY_DEPENDENCIES)
+
   FUNCTION(FIND_OBJECT_DEPENDENCIES FILE_NAME RETURN_VALUE)
     SET(${RETURN_VALUE} PARENT_SCOPE)
     EXECUTE_PROCESS(COMMAND

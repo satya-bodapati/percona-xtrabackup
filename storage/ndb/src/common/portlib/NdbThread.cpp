@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1572,9 +1572,7 @@ thread_local NdbThread *NDB_THREAD_TLS_NDB_THREAD = nullptr;
 thread_local Uint32 NDB_THREAD_TLS_RES_OWNER = 0;
 #endif
 
-struct NdbThread *NdbThread_GetNdbThread() {
-  return NDB_THREAD_TLS_NDB_THREAD;
-}
+struct NdbThread *NdbThread_GetNdbThread() { return NDB_THREAD_TLS_NDB_THREAD; }
 
 static bool cpu_set_working;
 #if defined(HAVE_LINUX_SCHEDULING)

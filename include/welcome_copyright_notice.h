@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -30,7 +30,7 @@
 
 #include <string.h>
 
-#define COPYRIGHT_NOTICE_CURRENT_YEAR "2024"
+#define COPYRIGHT_NOTICE_CURRENT_YEAR "2026"
 
 /*
   This define specifies copyright notice which is displayed by every MySQL
@@ -102,7 +102,7 @@
   "   documentation.  The authors of MySQL hereby grant you an additional\n"  \
   "   permission to link the program and your derivative works with the\n"    \
   "   separately licensed software that they have either included with\n"     \
-  "   the program or referenced in the documentation.\n"	              \
+  "   the program or referenced in the documentation.\n"                      \
   "\n"                                                                        \
   "   Without limiting anything contained in the foregoing, this file,\n"     \
   "   which is part of C Driver for MySQL (Connector/C), is also subject to " \

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -48,7 +48,8 @@
  * elsize is the size (in bytes) of each element, and elproc is the
  * xdr procedure to call to handle each element of the array.
  */
-bool_t xdr_array(xdrs, addrp, sizep, maxsize, elsize, elproc) XDR *xdrs;
+bool_t xdr_array(xdrs, addrp, sizep, maxsize, elsize, elproc)
+XDR *xdrs;
 caddr_t *addrp;   /* array pointer */
 u_int *sizep;     /* number of elements */
 u_int maxsize;    /* max numberof elements */
@@ -122,7 +123,8 @@ INTDEF(xdr_array)
  * > elemsize: size of each element
  * > xdr_elem: routine to XDR each element
  */
-bool_t xdr_vector(xdrs, basep, nelem, elemsize, xdr_elem) XDR *xdrs;
+bool_t xdr_vector(xdrs, basep, nelem, elemsize, xdr_elem)
+XDR *xdrs;
 char *basep;
 u_int nelem;
 u_int elemsize;

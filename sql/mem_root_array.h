@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -204,7 +204,7 @@ class Mem_root_array_YY {
     @return true if out-of-memory, false otherwise.
   */
   template <typename... Args>
-  bool emplace_back(Args &&... args) {
+  bool emplace_back(Args &&...args) {
     constexpr size_t min_capacity = 20;
     constexpr size_t expansion_factor = 2;
     if (m_size == m_capacity) {

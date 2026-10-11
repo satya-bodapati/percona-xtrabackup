@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -42,7 +42,7 @@
 #include <EventLogger.hpp>
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_INDEX_BUILD 1
+// #define DEBUG_INDEX_BUILD 1
 #endif
 
 #ifdef DEBUG_INDEX_BUILD
@@ -446,7 +446,7 @@ int Dbtup::tuxReadAttrs(EmulatedJamBuffer *jamBuf, Uint32 fragPtrI,
 
 // ordered index build
 
-//#define TIME_MEASUREMENT
+// #define TIME_MEASUREMENT
 #ifdef TIME_MEASUREMENT
 static Uint32 time_events;
 Uint64 tot_time_passed;

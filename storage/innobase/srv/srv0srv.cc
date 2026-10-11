@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -1685,8 +1685,9 @@ void srv_export_innodb_status(void) {
   export_vars.innodb_row_lock_time = srv_stats.n_lock_wait_time / 1000;
 
   if (srv_stats.n_lock_wait_count > 0) {
-    export_vars.innodb_row_lock_time_avg = (ulint)(
-        srv_stats.n_lock_wait_time / 1000 / srv_stats.n_lock_wait_count);
+    export_vars.innodb_row_lock_time_avg =
+        (ulint)(srv_stats.n_lock_wait_time / 1000 /
+                srv_stats.n_lock_wait_count);
 
   } else {
     export_vars.innodb_row_lock_time_avg = 0;
@@ -2151,13 +2152,7 @@ static void srv_update_cpu_usage() {
     return;
   }
 
-  int n_cpu = 0;
-  constexpr int MAX_CPU_N = 128;
-  for (int i = 0; i < MAX_CPU_N; ++i) {
-    if (CPU_ISSET(i, &cs)) {
-      ++n_cpu;
-    }
-  }
+  const int n_cpu = CPU_COUNT(&cs);
 
   srv_cpu_usage.n_cpu = n_cpu;
   MONITOR_SET(MONITOR_CPU_N, int64_t(n_cpu));

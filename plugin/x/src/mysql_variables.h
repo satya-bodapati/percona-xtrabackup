@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -33,13 +33,12 @@ struct CHARSET_INFO;
 
 namespace mysqld {
 
-// XXX temporary wrapper for server variables
-//    it should be removed after plugin correctly handles dynamic plugin macro
 bool is_terminating();
 bool get_initialize();
 const char *get_my_localhost();
 const CHARSET_INFO *get_default_charset();
 sigset_t get_mysqld_signal_mask();
+bool have_ssl();
 
 }  // namespace mysqld
 

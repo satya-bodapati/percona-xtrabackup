@@ -16,6 +16,13 @@ if (mysqld.global.metadata_schema_version === undefined) {
   mysqld.global.metadata_schema_version = [2, 2, 0];
 }
 
+if (mysqld.global.server_version === undefined) {
+  // Let's keep the default server version as some known compatible version.
+  // If there is a need to some specific compatibility checks, this should be
+  // overwritten from the test.
+  mysqld.global.server_version = "8.3.0";
+}
+
 var options = {
   cluster_type: "gr",
   metadata_schema_version: mysqld.global.metadata_schema_version,
@@ -52,7 +59,6 @@ var common_responses = common_stmts.prepare_statement_responses(
       "router_clusterset_view_id",
       "router_clusterset_all_nodes_by_clusterset_id",
       "router_clusterset_present",
-      "router_bootstrap_target_type",
       "router_clusterset_select_cluster_info_by_primary_role",
       "router_clusterset_select_cluster_info_by_gr_uuid",
       "router_clusterset_select_gr_members_status",
@@ -79,7 +85,12 @@ var router_update_last_check_in =
     common_stmts.get("router_update_last_check_in_v2", options);
 
 
+var router_bootstrap_target_type =
+    common_stmts.get("router_bootstrap_target_type", options);
+
+
 ({
+  handshake: {greeting: {server_version: mysqld.global.server_version}},
   stmts: function(stmt) {
     var res;
     if (common_responses.hasOwnProperty(stmt)) {
@@ -94,6 +105,14 @@ var router_update_last_check_in =
         (res = common_stmts.handle_regex_stmt(stmt, common_responses_regex)) !==
         undefined) {
       return res;
+    } else if (stmt === router_bootstrap_target_type.stmt) {
+      if (mysqld.global.simulate_router_options_no_rows === 1) {
+        return {
+          result: {columns: [{name: "NONE", type: "STRING"}], rows: []}
+        }
+      } else {
+        return router_bootstrap_target_type;
+      }
     } else if (stmt.match(router_update_attributes.stmt_regex)) {
       mysqld.global.update_attributes_count++;
       return router_update_attributes;

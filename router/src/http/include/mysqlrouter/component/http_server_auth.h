@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -30,7 +30,7 @@
 
 #include "http/base/request.h"
 
-#include "mysqlrouter/http_server_export.h"
+#include "mysqlrouter/http_server_lib_export.h"
 
 class HttpAuthRealm;
 
@@ -39,7 +39,7 @@ class HttpAuthRealm;
  *
  * bridges HttpRequest with the HttpAuthRealm's
  */
-class HTTP_SERVER_EXPORT HttpAuth {
+class HTTP_SERVER_LIB_EXPORT HttpAuth {
  public:
   /**
    * require Authorization.

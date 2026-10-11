@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -115,14 +115,14 @@ struct ExplainChild {
 /// Convenience function to add a json field.
 template <class T, class JsonObjectPtr, class... Args>
 static bool AddMemberToObject(const JsonObjectPtr &obj, const char *alias,
-                              Args &&... ctor_args) {
+                              Args &&...ctor_args) {
   return obj->add_alias(
       alias, create_dom_ptr<T, Args...>(std::forward<Args>(ctor_args)...));
 }
 
 template <class T, class... Args>
 static bool AddElementToArray(const unique_ptr<Json_array> &array,
-                              Args &&... ctor_args) {
+                              Args &&...ctor_args) {
   return array->append_alias(
       create_dom_ptr<T, Args...>(std::forward<Args>(ctor_args)...));
 }

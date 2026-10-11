@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -24,17 +24,6 @@
 */
 
 #include "context.h"
-
-#include <cstring>
-#include <memory>
-#include <mutex>
-
-#include "mysql/harness/logging/logging.h"
-#include "mysql/harness/net_ts/local.h"
-#include "mysqlrouter/base_protocol.h"
-#include "mysqlrouter/routing.h"
-
-IMPORT_LOG_FUNCTIONS()
 
 void MySQLRoutingContext::increase_info_active_routes() {
   ++info_active_routes_;

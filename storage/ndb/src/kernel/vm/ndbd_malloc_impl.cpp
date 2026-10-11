@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -139,7 +139,7 @@ static constexpr size_t ALLOC_PAGES_PER_SYSTEM_PAGE =
  *
  * Also see Bug#28961597.
  */
-//#define NDB_TEST_128TB_VIRTUAL_MEMORY
+// #define NDB_TEST_128TB_VIRTUAL_MEMORY
 #ifdef NDB_TEST_128TB_VIRTUAL_MEMORY
 
 static inline int log_and_fake_success(const char func[], int line,

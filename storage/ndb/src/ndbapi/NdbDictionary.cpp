@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2395,20 +2395,8 @@ void NdbDictionary::Dictionary::releaseEvent(
   delete event;
 }
 
-int NdbDictionary::Dictionary::listEvents(List &list) {
-  // delegate to overloaded const function for same semantics
-  const NdbDictionary::Dictionary *const cthis = this;
-  return cthis->NdbDictionary::Dictionary::listEvents(list);
-}
-
 int NdbDictionary::Dictionary::listEvents(List &list) const {
   return m_impl.listEvents(list);
-}
-
-int NdbDictionary::Dictionary::listObjects(List &list, Object::Type type) {
-  // delegate to overloaded const function for same semantics
-  const NdbDictionary::Dictionary *const cthis = this;
-  return cthis->NdbDictionary::Dictionary::listObjects(list, type);
 }
 
 int NdbDictionary::Dictionary::listObjects(List &list,
@@ -2420,12 +2408,6 @@ int NdbDictionary::Dictionary::listObjects(List &list,
 int NdbDictionary::Dictionary::listObjects(List &list, Object::Type type,
                                            bool fullyQualified) const {
   return m_impl.listObjects(list, type, fullyQualified);
-}
-
-int NdbDictionary::Dictionary::listIndexes(List &list, const char *tableName) {
-  // delegate to overloaded const function for same semantics
-  const NdbDictionary::Dictionary *const cthis = this;
-  return cthis->NdbDictionary::Dictionary::listIndexes(list, tableName);
 }
 
 int NdbDictionary::Dictionary::listIndexes(List &list,

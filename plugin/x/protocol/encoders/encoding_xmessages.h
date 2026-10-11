@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -79,7 +79,7 @@ class XMessage_encoder_base : public Base_type {
   //
   // Using template constructor instead:
   template <typename... Args>
-  explicit XMessage_encoder_base(Args &&... args)
+  explicit XMessage_encoder_base(Args &&...args)
       : Base_type(std::forward<Args>(args)...) {}
 
   void encode_compact_metadata(const uint8_t type, const uint64_t *collation,

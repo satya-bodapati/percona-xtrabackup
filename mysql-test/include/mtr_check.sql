@@ -1,4 +1,4 @@
--- Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+-- Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 --
 -- This program is free software; you can redistribute it and/or modify
 -- it under the terms of the GNU General Public License, version 2.0,
@@ -199,7 +199,7 @@ BEGIN
   -- not give consistent result either.
   --
   SELECT /*+SET_VAR(use_secondary_engine=OFF)*/ USER, HOST, DB, COMMAND, INFO FROM INFORMATION_SCHEMA.PROCESSLIST
-    WHERE COMMAND NOT IN ('Sleep', 'Daemon')
+    WHERE COMMAND NOT IN ('Sleep', 'Daemon', 'Killed')
       AND USER NOT IN ('unauthenticated user','mysql.session', 'event_scheduler')
         ORDER BY COMMAND;
 

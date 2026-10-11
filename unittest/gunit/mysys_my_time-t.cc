@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -471,7 +471,8 @@ TEST(MysysMyTime, TimeZoneDisplacementToSeconds) {
   // Various invalid hours.
   EXPECT_TRUE(CheckTimeZoneDisplacement("+15"));
   EXPECT_TRUE(CheckTimeZoneDisplacement("-15"));
-  EXPECT_TRUE(CheckTimeZoneDisplacement(("+" + std::to_string(int_max + 1))))
+  EXPECT_TRUE(CheckTimeZoneDisplacement(
+      ("+" + std::to_string(static_cast<unsigned>(int_max) + 1))))
       << "Int wrap-around in hours not caught.";
 
   // Various invalid minutes.
@@ -480,7 +481,8 @@ TEST(MysysMyTime, TimeZoneDisplacementToSeconds) {
   EXPECT_TRUE(CheckTimeZoneDisplacement("+0:60"));
   EXPECT_TRUE(CheckTimeZoneDisplacement("+00:60"));
   EXPECT_TRUE(CheckTimeZoneDisplacement("+00:61"));
-  EXPECT_TRUE(CheckTimeZoneDisplacement(("+0:" + std::to_string(int_max + 1))))
+  EXPECT_TRUE(CheckTimeZoneDisplacement(
+      ("+0:" + std::to_string(static_cast<unsigned>(int_max) + 1))))
       << "Int wrap-around in minutes not caught.";
 
   EXPECT_TRUE(CheckTimeZoneDisplacement("-00:00"));

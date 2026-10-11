@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -476,6 +476,9 @@ class TransporterRegistry {
   Uint64 get_send_buffer_max_alloc_bytes(TrpId trpId) const;
   Uint64 get_send_buffer_max_used_bytes(TrpId trpId) const;
 
+  NDB_TICKS get_last_recv(TrpId trpId) const;
+  void set_last_recv(TrpId trpId, NDB_TICKS last_recv);
+
   /**
    * prepareSend
    *
@@ -545,15 +548,19 @@ class TransporterRegistry {
   Transporter *get_node_base_transporter(NodeId nodeId) const;
   Transporter *get_node_transporter_instance(NodeId nodeId, int inst) const;
   bool is_shm_transporter(TrpId trp_id);
+  TransporterType get_transporter_type(TrpId id) const;
 
   ndb_sockaddr get_connect_address_node(NodeId nodeId) const;
   ndb_sockaddr get_connect_address(TrpId trpId) const;
   bool is_encrypted_link(TrpId trpId) const;
 
+  bool trpIdIsValid(TrpId id) const;
   Uint64 get_bytes_sent(TrpId trpId) const;
   Uint64 get_bytes_received(TrpId trpId) const;
 
   Multi_Transporter *get_node_multi_transporter(NodeId node_id) const;
+
+  static bool is_permitted_halt_signal(const SignalHeader *signalHeader);
 
  private:
   TransporterCallback *const callbackObj;
@@ -700,6 +707,7 @@ class TransporterRegistry {
   void get_trps_for_node(NodeId nodeId, TrpId *trp_ids, Uint32 &num_trp_ids,
                          Uint32 max_trp_ids) const;
   TrpId get_the_only_base_trp(NodeId nodeId) const;
+  TrpId get_recv_trp(BlockReference recvRef, BlockReference sendRef) const;
 
   Uint32 get_num_trps();
   TlsKeyManager *getTlsKeyManager() { return &m_tls_keys; }

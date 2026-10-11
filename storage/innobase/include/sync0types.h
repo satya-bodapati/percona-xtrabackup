@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -215,6 +215,8 @@ enum latch_level_t {
 
   SYNC_ANY_LATCH,
 
+  SYNC_ALTER_STAGE,
+
   SYNC_FIL_SHARD,
 
   SYNC_PAGE_ARCH_OPER,
@@ -343,6 +345,7 @@ alphabetical ordering seems useful */
 enum latch_id_t {
   LATCH_ID_NONE = 0,
   LATCH_ID_AHI_ENABLED,
+  LATCH_ID_ALTER_STAGE,
   LATCH_ID_AUTOINC,
   LATCH_ID_BUF_BLOCK_MUTEX,
   LATCH_ID_BUF_POOL_CHUNKS,

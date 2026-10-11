@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -39,7 +39,7 @@ inline std::string to_string(const Value_type &value) {
 }
 
 template <typename FirstArg, typename... Args>
-inline std::string to_string(const FirstArg &arg, const Args &... args) {
+inline std::string to_string(const FirstArg &arg, const Args &...args) {
   return to_string(arg) + to_string(args...);
 }
 

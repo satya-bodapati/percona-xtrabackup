@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -294,6 +294,10 @@ in constraints which reference it */
 @param[in,out]  index   index to remove, this object is destroyed and must not
 be accessed by the caller afterwards */
 void dict_index_remove_from_cache(dict_table_t *table, dict_index_t *index);
+
+/** Gathers ids of all tables in cache at the moment.
+@return ids of all tables */
+std::vector<table_id_t> dict_get_all_table_ids();
 
 /** Change the id of a table object in the dictionary cache. This is used in
  DISCARD TABLESPACE. */
@@ -695,7 +699,7 @@ added column.
 /** Gets the number of fields in the internal representation of an index,
  including fields added by the dictionary system.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_fields(
+[[nodiscard]] inline uint16_t dict_index_get_n_fields(
     const dict_index_t *index); /*!< in: an internal
                                representation of index (in
                                the dictionary cache) */
@@ -704,14 +708,14 @@ added column.
  we do not take multiversioning into account: in the B-tree use the value
  returned by dict_index_get_n_unique_in_tree.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_unique(
+[[nodiscard]] inline uint16_t dict_index_get_n_unique(
     const dict_index_t *index); /*!< in: an internal representation
                                of index (in the dictionary cache) */
 /** Gets the number of fields in the internal representation of an index
  which uniquely determine the position of an index entry in the index, if
  we also take multiversioning into account.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_unique_in_tree(
+[[nodiscard]] inline uint16_t dict_index_get_n_unique_in_tree(
     const dict_index_t *index); /*!< in: an internal representation
                                of index (in the dictionary cache) */
 
@@ -725,14 +729,14 @@ index, if we also take multiversioning into account. Note, it doesn't
 include page no field.
 @param[in]      index   index
 @return number of fields */
-[[nodiscard]] static inline uint16_t dict_index_get_n_unique_in_tree_nonleaf(
+[[nodiscard]] inline uint16_t dict_index_get_n_unique_in_tree_nonleaf(
     const dict_index_t *index);
 /** Gets the number of user-defined ordering fields in the index. In the
  internal representation we add the row id to the ordering fields to make all
  indexes unique, but this function returns the number of fields the user defined
  in the index as ordering fields.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_ordering_defined_by_user(
+[[nodiscard]] inline ulint dict_index_get_n_ordering_defined_by_user(
     const dict_index_t *index); /*!< in: an internal representation
                                of index (in the dictionary cache) */
 /** Returns true if the index contains a column or a prefix of that column.
@@ -1676,10 +1680,12 @@ uint32_t dict_vcol_base_is_foreign_key(dict_v_col_t *vcol,
                                        dict_foreign_t *foreign);
 
 /** Get maximum possible size needed for a field.
-@param[in]   table        innodb table definition cache
-@param[in]   index        index
-@param[in]   field        field
-@param[out]  rec_max_size max record size needed */
+@param[in]      table         innodb table definition cache
+@param[in]      index         index
+@param[in]      field         field
+@param[in,out]  rec_max_size  max record size calculated till now. It
+                              will be increased with the length needed
+                              for this field */
 void get_field_max_size(const dict_table_t *table, const dict_index_t *index,
                         const dict_field_t *field, size_t &rec_max_size);
 
@@ -1695,13 +1701,12 @@ void get_permissible_max_size(const dict_table_t *table,
 /** validate that maximum possible size of a row is within permissible limit.
 @param[in]  table        innodb table definition cache
 @param[in]  index        index
-@param[in]  strict       true if error is to be reported
 @param[in]  page_rec_max maximum size of possible record on leaf page
 @param[in]  page_ptr_max maximum size of possible record on non-leaf page
 @param[out] rec_max_size maximum size of record on page
-@return true if max record size is within limit, false otherwise. */
+@return true if max record size exceeds the limit, false otherwise. */
 bool dict_index_validate_max_rec_size(const dict_table_t *table,
-                                      const dict_index_t *index, bool strict,
+                                      const dict_index_t *index,
                                       const size_t page_rec_max,
                                       const size_t page_ptr_max,
                                       size_t &rec_max_size);

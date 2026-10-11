@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 Copyright (c) 2012, Facebook Inc.
@@ -63,6 +63,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <time.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 
 #include <sql_table.h>
@@ -210,6 +211,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "os0enc.h"
 #include "os0file.h"
 
+#include <scope_guard.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -674,6 +676,7 @@ static PSI_memory_info pfs_instrumented_innodb_memory[] = {
 performance schema instrumented if "UNIV_PFS_MUTEX"
 is defined */
 static PSI_mutex_info all_innodb_mutexes[] = {
+    PSI_MUTEX_KEY(alter_stage_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(autoinc_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(autoinc_persisted_mutex, 0, 0, PSI_DOCUMENT_ME),
 #ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
@@ -813,6 +816,8 @@ static PSI_thread_info all_innodb_threads[] = {
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(page_archiver_thread, "ib_page_arch", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(buf_pool_create_thread, "ib_buf_create", PSI_FLAG_SINGLETON,
+                   0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(buf_dump_thread, "ib_buf_dump", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(clone_ddl_thread, "ib_clone_ddl", PSI_FLAG_SINGLETON, 0,
@@ -3323,8 +3328,7 @@ class Validate_files {
  public:
   /** Constructor */
   Validate_files()
-      : m_mutex(),
-        m_space_max_id(),
+      : m_space_max_id(),
         m_n_to_check(),
         m_n_threads(),
         m_start_time(std::chrono::steady_clock::time_point{}),
@@ -3333,7 +3337,8 @@ class Validate_files {
         m_n_moved(),
         m_n_missing(),
         m_n_deleted(),
-        m_n_errors() {}
+        m_n_errors(),
+        m_dirs_in_datadir() {}
 
   /** Validate the discovered tablespaces against the DD and attempt to open
   any DD tablespace not already open using a Parallel For Loop (par_for).
@@ -3364,11 +3369,8 @@ class Validate_files {
   space_id_t get_space_max_id() const { return (m_space_max_id); }
 
  private:
-  /** Mutex protecting the parallel check. */
-  std::mutex m_mutex;
-
   /** Maximum tablespace ID found. */
-  space_id_t m_space_max_id;
+  std::atomic<space_id_t> m_space_max_id;
 
   /** Number of tablespaces to check. */
   size_t m_n_to_check;
@@ -3398,13 +3400,26 @@ class Validate_files {
 
   /** Number of threads that failed. */
   std::atomic_size_t m_n_errors;
+
+  /** Full paths for dirs directly under datadir (symlinks resolved) */
+  Dirs_in_datadir m_dirs_in_datadir;
 };
 
 void Validate_files::check(const Const_iter &begin, const Const_iter &end,
                            size_t thread_id) {
   const auto sys_space_name = dict_sys_t::s_sys_space_name;
+  THD *internal_thd = nullptr;
+  if (current_thd == nullptr) {
+    internal_thd = create_internal_thd();
+    ut_a(internal_thd);
+    ut_ad(internal_thd == current_thd);
+  }
 
-  auto heap = mem_heap_create(FN_REFLEN * 2 + 1, UT_LOCATION_HERE);
+  const auto thd_guard = create_scope_guard([internal_thd]() {
+    if (internal_thd != nullptr) {
+      destroy_internal_thd(internal_thd);
+    }
+  });
 
   /* Validate all tablespaces if innodb_validate_tablespace_paths=ON OR
   server is in recovery  OR Change buffer is not empty. Change buffer
@@ -3504,14 +3519,13 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       break;
     }
 
-    {
-      std::lock_guard<std::mutex> guard(m_mutex);
-
-      if (!dict_sys_t::is_reserved(space_id) && space_id > m_space_max_id) {
-        /* Currently try to find the max space_id only.
-        It should be able to reuse the deleted smaller ones later */
-        m_space_max_id = space_id;
-      }
+    if (!dict_sys_t::is_reserved(space_id)) {
+      /* Currently try to find the max space_id only.
+      It should be able to reuse the deleted smaller ones later */
+      auto current_max = m_space_max_id.load();
+      while (current_max < space_id &&
+             !m_space_max_id.compare_exchange_weak(current_max, space_id))
+        ;
     }
 
     /* System and temp files are tracked and opened separately.
@@ -3525,6 +3539,13 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
     const auto file = *dd_tablespace->files().begin();
     std::string dd_path{file->filename().c_str()};
     const char *filename = dd_path.c_str();
+
+    uint32_t fsp_flags = 0;
+    if (p.get(se_key_value[DD_SPACE_FLAGS], &fsp_flags)) {
+      /* Failed to fetch the tablespace flags. */
+      ++m_n_errors;
+      break;
+    }
 
     /* If the trunc log file is still around, this undo tablespace needs to be
     rebuilt now. */
@@ -3565,18 +3586,13 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
     Windows and POSIX. */
     Fil_path::normalize(dd_path);
     Fil_state state = Fil_state::MATCHES;
+    state = fil_tablespace_path_equals(space_id, space_name, fsp_flags,
+                                       m_dirs_in_datadir, dd_path, &new_path);
 
-    uint32_t fsp_flags = 0;
-    if (p.get(se_key_value[DD_SPACE_FLAGS], &fsp_flags)) {
-      /* Failed to fetch the tablespace flags. */
+    if (state == Fil_state::COMPARE_ERROR) {
       ++m_n_errors;
       break;
     }
-
-    std::lock_guard<std::mutex> guard(m_mutex);
-
-    state = fil_tablespace_path_equals(space_id, space_name, fsp_flags, dd_path,
-                                       &new_path);
 
     if (state == Fil_state::MATCHES) {
       new_path.assign(dd_path);
@@ -3588,24 +3604,31 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
     bool file_name_changed = false;
     bool file_path_changed = (state == Fil_state::MOVED);
 
-    if (state == Fil_state::MATCHES || state == Fil_state::MOVED) {
+    if (state == Fil_state::MATCHES || state == Fil_state::MOVED ||
+        state == Fil_state::MOVED_PREV) {
       /* We need to update space name and table name for partitioned tables
       if letter case is different. */
       if (fil_update_partition_name(space_id, fsp_flags, true, space_str,
                                     new_path)) {
         file_name_changed = true;
-        state = Fil_state::MOVED;
+        if (state != Fil_state::MOVED_PREV) {
+          state = Fil_state::MOVED;
+        }
       }
 
       /* Update DD if tablespace name is corrected. */
       if (space_str.compare(space_name) != 0) {
         old_space.assign(space_name);
         space_name = space_str.c_str();
-        state = Fil_state::MOVED;
+        if (state != Fil_state::MOVED_PREV) {
+          state = Fil_state::MOVED;
+        }
       }
     }
 
     switch (state) {
+      case Fil_state::COMPARE_ERROR:
+        ut_error;
       case Fil_state::MATCHES:
         break;
 
@@ -3634,7 +3657,7 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
 
       case Fil_state::MOVED:
         fil_add_moved_space(dd_tablespace->id(), space_id, space_name, dd_path,
-                            new_path);
+                            new_path, false);
         ++m_n_moved;
 
         if (m_n_moved > MOVED_FILES_PRINT_THRESHOLD) {
@@ -3667,6 +3690,23 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
 
         if (m_n_moved == MOVED_FILES_PRINT_THRESHOLD) {
           ib::info(ER_IB_MSG_FIL_STATE_MOVED_TOO_MANY, prefix.c_str());
+        }
+        break;
+
+      case Fil_state::MOVED_PREV:
+        fil_add_moved_space(dd_tablespace->id(), space_id, space_name, dd_path,
+                            new_path, true);
+        ++m_n_moved;
+
+        if (m_n_moved == MOVED_FILES_PRINT_THRESHOLD) {
+          ib::info(ER_IB_MSG_FIL_STATE_MOVED_TOO_MANY, prefix.c_str());
+        }
+
+        if (m_n_moved < MOVED_FILES_PRINT_THRESHOLD) {
+          ib::info(ER_IB_MSG_FIL_STATE_MOVED_PREV, prefix.c_str(),
+                   static_cast<unsigned long long>(dd_tablespace->id()),
+                   static_cast<unsigned int>(space_id), space_name,
+                   new_path.c_str());
         }
         break;
 
@@ -3746,8 +3786,6 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
         ++m_n_missing;
     }
   }
-
-  mem_heap_free(heap);
 }
 
 dberr_t Validate_files::validate(const DD_tablespaces &tablespaces) {
@@ -3758,6 +3796,9 @@ dberr_t Validate_files::validate(const DD_tablespaces &tablespaces) {
   if (!srv_validate_tablespace_paths && !recv_needed_recovery &&
       ibuf_is_empty()) {
     ib::info(ER_IB_TABLESPACE_PATH_VALIDATION_SKIPPED);
+  } else {
+    /* Required for validating tablespace paths */
+    m_dirs_in_datadir = Dirs_in_datadir::make();
   }
 
   using std::placeholders::_1;
@@ -4521,9 +4562,11 @@ static inline bool innodb_io_capacity_max_is_set() {
   return innodb_variable_is_set("innodb_io_capacity_max");
 }
 
+#ifndef _WIN32
 static inline bool innodb_flush_method_is_set() {
   return innodb_variable_is_set("innodb_flush_method");
 }
+#endif
 
 /** Initialize and normalize innodb_buffer_pool_size. */
 static void innodb_buffer_pool_size_init() {
@@ -5064,6 +5107,7 @@ constexpr PSI_metric_info_v1 simple(const char *name, const char *unit,
 // description of the matching counters in srv/srv0mon.cc
 
 // clang-format off
+#ifdef HAVE_PSI_METRICS_INTERFACE
 static PSI_metric_info_v1 inno_metrics[] = {
     simple("dblwr_pages_written",
      "",
@@ -5365,6 +5409,7 @@ static PSI_meter_info_v1 inno_meter[] = {
      buffer_metrics, std::size(buffer_metrics)},
     {"mysql.inno.data", "MySql InnoDB data metrics", 10, 0, 0, data_metrics,
      std::size(data_metrics)}};
+#endif /* HAVE_PSI_METRICS_INTERFACE */
 
 /** Initialize the InnoDB storage engine plugin.
 @param[in,out]  p       InnoDB handlerton
@@ -5636,16 +5681,18 @@ static int innodb_init(void *p) {
       Encryption::check_keyring() == false) {
     return innodb_init_abort();
   }
-
+#ifdef HAVE_PSI_METRICS_INTERFACE
   mysql_meter_register(inno_meter, std::size(inno_meter));
-
+#endif /* HAVE_PSI_METRICS_INTERFACE */
   return 0;
 }
 
 /** De initialize the InnoDB storage engine plugin. */
 static int innodb_deinit(MYSQL_PLUGIN plugin_info [[maybe_unused]]) {
   release_plugin_services();
+#ifdef HAVE_PSI_METRICS_INTERFACE
   mysql_meter_unregister(inno_meter, std::size(inno_meter));
+#endif /* HAVE_PSI_METRICS_INTERFACE */
   return 0;
 }
 
@@ -9503,10 +9550,11 @@ static void innobase_get_multi_value_and_diff(
 }
 
 /** Checks which fields have changed in a row and stores information
- of them to an update vector.
+ of them to an update vector for the table's clustered index.
  @return DB_SUCCESS or error code */
 static dberr_t calc_row_difference(
-    upd_t *uvect,             /*!< in/out: update vector */
+    upd_t *uvect,             /*!< in/out: update vector for the
+                              clustered index */
     const uchar *old_row,     /*!< in: old row in MySQL format */
     uchar *new_row,           /*!< in: new row in MySQL format */
     TABLE *table,             /*!< in: table in MySQL data
@@ -9889,7 +9937,7 @@ static dberr_t calc_row_difference(
       if (changes_fts_column && !changes_fts_doc_col) {
         ib::warn(ER_IB_MSG_559) << "A new Doc ID must be supplied"
                                    " while updating FTS indexed columns.";
-        return (DB_FTS_INVALID_DOCID);
+        return DB_FTS_INVALID_DOCID;
       }
 
       /* Doc ID must monotonically increase */
@@ -9899,7 +9947,7 @@ static dberr_t calc_row_difference(
                                 << innodb_table->fts->cache->next_doc_id - 1
                                 << " for table " << innodb_table->name;
 
-        return (DB_FTS_INVALID_DOCID);
+        return DB_FTS_INVALID_DOCID;
       } else if ((doc_id - prebuilt->table->fts->cache->next_doc_id) >=
                  FTS_DOC_ID_MAX_STEP) {
         ib::warn(ER_IB_MSG_561)
@@ -9938,8 +9986,8 @@ static dberr_t calc_row_difference(
 
   ut_a(buf <= (byte *)original_upd_buff + buff_len);
 
-  ut_ad(uvect->validate());
-  return (DB_SUCCESS);
+  ut_d(uvect->validate_for_index(clust_index));
+  return DB_SUCCESS;
 }
 
 /**
@@ -14490,22 +14538,28 @@ int innobase_basic_ddl::delete_impl(THD *thd, const char *name,
 
       file_per_table = dict_table_is_file_per_table(tab);
       dd_table_close(tab, thd, nullptr, false);
+    } else if (err == 4) {
+      /* Could not open existing table. Definition may contain bad SQL. */
+      error = DB_ERROR;
     }
   }
 
-  error = row_drop_table_for_mysql(norm_name, trx, true, handler);
+  /* Don't drop what we can't open; otherwise, we'll hit asserts later. */
+  if ((error == DB_SUCCESS) &&
+      ((error = row_drop_table_for_mysql(norm_name, trx, true, handler)) ==
+       DB_SUCCESS)) {
+    if (handler != nullptr) {
+      priv->unregister_table_handler(norm_name);
+    }
 
-  if (handler != nullptr && error == DB_SUCCESS) {
-    priv->unregister_table_handler(norm_name);
-  }
+    if (file_per_table) {
+      dd::Object_id dd_space_id = dd_first_index(dd_tab)->tablespace_id();
+      dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
+      dd::cache::Dictionary_client::Auto_releaser releaser(client);
 
-  if (error == DB_SUCCESS && file_per_table) {
-    dd::Object_id dd_space_id = dd_first_index(dd_tab)->tablespace_id();
-    dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
-    dd::cache::Dictionary_client::Auto_releaser releaser(client);
-
-    if (dd_drop_tablespace(client, dd_space_id)) {
-      error = DB_ERROR;
+      if (dd_drop_tablespace(client, dd_space_id)) {
+        error = DB_ERROR;
+      }
     }
   }
 
@@ -18465,6 +18519,16 @@ int ha_innobase::check(THD *thd,                /*!< in: user thread handle */
     /* Scan this index. */
     if (dict_index_is_spatial(index)) {
       ret = row_count_rtree_recs(m_prebuilt, &n_rows, &n_dups);
+      if ((check_opt->flags & T_EXTEND) && (ret == DB_SUCCESS) &&
+          !(n_rows < n_rows_in_table || n_dups < n_rows - n_rows_in_table)) {
+        /* For CHECK TABLE EXTENDED; we also want to make sure that MBR stored
+        in SPATIAL Index is matching the MBR of geometry stored in Clustered
+        record. */
+        m_prebuilt->need_to_access_clustered = true;
+        n_rows = 0;
+        n_dups = 0;
+        ret = row_count_rtree_recs(m_prebuilt, &n_rows, &n_dups);
+      }
     } else {
       ret = row_scan_index_for_mysql(m_prebuilt, index, max_threads, true,
                                      &n_rows);
@@ -18601,7 +18665,7 @@ int ha_innobase::extra(enum ha_extra_function operation)
       m_prebuilt->no_autoinc_locking = true;
       break;
     default: /* Do nothing */
-             ;
+        ;
   }
 
   return (0);
@@ -20107,7 +20171,10 @@ int ha_innobase::cmp_ref(
     }
 
     if (result) {
-      return (result);
+      if (key_part->key_part_flag & HA_REVERSE_SORT) {
+        result = -result;
+      }
+      return result;
     }
 
     ref1 += key_part->store_length;
@@ -20746,11 +20813,10 @@ in status code only if no other resize is in progress */
 
     if (innodb_buffer_pool_size_validate(thd, requested_buffer_pool_size,
                                          aligned_buffer_pool_size)) {
-      os_event_set(srv_buf_resize_event);
-
       ib::info(ER_IB_MSG_573)
           << export_vars.innodb_buffer_pool_resize_status
           << " (new size: " << aligned_buffer_pool_size << " bytes)";
+      os_event_set(srv_buf_resize_event);
 
       *static_cast<longlong *>(var_ptr) = aligned_buffer_pool_size;
     } else {
@@ -20846,8 +20912,10 @@ static void innodb_adaptive_hash_index_update(
                       from check function */
 {
   if (*(bool *)save) {
+    srv_btr_search_enabled = true;
     btr_search_enable();
   } else {
+    srv_btr_search_enabled = false;
     btr_search_disable();
   }
 }
@@ -22168,7 +22236,7 @@ static MYSQL_SYSVAR_BOOL(
 static MYSQL_SYSVAR_ULONG(
     io_capacity, srv_io_capacity, PLUGIN_VAR_RQCMDARG,
     "Number of IOPs the server can do. Tunes the background IO rate", nullptr,
-    innodb_io_capacity_update, 10000, 100, ~0UL, 0);
+    innodb_io_capacity_update, 10000, 100, SRV_MAX_IO_CAPACITY_LIMIT, 0);
 
 static MYSQL_SYSVAR_ULONG(io_capacity_max, srv_max_io_capacity,
                           PLUGIN_VAR_RQCMDARG,
@@ -22345,7 +22413,7 @@ static MYSQL_SYSVAR_ULONG(
 static MYSQL_SYSVAR_ULONG(
     max_purge_lag, srv_max_purge_lag, PLUGIN_VAR_RQCMDARG,
     "Desired maximum length of the purge queue (0 = no limit)", nullptr,
-    nullptr, 0, 0, ~0UL, 0);
+    nullptr, 0, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(max_purge_lag_delay, srv_max_purge_lag_delay,
                           PLUGIN_VAR_RQCMDARG,
@@ -22420,7 +22488,7 @@ static MYSQL_SYSVAR_ULONG(
     replication_delay, srv_replication_delay, PLUGIN_VAR_RQCMDARG,
     "Replication thread delay (ms) on the slave server if"
     " innodb_thread_concurrency is reached (0 by default)",
-    nullptr, nullptr, 0, 0, ~0UL, 0);
+    nullptr, nullptr, 0, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_UINT(
     compression_level, page_zip_level, PLUGIN_VAR_RQCMDARG,
@@ -22617,7 +22685,7 @@ static MYSQL_SYSVAR_BOOL(
 static MYSQL_SYSVAR_ULONG(lru_scan_depth, srv_LRU_scan_depth,
                           PLUGIN_VAR_RQCMDARG,
                           "How deep to scan LRU to keep it clean", nullptr,
-                          nullptr, 1024, 100, ~0UL, 0);
+                          nullptr, 1024, 100, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(flush_neighbors, srv_flush_neighbors,
                           PLUGIN_VAR_OPCMDARG,
@@ -22637,7 +22705,7 @@ static MYSQL_SYSVAR_ULONG(concurrency_tickets, srv_n_free_tickets_to_enter,
                           "Number of times a thread is allowed to enter InnoDB "
                           "within the same SQL query after it has once got the "
                           "ticket",
-                          nullptr, nullptr, 5000L, 1L, UINT_MAX, 0);
+                          nullptr, nullptr, 5000L, 1L, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_BOOL(
     deadlock_detect, innobase_deadlock_detect, PLUGIN_VAR_NOCMDARG,
@@ -22808,7 +22876,7 @@ static MYSQL_SYSVAR_UINT(
     log_spin_cpu_abs_lwm, srv_log_spin_cpu_abs_lwm, PLUGIN_VAR_RQCMDARG,
     "Minimum value of cpu time for which spin-delay is used."
     " Expressed in percentage of single cpu core.",
-    nullptr, nullptr, INNODB_LOG_SPIN_CPU_ABS_LWM_DEFAULT, 0, UINT_MAX, 0);
+    nullptr, nullptr, INNODB_LOG_SPIN_CPU_ABS_LWM_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_UINT(
     log_spin_cpu_pct_hwm, srv_log_spin_cpu_pct_hwm, PLUGIN_VAR_RQCMDARG,
@@ -22822,7 +22890,7 @@ static MYSQL_SYSVAR_ULONG(
     "Maximum value of average log flush time for which spin-delay is used."
     " When flushing takes longer, user threads no longer spin when waiting for"
     "flushed redo. Expressed in microseconds.",
-    nullptr, nullptr, INNODB_LOG_WAIT_FOR_FLUSH_SPIN_HWM_DEFAULT, 0, ULONG_MAX,
+    nullptr, nullptr, INNODB_LOG_WAIT_FOR_FLUSH_SPIN_HWM_DEFAULT, 0, UINT32_MAX,
     0);
 
 #ifdef ENABLE_EXPERIMENT_SYSVARS
@@ -22860,89 +22928,89 @@ static MYSQL_SYSVAR_ULONG(
     "Number of spin iterations, when spinning and waiting for log buffer"
     " written up to given LSN, before we fallback to loop with sleeps."
     " This is not used when user thread has to wait for log flushed to disk.",
-    NULL, NULL, INNODB_LOG_WAIT_FOR_WRITE_SPIN_DELAY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_WAIT_FOR_WRITE_SPIN_DELAY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_wait_for_write_timeout, srv_log_wait_for_write_timeout,
     PLUGIN_VAR_RQCMDARG,
     "Timeout used when waiting for redo write (microseconds).", NULL, NULL,
-    INNODB_LOG_WAIT_FOR_WRITE_TIMEOUT_DEFAULT, 0, ULONG_MAX, 0);
+    INNODB_LOG_WAIT_FOR_WRITE_TIMEOUT_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_wait_for_flush_spin_delay, srv_log_wait_for_flush_spin_delay,
     PLUGIN_VAR_RQCMDARG,
     "Number of spin iterations, when spinning and waiting for log flushed.",
-    NULL, NULL, INNODB_LOG_WAIT_FOR_FLUSH_SPIN_DELAY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_WAIT_FOR_FLUSH_SPIN_DELAY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_wait_for_flush_timeout, srv_log_wait_for_flush_timeout,
     PLUGIN_VAR_RQCMDARG,
     "Timeout used when waiting for redo flush (microseconds).", NULL, NULL,
-    INNODB_LOG_WAIT_FOR_FLUSH_TIMEOUT_DEFAULT, 0, ULONG_MAX, 0);
+    INNODB_LOG_WAIT_FOR_FLUSH_TIMEOUT_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_write_max_size, srv_log_write_max_size, PLUGIN_VAR_RQCMDARG,
     "Size available for next write, which satisfies log_writer thread"
     " when it follows links in recent written buffer.",
-    NULL, NULL, INNODB_LOG_WRITE_MAX_SIZE_DEFAULT, 0, ULONG_MAX,
+    NULL, NULL, INNODB_LOG_WRITE_MAX_SIZE_DEFAULT, 0, UINT32_MAX,
     OS_FILE_LOG_BLOCK_SIZE);
 
 static MYSQL_SYSVAR_ULONG(
     log_writer_spin_delay, srv_log_writer_spin_delay, PLUGIN_VAR_RQCMDARG,
     "Number of spin iterations, for which log writer thread is waiting"
     " for new data to write without sleeping.",
-    NULL, NULL, INNODB_LOG_WRITER_SPIN_DELAY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_WRITER_SPIN_DELAY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_writer_timeout, srv_log_writer_timeout, PLUGIN_VAR_RQCMDARG,
     "Initial timeout used to wait on event in log writer thread (microseconds)",
-    NULL, NULL, INNODB_LOG_WRITER_TIMEOUT_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_WRITER_TIMEOUT_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_checkpoint_every, srv_log_checkpoint_every, PLUGIN_VAR_RQCMDARG,
     "Checkpoints are executed at least every that many milliseconds.", NULL,
-    NULL, INNODB_LOG_CHECKPOINT_EVERY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, INNODB_LOG_CHECKPOINT_EVERY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_flusher_spin_delay, srv_log_flusher_spin_delay, PLUGIN_VAR_RQCMDARG,
     "Number of spin iterations, for which log flusher thread is waiting"
     " for new data to flush, without sleeping.",
-    NULL, NULL, INNODB_LOG_FLUSHER_SPIN_DELAY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_FLUSHER_SPIN_DELAY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(log_flusher_timeout, srv_log_flusher_timeout,
                           PLUGIN_VAR_RQCMDARG,
                           "Initial timeout used to wait on event in log "
                           "flusher thread (microseconds)",
                           NULL, NULL, INNODB_LOG_FLUSHER_TIMEOUT_DEFAULT, 0,
-                          ULONG_MAX, 0);
+                          UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_write_notifier_spin_delay, srv_log_write_notifier_spin_delay,
     PLUGIN_VAR_RQCMDARG,
     "Number of spin iterations, for which log write notifier thread is waiting"
     " for advanced write_lsn, without sleeping.",
-    NULL, NULL, INNODB_LOG_WRITE_NOTIFIER_SPIN_DELAY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_WRITE_NOTIFIER_SPIN_DELAY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_write_notifier_timeout, srv_log_write_notifier_timeout,
     PLUGIN_VAR_RQCMDARG,
     "Initial timeout used to wait on event in log write notifier thread"
     " (microseconds)",
-    NULL, NULL, INNODB_LOG_WRITE_NOTIFIER_TIMEOUT_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_WRITE_NOTIFIER_TIMEOUT_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_flush_notifier_spin_delay, srv_log_flush_notifier_spin_delay,
     PLUGIN_VAR_RQCMDARG,
     "Number of spin iterations, for which log flush notifier thread is waiting"
     " for advanced flushed_to_disk_lsn, without sleeping.",
-    NULL, NULL, INNODB_LOG_FLUSH_NOTIFIER_SPIN_DELAY_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_FLUSH_NOTIFIER_SPIN_DELAY_DEFAULT, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     log_flush_notifier_timeout, srv_log_flush_notifier_timeout,
     PLUGIN_VAR_RQCMDARG,
     "Initial timeout used to wait on event in log flush notifier thread"
     " (microseconds)",
-    NULL, NULL, INNODB_LOG_FLUSH_NOTIFIER_TIMEOUT_DEFAULT, 0, ULONG_MAX, 0);
+    NULL, NULL, INNODB_LOG_FLUSH_NOTIFIER_TIMEOUT_DEFAULT, 0, UINT32_MAX, 0);
 
 #endif /* ENABLE_EXPERIMENT_SYSVARS */
 
@@ -22956,17 +23024,17 @@ static MYSQL_SYSVAR_UINT(
     "Move blocks to the 'new' end of the buffer pool if the first access"
     " was at least this many milliseconds ago."
     " The timeout is disabled if 0.",
-    nullptr, nullptr, 1000, 0, UINT_MAX32, 0);
+    nullptr, nullptr, 1000, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_LONG(
     open_files, innobase_open_files, PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
     "How many files at the maximum InnoDB keeps open at the same time.",
-    nullptr, nullptr, 0L, 0L, LONG_MAX, 0);
+    nullptr, nullptr, 0L, 0L, INT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     sync_spin_loops, srv_n_spin_wait_rounds, PLUGIN_VAR_RQCMDARG,
     "Count of spin-loop rounds in InnoDB mutexes (30 by default)", nullptr,
-    nullptr, 30L, 0L, ~0UL, 0);
+    nullptr, 30L, 0L, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(
     spin_wait_delay, srv_spin_wait_delay, PLUGIN_VAR_OPCMDARG,
@@ -23159,7 +23227,8 @@ static MYSQL_SYSVAR_ENUM(
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG
 static MYSQL_SYSVAR_UINT(
     change_buffering_debug, ibuf_debug, PLUGIN_VAR_RQCMDARG,
-    "Debug flags for InnoDB change buffering (0=none, 2=crash at merge)",
+    "Debug flags for InnoDB change buffering (0=none, 1= evict the blocks from "
+    "the buffer pool as much possible,  2=crash at merge)",
     nullptr, nullptr, 0, 0, 2, 0);
 
 static MYSQL_SYSVAR_BOOL(disable_background_merge,
@@ -23285,7 +23354,7 @@ static MYSQL_SYSVAR_UINT(
     limit_optimistic_insert_debug, btr_cur_limit_optimistic_insert_debug,
     PLUGIN_VAR_RQCMDARG,
     "Artificially limit the number of records per B-tree page (0=unlimited).",
-    nullptr, nullptr, 0, 0, UINT_MAX32, 0);
+    nullptr, nullptr, 0, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_BOOL(trx_purge_view_update_only_debug,
                          srv_purge_view_update_only_debug, PLUGIN_VAR_NOCMDARG,
@@ -23298,12 +23367,12 @@ static MYSQL_SYSVAR_BOOL(trx_purge_view_update_only_debug,
 static MYSQL_SYSVAR_ULONG(fil_make_page_dirty_debug,
                           srv_fil_make_page_dirty_debug, PLUGIN_VAR_OPCMDARG,
                           "Make the first page of the given tablespace dirty.",
-                          nullptr, innodb_make_page_dirty, UINT_MAX32, 0,
-                          UINT_MAX32, 0);
+                          nullptr, innodb_make_page_dirty, UINT32_MAX, 0,
+                          UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(saved_page_number_debug, srv_saved_page_number_debug,
                           PLUGIN_VAR_OPCMDARG, "An InnoDB page number.",
-                          nullptr, innodb_save_page_no, 0, 0, UINT_MAX32, 0);
+                          nullptr, innodb_save_page_no, 0, 0, UINT32_MAX, 0);
 
 static MYSQL_SYSVAR_BOOL(page_cleaner_disabled_debug,
                          innodb_page_cleaner_disabled_debug,
@@ -23354,8 +23423,8 @@ static MYSQL_THDVAR_STR(interpreter, PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_NOPERSIST,
 /** When testing commands are executed in the innodb_interpreter variable, the
 output is stored in this innodb_interpreter_output variable. */
 static MYSQL_THDVAR_STR(interpreter_output,
-                        PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_MEMALLOC |
-                            PLUGIN_VAR_NOPERSIST,
+                        PLUGIN_VAR_READONLY | PLUGIN_VAR_OPCMDARG |
+                            PLUGIN_VAR_MEMALLOC | PLUGIN_VAR_NOPERSIST,
                         "Output from InnoDB testing module (ut0test).", nullptr,
                         nullptr, "The Default Value");
 
@@ -23653,11 +23722,10 @@ int ha_innobase::multi_range_read_next(char **range_info) {
   return (m_ds_mrr.dsmrr_next(range_info));
 }
 
-ha_rows ha_innobase::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
-                                                 void *seq_init_param,
-                                                 uint n_ranges, uint *bufsz,
-                                                 uint *flags,
-                                                 Cost_estimate *cost) {
+ha_rows ha_innobase::multi_range_read_info_const(
+    uint keyno, RANGE_SEQ_IF *seq, void *seq_init_param, uint n_ranges,
+    uint *bufsz, uint *flags, bool *force_default_mrr [[maybe_unused]],
+    Cost_estimate *cost) {
   /* See comments in ha_myisam::multi_range_read_info_const */
   m_ds_mrr.init(table);
 
@@ -23741,53 +23809,25 @@ void innobase_rename_vc_templ(dict_table_t *table) {
   table->vc_templ->tb_name.assign(table_name);
 }
 
-dfield_t *innobase_get_field_from_update_vector(dict_foreign_t *foreign,
-                                                upd_t *update,
-                                                uint32_t col_no) {
-  dict_table_t *parent_table = foreign->referenced_table;
-  dict_index_t *parent_index = foreign->referenced_index;
-  uint32_t parent_field_no;
-  uint32_t parent_col_no;
-  uint32_t child_col_no;
-
-  for (uint32_t i = 0; i < foreign->n_fields; i++) {
-    child_col_no = foreign->foreign_index->get_col_no(i);
-    if (child_col_no != col_no) {
-      continue;
-    }
-    parent_col_no = parent_index->get_col_no(i);
-    parent_field_no = dict_table_get_nth_col_pos(parent_table, parent_col_no);
-    for (uint32_t j = 0; j < update->n_fields; j++) {
-      upd_field_t *parent_ufield = &update->fields[j];
-      if (parent_ufield->field_no == parent_field_no) {
-        return (&parent_ufield->new_val);
-      }
-    }
-  }
-
-  return (nullptr);
+/** Get the updated field value from an update vector for the given column
+number.
+@param[in]      update   the update vector for the table's clustered index
+@param[in]      col_no   the number of the non-virtual column in the table
+@return the field's new value if it's updated, otherwise nullptr */
+static const dfield_t *innobase_get_field_from_update_vector(
+    const upd_t *update, uint32_t col_no) {
+  const dict_index_t *const clustered_index = update->table->first_index();
+  const auto index_field_pos = clustered_index->get_col_pos(col_no);
+  const upd_field_t *const upd_field =
+      upd_get_field_by_field_no(update, index_field_pos, false);
+  return upd_field ? &upd_field->new_val : nullptr;
 }
 
-/** Get the computed value by supplying the base column values.
-@param[in,out]  row             the data row
-@param[in]      col             virtual column
-@param[in]      index           index on the virtual column
-@param[in,out]  local_heap      heap memory for processing large data etc.
-@param[in,out]  heap            memory heap that copies the actual index row
-@param[in]      ifield          index field
-@param[in]      thd             MySQL thread handle
-@param[in,out]  mysql_table     mysql table object
-@param[in]      old_table       during ALTER TABLE, this is the old table
-                                or NULL.
-@param[in]      parent_update   update vector for the parent row
-@param[in]      foreign         foreign key information
-@return the field filled with computed value, or NULL if just want
-to store the value in passed in "my_rec" */
 dfield_t *innobase_get_computed_value(
-    const dtuple_t *row, const dict_v_col_t *col, const dict_index_t *index,
-    mem_heap_t **local_heap, mem_heap_t *heap, const dict_field_t *ifield,
-    THD *thd, TABLE *mysql_table, const dict_table_t *old_table,
-    upd_t *parent_update, dict_foreign_t *foreign) {
+    const dtuple_t *row, const dict_v_col_t *col, const dict_table_t *table,
+    mem_heap_t **local_heap, mem_heap_t *heap, THD *thd, TABLE *mysql_table,
+    const dict_field_t *ifield, const dict_table_t *old_table,
+    upd_t *row_update) {
   byte rec_buf1[REC_VERSION_56_MAX_INDEX_COL_LEN];
   byte rec_buf2[REC_VERSION_56_MAX_INDEX_COL_LEN];
   byte *mysql_rec;
@@ -23797,36 +23837,27 @@ dfield_t *innobase_get_computed_value(
   ulong mv_length = 0;
   const char *mv_data_ptr = nullptr;
 
-  const page_size_t page_size = (old_table == nullptr)
-                                    ? dict_table_page_size(index->table)
-                                    : dict_table_page_size(old_table);
-
-  const dict_index_t *clust_index = nullptr;
-  if (old_table == nullptr) {
-    clust_index = index->table->first_index();
-  } else {
-    clust_index = old_table->first_index();
-  }
+  /* table definition to use for externally stored fields */
+  const dict_table_t *const ext_src_table = (old_table ? old_table : table);
+  const page_size_t page_size = dict_table_page_size(ext_src_table);
 
   ulint ret = 0;
 
-  ut_ad(index->table->vc_templ);
+  ut_ad(table->vc_templ);
   ut_ad(thd != nullptr);
 
   const mysql_row_templ_t *vctempl =
-      index->table->vc_templ
-          ->vtempl[index->table->vc_templ->n_col + col->v_pos];
+      table->vc_templ->vtempl[table->vc_templ->n_col + col->v_pos];
 
-  if (!heap ||
-      index->table->vc_templ->rec_len >= REC_VERSION_56_MAX_INDEX_COL_LEN) {
+  if (!heap || table->vc_templ->rec_len >= REC_VERSION_56_MAX_INDEX_COL_LEN) {
     if (*local_heap == nullptr) {
       *local_heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
     }
 
     mysql_rec = static_cast<byte *>(
-        mem_heap_alloc(*local_heap, index->table->vc_templ->rec_len));
+        mem_heap_alloc(*local_heap, table->vc_templ->rec_len));
     buf = static_cast<byte *>(
-        mem_heap_alloc(*local_heap, index->table->vc_templ->rec_len));
+        mem_heap_alloc(*local_heap, table->vc_templ->rec_len));
   } else {
     mysql_rec = rec_buf1;
     buf = rec_buf2;
@@ -23836,12 +23867,11 @@ dfield_t *innobase_get_computed_value(
     dict_col_t *base_col = col->base_col[i];
     const dfield_t *row_field = nullptr;
     uint32_t col_no = base_col->ind;
-    const mysql_row_templ_t *templ = index->table->vc_templ->vtempl[col_no];
+    const mysql_row_templ_t *const templ = table->vc_templ->vtempl[col_no];
     const byte *data;
 
-    if (parent_update != nullptr) {
-      row_field =
-          innobase_get_field_from_update_vector(foreign, parent_update, col_no);
+    if (row_update != nullptr) {
+      row_field = innobase_get_field_from_update_vector(row_update, col_no);
     }
 
     if (row_field == nullptr) {
@@ -23857,20 +23887,20 @@ dfield_t *innobase_get_computed_value(
       }
 
       data = lob::btr_copy_externally_stored_field(
-          thd_to_trx(thd), clust_index, &len, nullptr, data, page_size,
-          dfield_get_len(row_field), false, *local_heap);
+          thd_to_trx(thd), ext_src_table->first_index(), &len, nullptr, data,
+          page_size, dfield_get_len(row_field), false, *local_heap);
     }
 
     if (len == UNIV_SQL_NULL) {
       mysql_rec[templ->mysql_null_byte_offset] |=
           (byte)templ->mysql_null_bit_mask;
       memcpy(mysql_rec + templ->mysql_col_offset,
-             static_cast<const byte *>(index->table->vc_templ->default_rec +
+             static_cast<const byte *>(table->vc_templ->default_rec +
                                        templ->mysql_col_offset),
              templ->mysql_col_len);
     } else {
       row_sel_field_store_in_mysql_format(
-          mysql_rec + templ->mysql_col_offset, templ, index,
+          mysql_rec + templ->mysql_col_offset, templ, table->first_index(),
           templ->clust_rec_field_no, (const byte *)data, len, ULINT_UNDEFINED);
 
       if (templ->mysql_null_bit_mask) {
@@ -23905,7 +23935,7 @@ dfield_t *innobase_get_computed_value(
         only 1 byte, other BLOBs won't be affected */
         max_len = 255;
       } else {
-        max_len = DICT_MAX_FIELD_LEN_BY_FORMAT(index->table) + 1;
+        max_len = DICT_MAX_FIELD_LEN_BY_FORMAT(table) + 1;
       }
 
       byte *blob_mem = static_cast<byte *>(mem_heap_alloc(heap, max_len));
@@ -23915,8 +23945,8 @@ dfield_t *innobase_get_computed_value(
     }
 
     /* open a temporary table handle */
-    mysql_table = tblhdl.open(thd, index->table->vc_templ->db_name.c_str(),
-                              index->table->vc_templ->tb_name.c_str());
+    mysql_table = tblhdl.open(thd, table->vc_templ->db_name.c_str(),
+                              table->vc_templ->tb_name.c_str());
   }
   if (mysql_table) {
     ret = handler::my_eval_gcolumn_expr(
@@ -23953,8 +23983,8 @@ dfield_t *innobase_get_computed_value(
     json_binary::Value v(json_binary::parse_binary(mv_data_ptr, mv_length));
     multi_value_data *value = nullptr;
 
-    bool succ = innobase_store_multi_value(
-        v, value, fld, field, dict_table_is_comp(index->table), heap);
+    bool succ = innobase_store_multi_value(v, value, fld, field,
+                                           dict_table_is_comp(table), heap);
     if (!succ) {
       ut_error;
     }
@@ -23963,7 +23993,7 @@ dfield_t *innobase_get_computed_value(
   } else {
     row_mysql_store_col_in_innobase_format(
         field, buf, true, mysql_rec + vctempl->mysql_col_offset,
-        vctempl->mysql_col_len, dict_table_is_comp(index->table));
+        vctempl->mysql_col_len, dict_table_is_comp(table));
   }
   field->type.prtype |= DATA_VIRTUAL;
 

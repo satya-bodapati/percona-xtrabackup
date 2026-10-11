@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -123,8 +123,6 @@ FOREACH(X xcom_vp)
       WARN_MISSING_RPCGEN_EXECUTABLE()
       MESSAGE(FATAL_ERROR "Could not find rpcgen")
     ENDIF()
-
-    MYSQL_CHECK_RPC()
 
     MESSAGE(STATUS "RPC_INCLUDE_DIRS ${RPC_INCLUDE_DIRS}")
 

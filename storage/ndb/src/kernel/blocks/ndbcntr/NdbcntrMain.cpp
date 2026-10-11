@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -52,7 +52,7 @@
 #include <signaldata/TcKeyConf.hpp>
 #include <signaldata/TcKeyReq.hpp>
 #include <signaldata/WaitGCP.hpp>
-#include "config.h"  // WORDS_BIGENDIAN
+#include "my_config.h"  // WORDS_BIGENDIAN
 
 #include <signaldata/FsRemoveReq.hpp>
 #include <signaldata/ReadConfig.hpp>
@@ -91,12 +91,12 @@
 #define JAM_FILE_ID 458
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_NODE_STOP 1
-//#define DEBUG_LOCAL_SYSFILE 1
-//#define DEBUG_UNDO 1
-//#define DEBUG_REDO_CONTROL 1
-//#define DEBUG_NODE_GROUP_START 1
-//#define DEBUG_LCP 1
+// #define DEBUG_NODE_STOP 1
+// #define DEBUG_LOCAL_SYSFILE 1
+// #define DEBUG_UNDO 1
+// #define DEBUG_REDO_CONTROL 1
+// #define DEBUG_NODE_GROUP_START 1
+// #define DEBUG_LCP 1
 #endif
 
 #ifdef DEBUG_NODE_GROUP_START
@@ -2452,7 +2452,6 @@ void Ndbcntr::startWaitingNodes(Signal *signal) {
      * Let node perform restart
      */
     infoEvent("Start node: %u using %s", nodeId, start_type_str);
-    g_eventLogger->info("Start node: %u using %s", nodeId, start_type_str);
 
     CntrStartConf *conf = (CntrStartConf *)signal->getDataPtrSend();
     conf->noStartNodes = 1;
@@ -2669,21 +2668,11 @@ bool Ndbcntr::trySystemRestart(Signal *signal) {
 
   infoEvent("System Restart: master node: %u, num starting: %u, gci: %u",
             conf->masterNodeId, conf->noStartNodes, conf->startGci);
-  g_eventLogger->info(
-      "System Restart: master node: %u, num starting: %u,"
-      " gci: %u",
-      conf->masterNodeId, conf->noStartNodes, conf->startGci);
   char buf[NdbNodeBitmask::TextLength + 1];
   infoEvent("CNTR_START_CONF: started: %s", c_startedNodeSet.getText(buf));
   infoEvent("CNTR_START_CONF: cntr_started: %s",
             c_cntr_startedNodeSet.getText(buf));
   infoEvent("CNTR_START_CONF: starting: %s", c_start.m_starting.getText(buf));
-  g_eventLogger->info("CNTR_START_CONF: started: %s",
-                      c_startedNodeSet.getText(buf));
-  g_eventLogger->info("CNTR_START_CONF: cntr_started: %s",
-                      c_cntr_startedNodeSet.getText(buf));
-  g_eventLogger->info("CNTR_START_CONF: starting: %s",
-                      c_start.m_starting.getText(buf));
 
   Uint32 recNode = 0;
   NodeBitmask tmp_m_starting;
@@ -3099,7 +3088,7 @@ void Ndbcntr::ph5ALab(Signal *signal) {
       req->masterNodeId = cmasterNodeId;
 
       g_eventLogger->info("Start NDB start phase 5 (only to DBDIH)");
-      //#define TRACE_STTOR
+      // #define TRACE_STTOR
 #ifdef TRACE_STTOR
       g_eventLogger->info("sending NDB_STTOR(%d) to DIH", cinternalStartphase);
 #endif
@@ -4108,7 +4097,7 @@ void Ndbcntr::sendNdbSttor(Signal *signal) {
     req->config[i] = 0x88776655;
   }
 
-  //#define MAX_STARTPHASE 2
+  // #define MAX_STARTPHASE 2
 #ifdef TRACE_STTOR
   g_eventLogger->info("sending NDB_STTOR(%d) to %s", cinternalStartphase,
                       getBlockName(refToBlock(ndbBlocksPtr.p->blockref)));
@@ -4358,7 +4347,6 @@ void Ndbcntr::execSTOP_REQ(Signal *signal) {
     NdbNodeBitmask mask;
     mask.assign(NdbNodeBitmask::Size, c_stopRec.stopReq.nodes);
     infoEvent("Initiating shutdown abort of %s", mask.getText(buf));
-    g_eventLogger->info("Initiating shutdown abort of %s", mask.getText(buf));
 
     WaitGCPReq *req = (WaitGCPReq *)&signal->theData[0];
     req->senderRef = reference();
@@ -4892,7 +4880,6 @@ void Ndbcntr::execSTOP_CONF(Signal *signal) {
     NdbNodeBitmask mask;
     mask.assign(NdbNodeBitmask::Size, c_stopRec.stopReq.nodes);
     infoEvent("Stopping of %s", mask.getText(buf));
-    g_eventLogger->info("Stopping of %s", mask.getText(buf));
 
     /**
      * Kill any node...
@@ -4946,21 +4933,21 @@ void Ndbcntr::clearFilesystem(Signal *signal) {
   const Uint32 DD = CLEAR_DX + CLEAR_LCP + CLEAR_DD;
 
   if (c_fsRemoveCount < DX) {
-    FsOpenReq::setVersion(req->fileNumber, 3);
+    FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_DISK);
     FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_CTL);  // Can by any...
     FsOpenReq::v1_setDisk(req->fileNumber, c_fsRemoveCount);
   } else if (c_fsRemoveCount < LCP) {
-    FsOpenReq::setVersion(req->fileNumber, 5);
+    FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_LCP);
     FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_DATA);
     FsOpenReq::v5_setLcpNo(req->fileNumber, c_fsRemoveCount - CLEAR_DX);
     FsOpenReq::v5_setTableId(req->fileNumber, 0);
     FsOpenReq::v5_setFragmentId(req->fileNumber, 0);
   } else if (c_fsRemoveCount < DD) {
     req->ownDirectory = 0;
-    FsOpenReq::setVersion(req->fileNumber, 6);
+    FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_BASEPATH);
     FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_DATA);
-    FsOpenReq::v5_setLcpNo(req->fileNumber,
-                           FsOpenReq::BP_DD_DF + c_fsRemoveCount - LCP);
+    FsOpenReq::v6_setBasePath(req->fileNumber,
+                              FsOpenReq::BP_DD_DF + c_fsRemoveCount - LCP);
   } else {
     ndbabort();
   }
@@ -5322,7 +5309,10 @@ void Ndbcntr::Missra::sendNextSTTOR(Signal *signal) {
   }
 #endif
 
+#define DISPLAY(nodeGroup) (nodeGroup == RNIL ? 65536 : nodeGroup)
+
   g_eventLogger->info("Node started");
+  g_eventLogger->info("Node group %d.", DISPLAY(cntr.getNodeState().nodeGroup));
 
   signal->theData[0] = NDB_LE_NDBStartCompleted;
   signal->theData[1] = NDB_VERSION;
@@ -5357,6 +5347,8 @@ void Ndbcntr::execCREATE_NODEGROUP_IMPL_REQ(Signal *signal) {
     if (save != c_nodeGroup) {
       jam();
       updateNodeState(signal, getNodeState());
+      g_eventLogger->info("Now in node group %d due to CREATE NODEGROUP.",
+                          DISPLAY(c_nodeGroup));
     }
   }
 
@@ -5384,6 +5376,8 @@ void Ndbcntr::execDROP_NODEGROUP_IMPL_REQ(Signal *signal) {
     if (save != c_nodeGroup) {
       jam();
       updateNodeState(signal, getNodeState());
+      g_eventLogger->info("Now in node group %d due to DROP NODEGROUP.",
+                          DISPLAY(c_nodeGroup));
     }
   }
 
@@ -5618,7 +5612,7 @@ void Ndbcntr::open_secretsfile(Signal *signal, Uint32 secretsfile_num,
   req->userReference = reference();
   req->userPointer = SecretsFileOperationRecord::FILE_ID;
 
-  FsOpenReq::setVersion(req->fileNumber, 1);
+  FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_BLOCK);
   FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_SYSFILE);
   FsOpenReq::v1_setDisk(req->fileNumber, 1);
   FsOpenReq::v1_setTable(req->fileNumber, -1);
@@ -5661,7 +5655,7 @@ void Ndbcntr::open_secretsfile(Signal *signal, Uint32 secretsfile_num,
   req->fileFlags |= FsOpenReq::OM_ENCRYPT_PASSWORD;
 
   LinearSectionPtr lsptr[3];
-  ndbrequire(FsOpenReq::getVersion(req->fileNumber) != 4);
+  ndbrequire(FsOpenReq::getVersion(req->fileNumber) != FsOpenReq::V_FILENAME);
   lsptr[FsOpenReq::FILENAME].p = nullptr;
   lsptr[FsOpenReq::FILENAME].sz = 0;
 
@@ -6005,6 +5999,7 @@ void Ndbcntr::execFSREADREF(Signal *signal) {
         c_local_sysfile.m_state == LocalSysfile::READ_FILE_1) {
       jam();
       handle_read_refuse(signal);
+      return;
     }
     jamLine(c_local_sysfile.m_state);
     ndbabort();

@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -36,6 +36,7 @@
 
 #include "plugin/x/src/xpl_performance_schema.h"
 #include "sql/replication.h"
+#include "sql/ssl_acceptor_context_operator.h"
 #include "unittest/gunit/xplugin/xpl/mock/component_services.h"
 
 #ifdef HAVE_ARPA_INET_H
@@ -51,6 +52,10 @@
 const char *my_localhost;
 std::atomic<int32> connection_events_loop_aborted_flag;
 bool opt_initialize = false;
+
+Ssl_acceptor_context_container *mysql_main;
+
+bool Lock_and_access_ssl_acceptor_context::have_ssl() { return true; }
 
 int ip_to_hostname(struct sockaddr_storage *, const char *, char **,
                    uint32_t *) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -692,7 +692,7 @@ static bool read_histograms(THD *thd, TABLE_SHARE *share,
   }
 
   if (share->m_histograms->insert(table_histograms)) return true;
-  table_histograms_guard.commit();  // Ownership transferred.
+  table_histograms_guard.release();  // Ownership transferred.
   return false;
 }
 
@@ -7916,7 +7916,7 @@ Field *find_field_in_table_ref(THD *thd, Table_ref *table_list,
                                const char *name, size_t length,
                                const char *item_name, const char *db_name,
                                const char *table_name, Item **ref,
-                               ulong want_privilege, bool allow_rowid,
+                               Access_bitmask want_privilege, bool allow_rowid,
                                uint *field_index_ptr, bool register_tree_change,
                                Table_ref **actual_table) {
   Field *fld;
@@ -8100,7 +8100,8 @@ Field *find_field_in_table_sef(TABLE *table, const char *name) {
 Field *find_field_in_tables(THD *thd, Item_ident *item, Table_ref *first_table,
                             Table_ref *last_table, Item **ref,
                             find_item_error_report_type report_error,
-                            ulong want_privilege, bool register_tree_change) {
+                            Access_bitmask want_privilege,
+                            bool register_tree_change) {
   Field *found = nullptr;
   const char *db = item->db_name;
   const char *table_name = item->table_name;
@@ -9156,7 +9157,7 @@ bool resolve_var_assignments(THD *thd, LEX *lex) {
         for update.
 */
 
-bool setup_fields(THD *thd, ulong want_privilege, bool allow_sum_func,
+bool setup_fields(THD *thd, Access_bitmask want_privilege, bool allow_sum_func,
                   bool split_sum_funcs, bool column_update,
                   const mem_root_deque<Item *> *typed_items,
                   mem_root_deque<Item *> *fields,
@@ -10072,8 +10073,10 @@ bool fill_record_n_invoke_before_triggers(
     }
 
     table->triggers->disable_fields_temporary_nullability();
+    rc = rc || check_inserting_record(thd, table->field);
+    table->triggers->reset_field_nulls();
 
-    return rc || check_inserting_record(thd, table->field);
+    return rc;
   } else {
     if (fill_record(thd, table, fields, values, nullptr, nullptr,
                     raise_autoinc_has_expl_non_null_val))

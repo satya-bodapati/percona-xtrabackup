@@ -1,6 +1,6 @@
 /************************************************************************
                       Mysql Enterprise Backup
- Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+ Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -347,8 +347,8 @@ bool Backup_page_tracker::page_track_get_changed_pages_init(UDF_INIT *,
    Callback method for initialization of UDF
    "mysqlbackup_page_track_get_changed_pages".
 */
-void Backup_page_tracker::page_track_get_changed_pages_deinit(UDF_INIT *initid [
-    [maybe_unused]]) {
+void Backup_page_tracker::page_track_get_changed_pages_deinit(
+    UDF_INIT *initid [[maybe_unused]]) {
   free(m_changed_pages_buf);
   m_changed_pages_buf = nullptr;
 }

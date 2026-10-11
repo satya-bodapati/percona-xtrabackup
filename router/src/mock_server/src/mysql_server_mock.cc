@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -85,7 +85,7 @@ MySQLServerMock::MySQLServerMock(net::io_context &io_ctx,
 void MySQLServerMock::close_all_connections() {
   client_sessions_([](auto &socks) {
     for (auto &conn : socks) {
-      conn->cancel();
+      conn->terminate();
     }
   });
 }
@@ -112,7 +112,8 @@ class Acceptor {
                                              uint16_t port) {
     net::ip::tcp::resolver resolver(io_ctx_);
 
-    auto resolve_res = resolver.resolve(address, std::to_string(port));
+    auto resolve_res = resolver.resolve(address, std::to_string(port),
+                                        net::ip::resolver_base::passive);
     if (!resolve_res) return stdx::unexpected(resolve_res.error());
 
     for (auto ainfo : resolve_res.value()) {
@@ -145,12 +146,11 @@ class Acceptor {
     auto session_it = client_sessions_([&](auto &socks) {
       if (protocol_name_ == "classic") {
         socks.emplace_back(std::make_unique<MySQLServerMockSessionClassic>(
-            MySQLClassicProtocol{std::move(client_sock), client_ep_,
-                                 tls_server_ctx_},
+            std::move(client_sock), client_ep_, tls_server_ctx_,
             std::move(reader), false, with_tls_));
       } else {
         socks.emplace_back(std::make_unique<MySQLServerMockSessionX>(
-            MySQLXProtocol{std::move(client_sock), client_ep_, tls_server_ctx_},
+            std::move(client_sock), client_ep_, tls_server_ctx_,
             std::move(reader), false, with_tls_));
       }
       return std::prev(socks.end());

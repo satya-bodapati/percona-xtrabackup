@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -37,10 +37,12 @@ The tablespace memory cache */
 #include <fcntl.h>
 #include <sys/types.h>
 
+#include <scope_guard.h>
 #include "arch0page.h"
 #include "btr0btr.h"
 #include "buf0buf.h"
 #include "buf0flu.h"
+#include "clone0api.h"
 #include "dict0boot.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
@@ -58,14 +60,13 @@ The tablespace memory cache */
 #include "mem0mem.h"
 #include "mtr0log.h"
 #include "my_dbug.h"
-#include "ut0new.h"
-
-#include "clone0api.h"
 #include "os0file.h"
 #include "page0zip.h"
 #include "sql/mysqld.h"  // lower_case_file_system
 #include "srv0srv.h"
 #include "srv0start.h"
+#include "univ.i"  // Using OS_PATH_SEPARATOR
+#include "ut0new.h"
 
 #ifndef UNIV_HOTBACKUP
 #include "buf0lru.h"
@@ -105,25 +106,27 @@ dberr_t dict_stats_rename_table(const char *old_name, const char *new_name,
 /** Used for collecting the data in boot_tablespaces() */
 namespace dd_fil {
 
-enum {
+struct Moved {
   /** DD Object ID */
-  OBJECT_ID,
+  dd::Object_id object_id;
 
   /** InnoDB tablspace ID */
-  SPACE_ID,
+  space_id_t space_id;
 
   /** DD/InnoDB tablespace name */
-  SPACE_NAME,
+  std::string space_name;
 
   /** Path in DD tablespace */
-  OLD_PATH,
+  std::string old_path;
 
   /** Path where it was found during the scan. */
-  NEW_PATH
-};
+  std::string new_path;
 
-using Moved = std::tuple<dd::Object_id, space_id_t, std::string, std::string,
-                         std::string>;
+  /** This tablespace has moved out of data directory but is missing the
+   DD_TABLE_DATA_DIRECTORY flag. This can happen before versions
+   8.0.38/8.4.1/9.0.0 */
+  bool dd_flag_missing;
+};
 
 using Tablespaces = std::vector<Moved>;
 }  // namespace dd_fil
@@ -328,9 +331,6 @@ enum fil_operation_t {
 
 /** The null file address */
 fil_addr_t fil_addr_null = {FIL_NULL, 0};
-
-/** Maximum number of pages to read to determine the space ID. */
-static const size_t MAX_PAGES_TO_READ = 1;
 
 #ifndef UNIV_HOTBACKUP
 /** Maximum number of shards supported. */
@@ -1021,6 +1021,9 @@ class Fil_shard {
 
   /** Flushes to disk possible writes cached by the OS. If the space does
   not exist or is being dropped, does not do anything.
+  The caller must own the shard mutex. The mutex might be released and
+  re-acquired before returning.
+
   @param[in]    space_id        file space ID (id of tablespace of the database)
 */
   void space_flush(space_id_t space_id);
@@ -1677,14 +1680,18 @@ class Fil_system {
   @param[in]    space_id        InnoDB tablespace ID
   @param[in]    space_name      Tablespace name
   @param[in]    old_path        Path to the old location
-  @param[in]    new_path        Path scanned from disk */
+  @param[in]    new_path        Path scanned from disk
+  @param[in]    dd_flag_missing This tablespace is outside default data
+                                directory but missing the
+                                DD_TABLE_DATA_DIRECTORY flag. This can
+                                happen before versions
+                                8.0.37/8.4.1/9.0.0 */
   void moved(dd::Object_id object_id, space_id_t space_id,
              const char *space_name, const std::string &old_path,
-             const std::string &new_path) {
-    auto tuple =
-        std::make_tuple(object_id, space_id, space_name, old_path, new_path);
-
-    m_moved.push_back(tuple);
+             const std::string &new_path, bool dd_flag_missing) {
+    std::lock_guard guard(m_moved_mutex);
+    m_moved.push_back(
+        {object_id, space_id, space_name, old_path, new_path, dd_flag_missing});
   }
 
   /** Check if a path is known to InnoDB.
@@ -1739,9 +1746,12 @@ class Fil_system {
     return (m_dirs.insert(space_id, filename));
   }
 
-  /** Get the tablespace ID from an .ibd and/or an undo tablespace. If the ID is
-  0 on the first page then try finding the ID with Datafile::find_space_id().
-  @param[in]    filename        File name to check
+  /** Get the tablespace ID from an .ibd and/or an undo tablespace. If the
+  read failed or the ID is 0 on the first page or there is a mismatch of
+  space_ids stored in FSP_SPACE_ID and FIL_PAGE_SPACE_ID, then try finding
+  the ID with Datafile::find_space_id(). This function should only be called
+  during server startup.
+  @param[in]      filename        File name to check
   @return s_invalid_space_id if not found, otherwise the space ID */
   [[nodiscard]] static space_id_t get_tablespace_id(
       const std::string &filename);
@@ -1888,6 +1898,9 @@ class Fil_system {
   /** List of tablespaces that have been relocated. We need to
   update the DD when it is safe to do so. */
   dd_fil::Tablespaces m_moved;
+
+  /** Mutex protecting the list of relocated tablespaces */
+  std::mutex m_moved_mutex;
 
   /** Tablespace directories scanned at startup */
   Tablespace_dirs m_dirs;
@@ -3229,11 +3242,11 @@ bool Fil_shard::open_file(fil_node_t *file) {
   if (file->is_raw_disk) {
     file->handle =
         os_file_create(innodb_data_file_key, file->name, OS_FILE_OPEN_RAW,
-                       OS_FILE_AIO, OS_DATA_FILE, read_only_mode, &success);
+                       OS_DATA_FILE, read_only_mode, &success);
   } else {
     file->handle =
         os_file_create(innodb_data_file_key, file->name, OS_FILE_OPEN,
-                       OS_FILE_AIO, OS_DATA_FILE, read_only_mode, &success);
+                       OS_DATA_FILE, read_only_mode, &success);
   }
 
   if (success) {
@@ -5253,6 +5266,7 @@ static void fil_name_write_rename(space_id_t space_id, const char *old_name,
 @param[in]      size            Number of bytes by which the file
                                 is extended starting from the offset
 @param[in,out]  mtr             Mini-transaction */
+<<<<<<< HEAD
 #ifdef XTRABACKUP
 [[maybe_unused]]
 #endif /* XTRABACKUP */
@@ -5261,6 +5275,15 @@ fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
                           os_offset_t size, mtr_t *mtr) {
   ut_ad(space_id != TRX_SYS_SPACE);
 
+||||||| dc86e412f18
+static void fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
+                                      os_offset_t size, mtr_t *mtr) {
+  ut_ad(space_id != TRX_SYS_SPACE);
+
+=======
+static void fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
+                                      os_offset_t size, mtr_t *mtr) {
+>>>>>>> mysql-8.4.11
   byte *log_ptr;
 
   if (!mlog_open(mtr, 7 + 8 + 8, log_ptr)) {
@@ -5287,11 +5310,17 @@ fil_op_write_space_extend(space_id_t space_id, os_offset_t offset,
   mach_write_to_8(log_ptr, size);
   log_ptr += 8;
 
-#ifdef UNIV_DEBUG
   ut_ad(log_ptr <= start_log + 23);
-#endif /*  UNIV_DEBUG */
 
   mlog_close(mtr, log_ptr);
+
+  DBUG_EXECUTE_IF(
+      "ib_redo_log_system_tablespace_expansion", if (space_id == 0) {
+        /* info message requires increasing the log level of the test,
+        and the test happens to produce the huge logs. Therefore, produce a
+        warning that doesn't require increasing the log level */
+        ib::warn() << "System tablespace expansion is redo logged.";
+      });
 }
 #endif
 #endif /* !UNIV_HOTBACKUP */
@@ -6032,9 +6061,8 @@ static dberr_t fil_create_tablespace(space_id_t space_id, const char *name,
 
   auto file = os_file_create(
       type == FIL_TYPE_TEMPORARY ? innodb_temp_file_key : innodb_data_file_key,
-      path, OS_FILE_CREATE | OS_FILE_ON_ERROR_NO_EXIT, OS_FILE_NORMAL,
-      OS_DATA_FILE, srv_read_only_mode && (type != FIL_TYPE_TEMPORARY),
-      &success);
+      path, OS_FILE_CREATE | OS_FILE_ON_ERROR_NO_EXIT, OS_DATA_FILE,
+      srv_read_only_mode && (type != FIL_TYPE_TEMPORARY), &success);
 
   if (!success) {
     /* purecov: begin inspected */
@@ -7064,6 +7092,7 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
 
     ut_ad(len > 0);
 
+<<<<<<< HEAD
 #if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP) && defined(UNIV_LINUX)
     /* Do not write redo log record for temporary tablespace
     and the system tablespace as they don't need to be recreated.
@@ -7073,6 +7102,23 @@ bool Fil_shard::space_extend(fil_space_t *space, page_no_t size) {
     not need to redo log any operations on it. */
     if (!recv_recovery_is_on() && space->purpose != FIL_TYPE_TEMPORARY &&
         space->id != TRX_SYS_SPACE) {
+||||||| dc86e412f18
+#if !defined(UNIV_HOTBACKUP) && defined(UNIV_LINUX)
+    /* Do not write redo log record for temporary tablespace
+    and the system tablespace as they don't need to be recreated.
+    Temporary tablespaces are reinitialized during startup and
+    hence need not be recovered during recovery. The system
+    tablespace is neither recreated nor resized and hence we do
+    not need to redo log any operations on it. */
+    if (!recv_recovery_is_on() && space->purpose != FIL_TYPE_TEMPORARY &&
+        space->id != TRX_SYS_SPACE) {
+=======
+#if !defined(UNIV_HOTBACKUP) && defined(UNIV_LINUX)
+    /* Do not write redo log, during replay and, for temporary tablespaces
+    because they are reinitialized during startup hence they need not be
+    recovered during replay. */
+    if (!recv_recovery_is_on() && space->purpose != FIL_TYPE_TEMPORARY) {
+>>>>>>> mysql-8.4.11
       /* Write the redo log record for extending the space */
       mtr_t mtr;
       mtr_start(&mtr);
@@ -8246,6 +8292,7 @@ dberr_t Fil_shard::do_io(const IORequest &type, bool sync,
 #ifndef UNIV_HOTBACKUP
     if (req_type.is_write() && bpage != nullptr && bpage->is_stale()) {
       ut_a(bpage->get_space()->id == page_id.space());
+      mutex_release();
       return DB_PAGE_IS_STALE;
     }
 #endif /* !UNIV_HOTBACKUP */
@@ -9680,6 +9727,16 @@ bool Fil_path::is_same_as(const std::string &other) const {
   return is_same_as(other_path);
 }
 
+Fil_path Fil_path::get_abs_directory() const {
+  std::string dir_path = split(abs_path()).first;
+  Fil_path directory{dir_path};
+  return directory;
+}
+
+bool Fil_path::is_dir_same_as(const Fil_path &other) const {
+  return get_abs_directory().is_same_as(other.get_abs_directory());
+}
+
 std::pair<std::string, std::string> Fil_path::split(const std::string &path) {
   const auto n = path.rfind(OS_PATH_SEPARATOR);
   ut_ad(n != std::string::npos);
@@ -10126,13 +10183,32 @@ Free the Tablespace_files instance.
 @param[in]      read_only_mode  true if InnoDB is started in read only mode.
 @return DB_SUCCESS if all OK */
 dberr_t Fil_system::prepare_open_for_business(bool read_only_mode) {
-  if (read_only_mode && !m_moved.empty()) {
-    ib::error(ER_IB_MSG_344)
-        << m_moved.size() << " files have been relocated"
-        << " and the server has been started in read"
-        << " only mode. Cannot update the data dictionary.";
+  if (m_moved.empty()) {
+    return DB_SUCCESS;
+  }
 
-    return DB_READ_ONLY;
+  if (read_only_mode) {
+    for (auto &tablespace : m_moved) {
+      auto old_path = tablespace.old_path;
+      auto new_path = tablespace.new_path;
+
+      /* m_moved might have 2 kinds of files
+      1. Files which are actually moved to other directory.
+      2. Files which are moved before upgrade and don't have
+         DD_TABLE_DATA_DIRECTORY flag updated in DD.
+
+      In case of [2], old_path and new_path will be equal.
+      In read only mode, we shall error out only in case of 1. */
+      if (old_path != new_path) {
+        ib::error(ER_IB_MSG_344)
+            << m_moved.size() << " files have been relocated"
+            << " and the server has been started in read"
+            << " only mode. Cannot update the data dictionary.";
+
+        return DB_READ_ONLY;
+      }
+    }
+    return DB_SUCCESS;
   }
 
   trx_t *trx = check_trx_exists(current_thd);
@@ -10150,17 +10226,21 @@ dberr_t Fil_system::prepare_open_for_business(bool read_only_mode) {
   size_t batch_size = 0;
   bool print_msg = false;
   auto start_time = std::chrono::steady_clock::now();
+  const auto dirs_in_datadir = Dirs_in_datadir::make();
 
   /* If some file paths have changed then update the DD */
   for (auto &tablespace : m_moved) {
     dberr_t err;
 
-    auto old_path = std::get<dd_fil::OLD_PATH>(tablespace);
+    auto old_path = tablespace.old_path;
 
-    auto space_name = std::get<dd_fil::SPACE_NAME>(tablespace);
+    auto space_name = tablespace.space_name;
 
-    auto new_path = std::get<dd_fil::NEW_PATH>(tablespace);
-    auto object_id = std::get<dd_fil::OBJECT_ID>(tablespace);
+    auto new_path = tablespace.new_path;
+
+    auto object_id = tablespace.object_id;
+
+    auto dd_flag_missing = tablespace.dd_flag_missing;
 
     /* We already have the space name in system cs. */
     err = dd_tablespace_rename(object_id, true, space_name.c_str(),
@@ -10173,6 +10253,30 @@ dberr_t Fil_system::prepare_open_for_business(bool read_only_mode) {
                                << " '" << new_path << "'";
 
       ++failed;
+    }
+
+    const Fil_path fpath_old{old_path};
+    const Fil_path fpath_new{new_path};
+    /* Check whether the path is changed from old_path to new_path
+    If not, update the data directory flag */
+    if (Fil_path::has_suffix(IBD, new_path)) {
+      /* We want to update the dd_table data dir flag for those ibd files which
+      are moved in this restart and thier current location is different from
+      where it is originally created. This flag also needs to updated if
+      dd_flag_missing is true since this flag represents those ibd files moved
+      in previous versions where fpath_old and fpath_new point to newly moved
+      location which is different from default data directory path. */
+      if (dd_flag_missing || !fpath_old.is_dir_same_as(fpath_new)) {
+        err = dd_update_table_and_partitions_after_dir_change(
+            object_id, fpath_new.abs_path(), dirs_in_datadir);
+
+        if (err != DB_SUCCESS) {
+          ib::error(ER_DD_UPDATE_DATADIR_FLAG_FAIL, object_id,
+                    space_name.c_str(), new_path.c_str());
+
+          ++failed;
+        }
+      }
     }
 
     /* Update persistent stat table if table name is modified. */
@@ -10250,32 +10354,76 @@ bool fil_op_replay_rename_for_ddl(const page_id_t &page_id,
 @param[in]      space_id                Tablespace ID to lookup
 @return true if the space ID is known. */
 bool Fil_system::lookup_for_recovery(space_id_t space_id) {
-  ut_ad(recv_recovery_is_on() || Log_DDL::is_in_recovery());
-
   /* Single threaded code, no need to acquire mutex. */
-  const auto result = get_scanned_filename_by_space_id(space_id);
+  const bool is_known =
+      get_scanned_filename_by_space_id(space_id).second != nullptr;
 
   if (recv_recovery_is_on()) {
-    const auto &end = recv_sys->deleted.end();
-    const auto &it = recv_sys->deleted.find(space_id);
+    /* Simple consistency checks */
+    if (is_known) {
+      /* It could only be in missing_ids if it was added here earlier,
+      because get_scanned_filename_by_space_id has not found it. But it
+      could not be a known space_id now, it would mean something went
+      quite wrong. */
+      ut_a(recv_sys->missing_ids.count(space_id) == 0);
 
-    if (result.second == nullptr) {
-      /* If it wasn't deleted after finding it on disk then
-      we tag it as missing. */
-
-      if (it == end) {
+      /* Every time a space_id is marked deleted, the path
+      is also removed from m_dirs. */
+      ut_a(recv_sys->deleted.count(space_id) == 0);
+    } else {
+      /* Should belong to exactly one of `deleted` or `missing_ids`, as whenever
+      adding to deleted we remove from missing_ids, and
+      we add to missing_ids only if it's not in deleted. */
+      if (recv_sys->deleted.count(space_id) != 0) {
+        ut_a(recv_sys->missing_ids.count(space_id) == 0);
+      } else {
         recv_sys->missing_ids.insert(space_id);
       }
-
-      return false;
     }
-
-    /* Check that it wasn't deleted. */
-
-    return (it == end);
+  } else {
+    ut_a(Log_DDL::is_in_recovery());
   }
 
-  return (result.second != nullptr);
+  return is_known;
+}
+
+/** Real path of the input directory
+@param[in]  dir  Directory path
+@return normalized real path, without trailing separator */
+static std::string fil_real_dir_for_lookup(const std::string &dir) {
+  auto real_dir = Fil_path::get_real_path(dir);
+  Fil_path::trim_separator(real_dir);
+
+  return real_dir;
+}
+
+Dirs_in_datadir Dirs_in_datadir::make() {
+  Dirs_in_datadir schema_dirs;
+  const auto datadir = MySQL_datadir_path.abs_path();
+
+  if (datadir.empty()) {
+    return schema_dirs;
+  }
+
+  Dir_Walker::walk(datadir, false, [&](const std::string &path) {
+    if (!Dir_Walker::is_directory(path)) {
+      return;
+    }
+
+    const auto schema_dir = fil_real_dir_for_lookup(path);
+
+    if (!schema_dir.empty()) {
+      schema_dirs.m_dirs.insert(schema_dir);
+    }
+  });
+
+  return schema_dirs;
+}
+
+bool Dirs_in_datadir::contains(const std::string &discovered_dir) const {
+  const auto real_dir = fil_real_dir_for_lookup(discovered_dir);
+
+  return !real_dir.empty() && m_dirs.find(real_dir) != m_dirs.end();
 }
 
 /** Lookup the tablespace ID.
@@ -10374,8 +10522,10 @@ dberr_t fil_open_for_reduced(const std::string &path) {
 
 Fil_state fil_tablespace_path_equals(space_id_t space_id,
                                      const char *space_name, ulint fsp_flags,
+                                     const Dirs_in_datadir &schema_dirs,
                                      std::string old_path,
                                      std::string *new_path) {
+  ut_a(!recv_recovery_is_on());
   ut_ad((fsp_is_ibd_tablespace(space_id) &&
          Fil_path::has_suffix(IBD, old_path)) ||
         fsp_is_undo_tablespace(space_id));
@@ -10399,9 +10549,6 @@ Fil_state fil_tablespace_path_equals(space_id_t space_id,
     undo::spaces->s_unlock();
   }
 
-  /* Single threaded code, no need to acquire mutex. */
-  const auto &end = recv_sys->deleted.end();
-  const auto &it = recv_sys->deleted.find(space_id);
   const auto result = fil_system->get_scanned_filename_by_space_id(space_id);
 
   if (result.second == nullptr) {
@@ -10422,19 +10569,16 @@ Fil_state fil_tablespace_path_equals(space_id_t space_id,
       return Fil_state::MATCHES;
     }
 
-    /* If it wasn't deleted during redo apply, we tag it as missing. */
-
-    if (it == end && recv_recovery_is_on()) {
-      recv_sys->missing_ids.insert(space_id);
-    }
-
     return Fil_state::MISSING;
   }
 
-  /* Check if it was deleted according to the redo log. */
-  if (it != end) {
-    return Fil_state::DELETED;
-  }
+  /* While we redo the MLOG_FILE_DELETE in the redo log recovery, we are adding
+  the space to the deleted list and we remove it from the tablespace_scanning
+  mapping. A space once deleted, can't be created with the same ID. So we should
+  never reach here with deleted space. We are running in context of threads of
+  DD validation. No one is modifying this data in parallel
+  so it is safe to read it without mutex protection. */
+  ut_a(recv_sys->deleted.count(space_id) == 0);
 
   /* A file with this space_id was found during scanning.
   Validate its location and check if it was moved from where
@@ -10478,20 +10622,87 @@ Fil_state fil_tablespace_path_equals(space_id_t space_id,
 
   new_dir.resize(pos + 1);
 
-  if (old_dir.compare(new_dir) != 0) {
+  if (old_dir != new_dir) {
     *new_path = result.first + result.second->front();
     return Fil_state::MOVED;
-  }
+  } else if (Fil_path::has_suffix(IBD, old_path) &&
+             !fsp_is_shared_tablespace(fsp_flags) &&
+             !schema_dirs.contains(new_dir)) {
+    /* We want to recognize those tables which are moved in previous versions
+    and mark the DD_TABLE_DATA_DIRECTORY flag as true as we need to make sure
+    dd_table is in sync with current status of the table. This condition is hit
+    by tables which are moved in previous versions of server
+    before 8.0.38/8.4.1/9.0. old dir and new dir will be same but different from
+    default schema dir. So marking these tables as MOVED_PREV which is referred
+    later to set the flag. The shared tablespace are ignored because they can't
+    have data directory flag.*/
 
+    const auto components = dict_name::parse_tablespace_path(old_path);
+    if (components.has_value()) {
+      auto thd = current_thd;
+      const auto table_info = components.value();
+      const dd::Table *dd_table = nullptr;
+      auto &dc = *thd->dd_client();
+      dd::cache::Dictionary_client::Auto_releaser releaser(&dc);
+      MDL_ticket *mdl_tkt = nullptr;
+
+      /* DD system thread is also one of the worker threads validating the
+      tablespaces but it doesn't need to take the shared MDL lock on the
+      table. The tablespaces alloted to each of the worker threads are
+      distinct.*/
+      if (!thd->is_dd_system_thread()) {
+        if (dd::acquire_shared_table_mdl(thd, table_info.schema_name.c_str(),
+                                         table_info.table_name.c_str(), true,
+                                         &mdl_tkt)) {
+          return Fil_state::COMPARE_ERROR;
+        }
+      }
+      auto guard = create_scope_guard([&]() {
+        if (!thd->is_dd_system_thread()) {
+          dd_release_mdl(mdl_tkt);
+        }
+      });
+
+      if (dc.acquire<dd::Table>(table_info.schema_name.c_str(),
+                                table_info.table_name.c_str(), &dd_table)) {
+        return Fil_state::COMPARE_ERROR;
+      }
+
+      /* dd_table may not exist for some system tables */
+      if (dd_table) {
+        if (dd_table_is_partitioned(*dd_table)) {
+          const dd::Partition *part_obj = dd_table->get_leaf_partition(
+              (!table_info.subpartition.empty()) ? table_info.subpartition
+                                                 : table_info.partition);
+          if (!part_obj) {
+            return Fil_state::COMPARE_ERROR;
+          }
+
+          if (!part_obj->se_private_data().exists(
+                  dd_table_key_strings[DD_TABLE_DATA_DIRECTORY])) {
+            *new_path = old_path;
+            return Fil_state::MOVED_PREV;
+          }
+        } else {
+          if (!dd_table->se_private_data().exists(
+                  dd_table_key_strings[DD_TABLE_DATA_DIRECTORY])) {
+            *new_path = old_path;
+            return Fil_state::MOVED_PREV;
+          }
+        }
+      }
+    }
+  }
   *new_path = old_path;
   return Fil_state::MATCHES;
 }
 
 void fil_add_moved_space(dd::Object_id dd_object_id, space_id_t space_id,
                          const char *space_name, const std::string &old_path,
-                         const std::string &new_path) {
+                         const std::string &new_path, bool dd_flag_missing) {
   /* Keep space_name in system cs. We handle it while modifying DD. */
-  fil_system->moved(dd_object_id, space_id, space_name, old_path, new_path);
+  fil_system->moved(dd_object_id, space_id, space_name, old_path, new_path,
+                    dd_flag_missing);
 }
 
 bool fil_update_partition_name(space_id_t space_id, uint32_t fsp_flags,
@@ -10568,20 +10779,21 @@ or MLOG_FILE_RENAME record. These could not be recovered.
         ignore redo log records during the apply phase */
 bool Fil_system::check_missing_tablespaces() {
   bool missing = false;
-  const auto end = recv_sys->deleted.end();
 
   /* Called in single threaded mode, no need to acquire the mutex. */
 
   recv_sys->dblwr->check_missing_tablespaces();
 
   for (auto space_id : recv_sys->missing_ids) {
-    if (recv_sys->deleted.find(space_id) != end) {
-      continue;
-    }
+    /* space_id can't belong to recv_sys->deleted, because whenever we insert
+    an id into it, we remove it from recv_sys->missing_ids, and we insert into
+    recv_sys->missing_ids only if it's not in recv_sys->deleted.
+    No space id should be present in both containers. */
+    ut_a(recv_sys->deleted.count(space_id) == 0);
 
-    const auto result = get_scanned_filename_by_space_id(space_id);
+    const auto result = get_scanned_filename_by_space_id(space_id).second;
 
-    if (result.second == nullptr) {
+    if (result == nullptr) {
       if (fsp_is_undo_tablespace(space_id)) {
         /* This could happen if an undo truncate is in progress because
         undo tablespace construction is not redo logged.  The DD is updated
@@ -10594,7 +10806,7 @@ bool Fil_system::check_missing_tablespaces() {
       missing = true;
 
     } else {
-      ut_a(!result.second->empty());
+      ut_a(!result->empty());
     }
   }
 
@@ -10966,35 +11178,53 @@ const byte *fil_tablespace_redo_extend(const byte *ptr, const byte *end,
     return ptr;
   }
 
+<<<<<<< HEAD
 #if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP)
   const auto result =
       fil_system->get_scanned_filename_by_space_id(page_id.space());
+||||||| dc86e412f18
+#ifndef UNIV_HOTBACKUP
+  const auto result =
+      fil_system->get_scanned_filename_by_space_id(page_id.space());
+=======
+#ifndef UNIV_HOTBACKUP
+  dberr_t err = DB_SUCCESS;
+  if (page_id.space() == TRX_SYS_SPACE) {
+    /* System tablespace must have been loaded in the fil system at the time
+    of server start up. Tablespace scanning of the fil system doesn't expect to
+    be probed for the system tablespace. */
+    ut_a(fil_space_t::s_sys_space);
+  } else {
+    const auto result =
+        fil_system->get_scanned_filename_by_space_id(page_id.space());
+>>>>>>> mysql-8.4.11
 
-  if (result.second == nullptr) {
-    /* No files found for this tablespace ID. It's possible that the
-    files were deleted later. */
-    return ptr;
-  }
-
-  dberr_t err = fil_tablespace_open_for_recovery(page_id.space());
-
-  if (err != DB_SUCCESS) {
-    /* fil_tablespace_open_for_recovery may fail if the tablespace being
-    opened is an undo tablespace which is also marked for truncation.
-    In such a case, skip processing this redo log further and goto the
-    next record without doing anything more here. */
-    if (fsp_is_undo_tablespace(page_id.space()) &&
-        undo::is_active_truncate_log_present(undo::id2num(page_id.space()))) {
+    if (result.second == nullptr) {
+      /* No files found for this tablespace ID. It's possible that the
+      files were deleted later. */
       return ptr;
     }
-    return nullptr;
-  }
 
-  /* Open the space */
-  bool success = fil_space_open(page_id.space());
+    err = fil_tablespace_open_for_recovery(page_id.space());
 
-  if (!success) {
-    return nullptr;
+    if (err != DB_SUCCESS) {
+      /* fil_tablespace_open_for_recovery may fail if the tablespace being
+      opened is an undo tablespace which is also marked for truncation.
+      In such a case, skip processing this redo log further and goto the
+      next record without doing anything more here. */
+      if (fsp_is_undo_tablespace(page_id.space()) &&
+          undo::is_active_truncate_log_present(undo::id2num(page_id.space()))) {
+        return ptr;
+      }
+      return nullptr;
+    }
+
+    /* Open the space */
+    bool success = fil_space_open(page_id.space());
+
+    if (!success) {
+      return nullptr;
+    }
   }
 
   fil_space_t *space = fil_space_get(page_id.space());
@@ -11054,7 +11284,7 @@ const byte *fil_tablespace_redo_extend(const byte *ptr, const byte *end,
 
 #if defined(UNIV_DEBUG)
   /* Validate that there are no pages in the buffer pool. */
-  buf_must_be_all_freed();
+  buf_assert_all_are_replaceable();
 #endif /* UNIV_DEBUG */
 
   /* Adjust the actual allocation size to take care of the allocation
@@ -11078,10 +11308,14 @@ const byte *fil_tablespace_redo_extend(const byte *ptr, const byte *end,
   /* Get the final size of the file and adjust file->size accordingly. */
   os_offset_t end_fsize = os_file_get_size(file->handle);
 
+  auto shard = fil_system->shard_by_id(page_id.space());
+  shard->mutex_acquire();
+
   file->size = end_fsize / phy_page_size;
   space->size = file->size;
 
-  fil_flush(space->id);
+  shard->space_flush(page_id.space());
+  shard->mutex_release();
 
   fil_space_close(space->id);
 #endif /* !UNIV_HOTBACKUP && !XTRABACKUP */
@@ -11560,116 +11794,65 @@ static bool fil_op_replay_rename(const page_id_t &page_id,
   return true;
 }
 
-/** Get the tablespace ID from an .ibd and/or an undo tablespace. If the ID is 0
-on the first page then try finding the ID with Datafile::find_space_id().
-@param[in]      filename        File name to check
-@return s_invalid_space_id if not found, otherwise the space ID */
 space_id_t Fil_system::get_tablespace_id(const std::string &filename) {
-  FILE *fp = fopen(filename.c_str(), "rb");
+  pfs_os_file_t file;
+  bool success;
 
-  if (fp == nullptr) {
+  /* Lambda function for heavy-duty method of finding the space id from
+  Datafile::find_space_id() which we fallback into, if the first page
+  cannot be read properly. */
+  const auto find_space_id_reliably = [&filename]() -> space_id_t {
+    Datafile data_file;
+
+    data_file.set_filepath(filename.c_str());
+    const dberr_t err = data_file.open_read_only(false);
+
+    ut_a(data_file.is_open());
+    ut_a(err == DB_SUCCESS);
+
+    /* Use the heavier Datafile::find_space_id() method to find the space id. */
+    return (data_file.find_space_id() == DB_SUCCESS)
+               ? data_file.space_id()
+               : dict_sys_t::s_invalid_space_id;
+  };
+
+  /* Open the file with O_DIRECT flag for faster access */
+  file = os_file_create(innodb_data_file_key, filename.c_str(), OS_FILE_OPEN,
+                        OS_DATA_FILE_FOR_SPACE_ID_READ, true, &success);
+  if (!success) {
+    os_file_get_last_error(true);
     ib::warn(ER_IB_MSG_372) << "Unable to open '" << filename << "'";
     return dict_sys_t::s_invalid_space_id;
   }
 
-  std::vector<space_id_t> space_ids;
-  auto page_size = srv_page_size;
+  space_id_t space_id = dict_sys_t::s_invalid_space_id;
 
-  space_ids.reserve(MAX_PAGES_TO_READ);
+  auto buf = ut::make_unique_aligned<byte[]>(srv_page_size, srv_page_size);
 
-  const auto n_bytes = page_size * MAX_PAGES_TO_READ;
+  IORequest request(IORequest::READ);
+  ulint bytes_read = 0;
+  /* Disable the warning if we try to read compressed tablespace which has
+  data less than the read size i.e., srv_page_size */
+  request.disable_partial_io_warnings();
 
-  std::unique_ptr<byte[]> buf(new byte[n_bytes]);
+  dberr_t err =
+      os_file_read_no_error_handling(request, filename.c_str(), file, buf.get(),
+                                     0, srv_page_size, &bytes_read);
 
-  if (!buf) {
-    return dict_sys_t::s_invalid_space_id;
+  os_file_close(file);
+
+  DBUG_EXECUTE_IF("invalid_header", bytes_read = 0;);
+
+  if (err != DB_SUCCESS || (bytes_read != srv_page_size)) {
+    /* Reading from the first page failed, falling back to heavy duty method */
+    return find_space_id_reliably();
   }
 
-  auto pages_read = fread(buf.get(), page_size, MAX_PAGES_TO_READ, fp);
+  /* Read the space_id from buf at offset FIL_PAGE_SPACE_ID */
+  space_id = fsp_header_get_space_id(buf.get());
 
-  DBUG_EXECUTE_IF("invalid_header", pages_read = 0;);
-
-  /* Find the space id from the pages read if enough pages could be read.
-  Fall back to the more heavier method of finding the space id from
-  Datafile::find_space_id() if pages cannot be read properly. */
-  if (pages_read >= MAX_PAGES_TO_READ) {
-    auto bytes_read = pages_read * page_size;
-
-#ifdef POSIX_FADV_DONTNEED
-    posix_fadvise(fileno(fp), 0, bytes_read, POSIX_FADV_DONTNEED);
-#endif /* POSIX_FADV_DONTNEED */
-
-    for (page_no_t i = 0; i < MAX_PAGES_TO_READ; ++i) {
-      const auto off = i * page_size + FIL_PAGE_SPACE_ID;
-
-      if (off == FIL_PAGE_SPACE_ID) {
-        /* Find out the page size of the tablespace from the first page.
-        In case of compressed pages, the subsequent pages can be of different
-        sizes. If MAX_PAGES_TO_READ is changed to a different value, then the
-        page size of subsequent pages is needed to find out the offset for
-        space ID. */
-
-        auto space_flags_offset = FSP_HEADER_OFFSET + FSP_SPACE_FLAGS;
-
-        ut_a(space_flags_offset + 4 < n_bytes);
-
-        const auto flags = mach_read_from_4(buf.get() + space_flags_offset);
-
-        page_size_t space_page_size(flags);
-
-        page_size = space_page_size.physical();
-      }
-
-      space_ids.push_back(mach_read_from_4(buf.get() + off));
-
-      if ((i + 1) * page_size >= bytes_read) {
-        break;
-      }
-    }
-  }
-
-  fclose(fp);
-
-  space_id_t space_id;
-
-  if (!space_ids.empty()) {
-    space_id = space_ids.front();
-
-    for (auto id : space_ids) {
-      if (id == 0 || space_id != id) {
-        space_id = UINT32_UNDEFINED;
-
-        break;
-      }
-    }
-  } else {
-    space_id = UINT32_UNDEFINED;
-  }
-
-  /* Try the more heavy duty method, as a last resort. */
-  if (space_id == UINT32_UNDEFINED) {
-    /* If the first page cannot be read properly, then for compressed
-    tablespaces we don't know where the page boundary starts because
-    we don't know the page size. */
-
-    Datafile file;
-
-    file.set_filepath(filename.c_str());
-
-    dberr_t err = file.open_read_only(false);
-
-    ut_a(file.is_open());
-    ut_a(err == DB_SUCCESS);
-
-    /* Use the heavier Datafile::find_space_id() method to
-    find the space id. */
-    err = file.find_space_id();
-
-    if (err == DB_SUCCESS) {
-      space_id = file.space_id();
-    }
-
-    file.close();
+  if (space_id == 0 || space_id == SPACE_UNKNOWN) {
+    return find_space_id_reliably();
   }
 
   return space_id;
@@ -12022,7 +12205,7 @@ static void fil_rename_partition_file(const std::string &old_path,
 
   if (!fil_get_partition_file(old_path, extn, new_path)) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   ut_ad(!new_path.empty());
@@ -12062,7 +12245,7 @@ static void fil_rename_partition_file(const std::string &old_path,
   if (!ret) {
     /* File rename failed. */
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   if (import) {

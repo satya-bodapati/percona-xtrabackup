@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -135,8 +135,7 @@ Uint32 Dbtup::allocTabDescr(Uint32 allocSize) {
 }  // Dbtup::allocTabDescr()
 
 void Dbtup::freeTabDescr(Uint32 retRef, Uint32 retNo, bool normal) {
-  itdaMergeTabDescr(retRef, retNo,
-                    normal); /* MERGE WITH POSSIBLE NEIGHBOURS   */
+  itdaMergeTabDescr(retRef, retNo, normal); /* MERGE WITH POSSIBLE NEIGHBOURS */
   while (retNo >= ZTD_FREE_SIZE) {
     jam();
     Uint32 list = nextHigherTwoLog(retNo);

@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -56,40 +56,19 @@ PUBLIC
 )
 
 ## routing_connections is used by "routing" and "connection_pool"
-ADD_LIBRARY(routing_connections SHARED
+ROUTER_ADD_SHARED_LIBRARY(routing_connections
   channel.cc
-  )
-TARGET_LINK_LIBRARIES(routing_connections
+
+  OUTPUT_NAME "mysqlrouter_routing_connections"
+
+  LINK_LIBRARIES
   PUBLIC
   harness_stdx
   harness_tls
   mysql_protocol
   )
-TARGET_INCLUDE_DIRECTORIES(routing_connections
-  PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include/
-  ${CMAKE_CURRENT_BINARY_DIR}/../include/
-  )
-SET_TARGET_PROPERTIES(routing_connections PROPERTIES
-  OUTPUT_NAME "mysqlrouter_routing_connections"
-  SOVERSION 1
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory
-  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/library_output_directory)
-INSTALL(TARGETS routing_connections
-  RUNTIME DESTINATION ${ROUTER_INSTALL_BINDIR} COMPONENT Router
-  ARCHIVE DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  LIBRARY DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  NAMELINK_SKIP
-  )
-ADD_INSTALL_RPATH_FOR_OPENSSL(routing_connections)
-SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(routing_connections)
 
-GENERATE_EXPORT_HEADER(routing_connections
-  EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/../include/mysqlrouter/routing_connections_export.h)
-
-ADD_LIBRARY(routing SHARED
+ROUTER_ADD_SHARED_LIBRARY(routing
   mysql_routing.cc
   destination.cc
   destination_error.cc
@@ -109,8 +88,9 @@ ADD_LIBRARY(routing SHARED
   blocked_endpoints.cc
 
   await_client_or_server.cc
-  forwarding_processor.cc
-  processor.cc
+  processors/base/forwarding_processor.cc
+  processors/base/processor.cc
+  processors/base/processor_diagnostics.cc
 
   classic_auth.cc
   classic_auth_cleartext.cc
@@ -118,53 +98,53 @@ ADD_LIBRARY(routing SHARED
   classic_auth_native.cc
   classic_auth_sha256_password.cc
   classic_command.cc
-  classic_connect.cc
-  classic_flow.cc
-  classic_forwarder.cc
+  processors/session/classic_connect.cc
+  processors/session/classic_flow.cc
+  processors/base/classic_forwarder.cc
   classic_frame.cc
-  classic_lazy_connect.cc
+  processors/session/classic_lazy_connect.cc
 
-  classic_auth_cleartext_forwarder.cc
-  classic_auth_caching_sha2_forwarder.cc
-  classic_auth_forwarder.cc
-  classic_auth_native_forwarder.cc
-  classic_auth_sha256_password_forwarder.cc
-  classic_binlog_dump_forwarder.cc
-  classic_change_user_forwarder.cc
-  classic_clone_forwarder.cc
-  classic_debug_forwarder.cc
-  classic_greeting_forwarder.cc
-  classic_init_schema_forwarder.cc
-  classic_kill_forwarder.cc
-  classic_list_fields_forwarder.cc
-  classic_ping_forwarder.cc
-  classic_query_forwarder.cc
-  classic_quit_forwarder.cc
-  classic_register_replica_forwarder.cc
-  classic_reload_forwarder.cc
-  classic_reset_connection_forwarder.cc
-  classic_set_option_forwarder.cc
-  classic_statistics_forwarder.cc
-  classic_stmt_close_forwarder.cc
-  classic_stmt_execute_forwarder.cc
-  classic_stmt_fetch_forwarder.cc
-  classic_stmt_param_append_data_forwarder.cc
-  classic_stmt_prepare_forwarder.cc
-  classic_stmt_reset_forwarder.cc
+  processors/forwarders/classic_auth_cleartext_forwarder.cc
+  processors/forwarders/classic_auth_caching_sha2_forwarder.cc
+  processors/forwarders/classic_auth_forwarder.cc
+  processors/forwarders/classic_auth_native_forwarder.cc
+  processors/forwarders/classic_auth_sha256_password_forwarder.cc
+  processors/forwarders/classic_binlog_dump_forwarder.cc
+  processors/forwarders/classic_change_user_forwarder.cc
+  processors/forwarders/classic_clone_forwarder.cc
+  processors/forwarders/classic_debug_forwarder.cc
+  processors/session/classic_greeting_forwarder.cc
+  processors/forwarders/classic_init_schema_forwarder.cc
+  processors/forwarders/classic_kill_forwarder.cc
+  processors/forwarders/classic_list_fields_forwarder.cc
+  processors/forwarders/classic_ping_forwarder.cc
+  processors/forwarders/classic_query_forwarder.cc
+  processors/forwarders/classic_quit_forwarder.cc
+  processors/forwarders/classic_register_replica_forwarder.cc
+  processors/forwarders/classic_reload_forwarder.cc
+  processors/forwarders/classic_reset_connection_forwarder.cc
+  processors/forwarders/classic_set_option_forwarder.cc
+  processors/forwarders/classic_statistics_forwarder.cc
+  processors/forwarders/classic_stmt_close_forwarder.cc
+  processors/forwarders/classic_stmt_execute_forwarder.cc
+  processors/forwarders/classic_stmt_fetch_forwarder.cc
+  processors/forwarders/classic_stmt_param_append_data_forwarder.cc
+  processors/forwarders/classic_stmt_prepare_forwarder.cc
+  processors/forwarders/classic_stmt_reset_forwarder.cc
 
-  classic_auth_cleartext_sender.cc
-  classic_auth_caching_sha2_sender.cc
-  classic_auth_native_sender.cc
-  classic_auth_sha256_password_sender.cc
-  classic_change_user_sender.cc
+  processors/senders/classic_auth_cleartext_sender.cc
+  processors/senders/classic_auth_caching_sha2_sender.cc
+  processors/senders/classic_auth_native_sender.cc
+  processors/senders/classic_auth_sha256_password_sender.cc
+  processors/senders/classic_change_user_sender.cc
   # classic_greeting_sender.cc
-  classic_init_schema_sender.cc
-  classic_query_sender.cc
-  classic_quit_sender.cc
-  classic_reset_connection_sender.cc
-  classic_set_option_sender.cc
+  processors/senders/classic_init_schema_sender.cc
+  processors/senders/classic_query_sender.cc
+  processors/senders/classic_quit_sender.cc
+  processors/senders/classic_reset_connection_sender.cc
+  processors/senders/classic_set_option_sender.cc
 
-  classic_greeting_receiver.cc
+  processors/session/classic_greeting_receiver.cc
 
   classic_query_param.cc
   classic_session_tracker.cc
@@ -177,14 +157,17 @@ ADD_LIBRARY(routing SHARED
   router_require.cc
 
   openssl_msg.cc
-)
 
-TARGET_LINK_LIBRARIES(routing
+  OUTPUT_NAME "mysqlrouter_routing"
+
+  DEPENDENCIES GenLiteProtos
+
+  LINK_LIBRARIES
   PUBLIC
   harness_stdx
   harness_tls
   mysql_protocol
-  router_lib
+  router_utils
   routing_connections
   router_mysqlxmessages
   routing_frontend_lib
@@ -194,37 +177,15 @@ TARGET_LINK_LIBRARIES(routing
   destination_status
   sql_lexer
   )
+
 IF(SOLARIS)
   TARGET_LINK_LIBRARIES(routing
     PRIVATE -lnsl
     PRIVATE -lsocket)
 ENDIF()
 
-TARGET_INCLUDE_DIRECTORIES(routing
-  PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include/
-  ${CMAKE_CURRENT_BINARY_DIR}/../include/
-  )
-SET_TARGET_PROPERTIES(routing PROPERTIES
-  OUTPUT_NAME "mysqlrouter_routing"
-  SOVERSION 1
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory
-  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/library_output_directory)
-INSTALL(TARGETS routing
-  RUNTIME DESTINATION ${ROUTER_INSTALL_BINDIR} COMPONENT Router
-  ARCHIVE DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  LIBRARY DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  NAMELINK_SKIP
-  )
-ADD_DEPENDENCIES(routing GenLiteProtos)
+DOWNGRADE_STRINGOP_WARNINGS(routing)
 
-ADD_INSTALL_RPATH_FOR_OPENSSL(routing)
-SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(routing)
-
-GENERATE_EXPORT_HEADER(routing
-  EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/../include/mysqlrouter/routing_export.h)
 TARGET_COMPILE_DEFINITIONS(routing PRIVATE
   MYSQL_ROUTER_LOG_DOMAIN="routing")
 

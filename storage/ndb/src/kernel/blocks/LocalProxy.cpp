@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -27,7 +27,7 @@
 
 #include <signaldata/RouteOrd.hpp>
 
-//#define DBINFO_SCAN_TRACE
+// #define DBINFO_SCAN_TRACE
 #ifdef DBINFO_SCAN_TRACE
 #include <debugger/DebuggerNames.hpp>
 #endif

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -68,13 +68,13 @@ class TlsBase {
   using LowerLayerType = LowerLayer;
 
   template <typename... Args>
-  TlsBase(TlsServerContext *tls_context, Args &&... args)
+  TlsBase(TlsServerContext *tls_context, Args &&...args)
       : TlsBase(LowerLayer{std::forward<Args>(args)...}, tls_context) {
     SSL_set_accept_state(ssl_.get());
   }
 
   template <typename... Args>
-  TlsBase(TlsClientContext *tls_context, Args &&... args)
+  TlsBase(TlsClientContext *tls_context, Args &&...args)
       : TlsBase(LowerLayer{std::forward<Args>(args)...}, tls_context) {
     SSL_set_connect_state(ssl_.get());
   }

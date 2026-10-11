@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -27,6 +27,8 @@
 
 #include <gtest/gtest.h>
 
+#include <iomanip>
+
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/stdx/expected_ostream.h"
 #include "mysqlrouter/utils.h"  // copy_file
@@ -49,7 +51,7 @@ static void copy_tree(const mysql_harness::Directory &from_dir,
       mysql_harness::mkdir(to.str(), mysql_harness::kStrictDirectoryPerm);
       copy_tree(from, to);
     } else {
-      mysqlrouter::copy_file(from.str(), to.str());
+      mysql_harness::copy_file(from.str(), to.str());
     }
   }
 }
@@ -120,7 +122,7 @@ void SharedServer::initialize_server(const std::string &datadir) {
           });
   proc.set_logging_path(datadir, "mysqld-init.err");
   try {
-    proc.wait_for_exit(90s);  // throws when it times out.
+    proc.wait_for_exit(120s);  // throws when it times out.
   } catch (const std::exception &e) {
     process_manager().dump_logs();
 
@@ -138,7 +140,7 @@ void SharedServer::prepare_datadir() {
   if (mysqld_init_once_dir_ == nullptr) {
     mysqld_init_once_dir_ = new TempDirectory("mysqld-init-once");
 
-    initialize_server(mysqld_init_once_dir_name());
+    ASSERT_NO_FATAL_FAILURE(initialize_server(mysqld_init_once_dir_name()));
   }
 
   // copy the init-once dir to the datadir.
@@ -414,14 +416,16 @@ SharedServer::user_connection_ids(MysqlClient &cli,
   }
 
   auto ids_res = cli.query(
-      "SELECT id FROM performance_schema.processlist WHERE id != "
-      "CONNECTION_ID() AND User IN (" +
+      "SELECT id FROM performance_schema.processlist "
+      "WHERE id != CONNECTION_ID() "
+      "  AND state NOT LIKE 'Group Replication%%' "
+      "  AND User IN (" +
       oss.str() + ")");
   if (!ids_res) return stdx::unexpected(ids_res.error());
 
   std::vector<uint64_t> ids;
   for (const auto &res : *ids_res) {
-    for (auto row : res.rows()) {
+    for (const auto *row : res.rows()) {
       ids.push_back(strtol(row[0], nullptr, 10));
     }
   }

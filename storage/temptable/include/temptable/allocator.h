@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -514,7 +514,7 @@ class Allocator {
       /** [in] Memory where to create the object. */
       U *mem,
       /** Arguments to pass to U's constructor. */
-      Args &&... args);
+      Args &&...args);
 
   /** Destroy an object of type `U`. The memory is not returned to the OS, this
    * is the counterpart of `construct()`. */
@@ -662,7 +662,7 @@ inline void Allocator<T, AllocationScheme>::deallocate(T *chunk_data,
 
 template <class T, class AllocationScheme>
 template <class U, class... Args>
-inline void Allocator<T, AllocationScheme>::construct(U *mem, Args &&... args) {
+inline void Allocator<T, AllocationScheme>::construct(U *mem, Args &&...args) {
   new (mem) U(std::forward<Args>(args)...);
 }
 

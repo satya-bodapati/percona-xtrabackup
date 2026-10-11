@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -49,7 +49,8 @@ class InitConfigFileParser {
    *   Constructor
    */
   InitConfigFileParser();
-  ~InitConfigFileParser();
+
+  void insertError(int err);
 
   /**
    *   Reads the initial configuration file, checks syntax and semantic
@@ -80,14 +81,14 @@ class InitConfigFileParser {
     Uint32 m_lineno;          ///< Current line no in config file
     Uint32 m_sectionLineno;   ///< Where did current section start
 
-    const ConfigInfo *m_info;  // The config info
-    Properties *m_config;      // The config object
-    Properties *m_defaults;    // The user defaults
+    const ConfigInfo *m_info{nullptr};  // The config info
+    Properties *m_config{nullptr};      // The config object
+    Properties *m_defaults{nullptr};    // The user defaults
 
-    Properties *m_currentSection;        // The current section I'm in
-    const Properties *m_userDefaults;    // The defaults of this section
-    const Properties *m_systemDefaults;  // The syst. defaults for this section
-    const Properties *m_currentInfo;     // The "info" for this section
+    Properties *m_currentSection{nullptr};        // The current section I'm in
+    const Properties *m_userDefaults{nullptr};    // user defaults for section
+    const Properties *m_systemDefaults{nullptr};  // system defaults for section
+    const Properties *m_currentInfo{nullptr};     // The "info" for this section
 
     Properties m_userProperties;         // User properties (temporary values)
     ConfigValuesFactory m_configValues;  //
@@ -132,7 +133,7 @@ class InitConfigFileParser {
   /**
    *   Information about parameters (min, max values etc)
    */
-  ConfigInfo *m_info;
+  const ConfigInfo *m_info;
 
   bool handle_mycnf_defaults(Vector<struct my_option> &options,
                              InitConfigFileParser::Context &ctx,

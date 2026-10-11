@@ -252,8 +252,37 @@ var status_vars = {
               value: "ON"
             },
             {
+              type: "system_variable",
+              name: "session_track_schema",
+              value: "ON"
+            },
+            {
               type: "trx_characteristics",
               value: "",
+            },
+          ]
+        }
+      };
+    } else if (
+        stmt.indexOf('SET @@SESSION.character_set_client = "utf8mb4"') !== -1) {
+      // the trackers that are needed for connection-sharing.
+      return {
+        ok: {
+          session_trackers: [
+            {
+              type: "system_variable",
+              name: "character_set_client",
+              value: "utf8mb4",
+            },
+            {
+              type: "system_variable",
+              name: "collation_connection",
+              value: "utf8mb4_0900_ai_ci",
+            },
+            {
+              type: "system_variable",
+              name: "sql_mode",
+              value: "bar",
             },
           ]
         }
@@ -287,7 +316,8 @@ var status_vars = {
         };
       }
     } else if ([
-                 "START TRANSACTION;", "START TRANSACTION", "BEGIN"
+                 "START TRANSACTION;", "START TRANSACTION", "BEGIN", "BEGIN;",
+                 "BEGIN WORK", "BEGIN WORK;"
                ].indexOf(stmt) !== -1) {
       // router replays what the server sends ... which includes the trailing
       // semi-colon
@@ -307,7 +337,7 @@ var status_vars = {
             },
             {
               type: "trx_state",
-              state: "________",
+              state: "T_______",
             },
           ]
         }
@@ -328,7 +358,7 @@ var status_vars = {
             },
             {
               type: "trx_state",
-              state: "________",
+              state: "T_______",
             },
           ]
         }
@@ -354,7 +384,7 @@ var status_vars = {
           ]
         }
       };
-    } else if (stmt === "COMMIT") {
+    } else if (stmt === "COMMIT" || stmt === "COMMIT;") {
       next_trx_is_read_only = true;
       in_transaction = false;
 
@@ -376,7 +406,7 @@ var status_vars = {
           ]
         }
       };
-    } else if (stmt === "ROLLBACK") {
+    } else if (stmt === "ROLLBACK" || stmt === "ROLLBACK;") {
       next_trx_is_read_only = true;
       in_transaction = false;
 
@@ -543,6 +573,15 @@ var status_vars = {
     } else if (stmt.match(router_update_attributes.stmt_regex)) {
       mysqld.global.update_attributes_count++;
       return router_update_attributes;
+    } else if (stmt.trim() === "" || stmt === ";") {
+      return {
+        error: {
+          code: 1065,
+          message: "Query was empty",
+        }
+      };
+    } else if (stmt === "/* */" || stmt === "-- ") {
+      return {ok: {}};
     } else {
       console.log(stmt);
       return common_stmts.unknown_statement_response(stmt);

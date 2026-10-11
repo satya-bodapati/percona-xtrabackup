@@ -1,4 +1,4 @@
-# Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -59,6 +59,9 @@ MYSQL_ADD_EXECUTABLE(mysqltest
   ENABLE_EXPORTS
   LINK_LIBRARIES mysqlclient
   )
+
+DOWNGRADE_STRINGOP_WARNINGS(mysqltest)
+
 MYSQL_ADD_EXECUTABLE(mysqlcheck
   check/mysqlcheck.cc
   check/mysqlcheck_core.cc
@@ -173,6 +176,7 @@ MYSQL_ADD_EXECUTABLE(json_client_library_main
   LINK_LIBRARIES json_client_library  strings mysys decimal
   SKIP_INSTALL
   )
+DOWNGRADE_STRINGOP_WARNINGS(json_client_library_main)
 
 # A test executable which does nothing, except verify that symbols are visible.
 # To test standalone build:
@@ -226,6 +230,16 @@ SET(MYSQLBINLOG_SOURCES
   ${CMAKE_SOURCE_DIR}/sql/stream_cipher.cc
   ${CMAKE_SOURCE_DIR}/sql/rpl_log_encryption.cc
   )
+
+# The client version of log_event.cc has false positives.
+# Downgrade from error to warning:
+IF(MY_COMPILER_IS_GNU AND CMAKE_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO")
+  ADD_COMPILE_FLAGS(${CMAKE_SOURCE_DIR}/sql/log_event.cc
+    COMPILE_FLAGS
+    " -Wno-error=uninitialized"
+    " -Wno-error=maybe-uninitialized"
+    )
+ENDIF()
 
 # duplicate explicit instantiation of 'net_field_length_checked'
 # ignored as a Microsoft extension

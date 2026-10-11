@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -179,7 +179,7 @@ class HARNESS_EXPORT ConfigSection {
   void update(const ConfigSection &other);  // throws bad_section
 
   std::string get(std::string_view option) const;
-  void set(const std::string &option,
+  void set(std::string_view option,
            const std::string &value);  // throws bad_option
   void add(const std::string &option, const std::string &value);
   bool has(std::string_view option) const;
@@ -483,7 +483,7 @@ class HARNESS_EXPORT Config {
   // (one that contains illegal characters) */
   std::string get_default(std::string_view option) const;
   bool has_default(std::string_view option) const;
-  void set_default(const std::string &option, const std::string &value);
+  void set_default(std::string_view option, const std::string &value);
 
   bool is_reserved(const std::string &word) const;
 

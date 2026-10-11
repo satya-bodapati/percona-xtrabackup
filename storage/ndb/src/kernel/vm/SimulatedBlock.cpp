@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -434,15 +434,12 @@ void SimulatedBlock::handle_send_failed(SendStatus ss, Signal25 *signal,
           signal->theData[0] == DumpStateOrd::CmvmiDummySignal) {
         jam();
         const Uint32 num_secs = signal->getNoOfSections();
-        char msg[24 * 4];
-        snprintf(msg, sizeof(msg),
-                 "Failed sending CmvmiDummySignal"
-                 " (size %u+%u+%u+%u+%u) from %u to %u.",
-                 signal->getLength(), num_secs, (num_secs > 0) ? ptr[0].sz : 0,
-                 (num_secs > 1) ? ptr[1].sz : 0, (num_secs > 2) ? ptr[2].sz : 0,
-                 signal->theData[2], recNode);
-        g_eventLogger->info("%s", msg);
-        infoEvent("%s", msg);
+        infoEvent(
+            "Failed sending CmvmiDummySignal"
+            " (size %u+%u+%u+%u+%u) from %u to %u.",
+            signal->getLength(), num_secs, (num_secs > 0) ? ptr[0].sz : 0,
+            (num_secs > 1) ? ptr[1].sz : 0, (num_secs > 2) ? ptr[2].sz : 0,
+            signal->theData[2], recNode);
         return;
       }
       ErrorReporter::handleError(NDBD_EXIT_NDBREQUIRE,
@@ -4085,6 +4082,12 @@ void SimulatedBlock::init_global_uint32(void **tmp, size_t cnt) {
   mt_init_global_variables_uint32_instances(m_threadId, tmp, cnt);
 #endif
 }
+
+void SimulatedBlock::init_global_block() {
+#ifdef NDBD_MULTITHREADED
+  mt_init_global_variables_block(m_threadId, this);
+#endif
+}
 #endif
 
 int SimulatedBlock::cmp_key(Uint32 tab, const Uint32 *s1,
@@ -4950,14 +4953,24 @@ Uint32 SimulatedBlock::get_recv_thread_idx(TrpId trp_id) {
 
 #ifndef NDBD_MULTITHREADED
 /**
- * Add a stub for this function since we have some code in ErrorReporter.cpp
- * that needs this function, it's only really needed for ndbmtd, so need an
- * empty function in ndbd.
+ * Function for ndbd only. ndbmtd version of this function
+ * is implemented in ErrorReporter.cpp
  */
 void ErrorReporter::prepare_to_crash(bool first_phase,
                                      bool error_insert_crash) {
   (void)first_phase;
   (void)error_insert_crash;
+
+  globalData.incrementWatchDogCounter(22);  // Handling node stop
+
+  static bool crash_handling_started = false;
+  if (!first_phase) {
+    if (crash_handling_started) {
+      /* Someone else handling the crash, exit now */
+      my_thread_exit(nullptr);
+    }
+    crash_handling_started = true;
+  }
 }
 #endif
 
@@ -5500,6 +5513,20 @@ Uint32 SimulatedBlock::m_num_rr_groups = 0;
 Uint32 SimulatedBlock::m_num_query_thread_per_ldm = 0;
 Uint32 SimulatedBlock::m_num_distribution_threads = 0;
 bool SimulatedBlock::m_inited_rr_groups = false;
+
+#if defined(USE_INIT_GLOBAL_VARIABLES)
+void SimulatedBlock::checkInitGlobalVariables() {
+  jam();
+  jamLine(refToMain(reference()));
+  jamLine(refToInstance(reference()));
+
+  /* Blocks must override */
+  g_eventLogger->error(
+      "Unimplemented checkInitGlobalVariables in block %u instance %u\n",
+      refToMain(reference()), refToInstance(reference()));
+  ndbabort();
+}
+#endif
 
 /**
  * #undef is needed since this file is included by SimulatedBlock_nonmt.cpp

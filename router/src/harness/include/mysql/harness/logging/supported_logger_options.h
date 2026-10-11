@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -31,15 +31,16 @@
 #include "mysql/harness/logging/logging.h"
 
 static constexpr std::array<const char *, 4> logger_sink_supported_options = {
-    {mysql_harness::logging::kConfigOptionLogFilename,
-     mysql_harness::logging::kConfigOptionLogDestination,
-     mysql_harness::logging::kConfigOptionLogLevel,
-     mysql_harness::logging::kConfigOptionLogTimestampPrecision}};
+    {mysql_harness::logging::options::kFilename,
+     mysql_harness::logging::options::kDestination,
+     mysql_harness::logging::options::kLevel,
+     mysql_harness::logging::options::kTimestampPrecision}};
 
 static constexpr std::array<const char *, 5> logger_supported_options = {
-    {"sinks", mysql_harness::logging::kConfigOptionLogFilename,
-     mysql_harness::logging::kConfigOptionLogDestination,
-     mysql_harness::logging::kConfigOptionLogLevel,
-     mysql_harness::logging::kConfigOptionLogTimestampPrecision}};
+    {mysql_harness::logging::options::kSinks,
+     mysql_harness::logging::options::kFilename,
+     mysql_harness::logging::options::kDestination,
+     mysql_harness::logging::options::kLevel,
+     mysql_harness::logging::options::kTimestampPrecision}};
 
 #endif /* MYSQL_HARNESS_LOGGER_SUPPORTED_OPTIONS_INCLUDED */

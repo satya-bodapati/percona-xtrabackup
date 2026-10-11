@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -327,7 +327,7 @@ static const char *const jamFileNames[] = {
     "TransIdAI.hpp",                      // 192
     "IndexStatSignal.hpp",                // 193
     "FsRef.hpp",                          // 194
-    "SetLogLevelOrd.hpp",                 // 195
+    "SetLogLevelOrd.hpp",                 // 195 DELETED FILE
     "TestOrd.hpp",                        // 196
     "TupFrag.hpp",                        // 197
     "RelTabMem.hpp",                      // 198
@@ -416,7 +416,7 @@ static const char *const jamFileNames[] = {
     "SuperPool.hpp",                      // 281 DELETED FILE
     "pc.hpp",                             // 282
     "LockQueue.hpp",                      // 283
-    "ClusterConfiguration.hpp",           // 284
+    "ClusterConfiguration.hpp",           // 284 DELETED FILE
     "SimulatedBlock_nonmt.cpp",           // 285
     "SafeCounter.hpp",                    // 286
     "ndbd_malloc.cpp",                    // 287
@@ -722,6 +722,7 @@ EmulatorData::EmulatorData() {
   theShutdownMutex = 0;
   m_socket_server = 0;
   m_mem_manager = 0;
+  m_st_jam_buffer = 0;
 }
 
 void EmulatorData::create() {
@@ -735,6 +736,7 @@ void EmulatorData::create() {
   EmulatedJamBuffer *jamBuffer = nullptr;
 #endif
   NDB_THREAD_TLS_JAM = jamBuffer;
+  m_st_jam_buffer = jamBuffer;
 
   theConfiguration = new Configuration();
   theWatchDog = new WatchDog();
@@ -769,4 +771,5 @@ void EmulatorData::destroy() {
   NdbMutex_Destroy(theShutdownMutex);
   if (m_mem_manager) delete m_mem_manager;
   m_mem_manager = 0;
+  m_st_jam_buffer = 0;
 }

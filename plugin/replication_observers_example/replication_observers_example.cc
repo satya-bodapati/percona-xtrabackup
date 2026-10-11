@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1044,7 +1044,7 @@ bool test_server_count_transactions() {
   bool error = service->get_ongoing_server_transactions(&ids, &size);
   assert(!error);
 
-  assert(size == 3);
+  assert(size == 4);
 
   my_free(ids);
 

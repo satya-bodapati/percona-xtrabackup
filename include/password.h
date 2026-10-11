@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -28,7 +28,7 @@
   @file include/password.h
 */
 
-#include "config.h"
+#include "my_config.h"
 
 #if !defined(WITHOUT_MYSQL_NATIVE_PASSWORD) || \
     WITHOUT_MYSQL_NATIVE_PASSWORD == 0

@@ -1,4 +1,4 @@
-// Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+// Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
@@ -96,7 +96,7 @@ class GtidGeneratorTest : public ::testing::Test {
     // define job for each thread
     auto thread_job =
         [&members_tids, &trx_tids, &set, &gen, &tsid_map_lock, &
-         mt ](size_t thread_id) -> auto {
+         mt ](size_t thread_id) -> auto{
       size_t member_id = 0;  // member id
       if (thread_id > 2) {
         member_id = 1;

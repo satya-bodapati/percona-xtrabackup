@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -56,18 +56,22 @@ class Index : virtual public Entity_object {
 
  public:
   enum enum_index_type  // similar to Keytype in sql_class.h but w/o FOREIGN_KEY
-  { IT_PRIMARY = 1,
+  {
+    IT_PRIMARY = 1,
     IT_UNIQUE,
     IT_MULTIPLE,
     IT_FULLTEXT,
-    IT_SPATIAL };
+    IT_SPATIAL
+  };
 
   enum enum_index_algorithm  // similar to ha_key_alg
-  { IA_SE_SPECIFIC = 1,
+  {
+    IA_SE_SPECIFIC = 1,
     IA_BTREE,
     IA_RTREE,
     IA_HASH,
-    IA_FULLTEXT };
+    IA_FULLTEXT
+  };
 
  public:
   ~Index() override = default;

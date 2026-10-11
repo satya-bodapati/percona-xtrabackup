@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -37,7 +37,7 @@
 
 #define JAM_FILE_ID 340
 
-//#define DEBUG_CPU_USAGE 1
+// #define DEBUG_CPU_USAGE 1
 class Thrman : public SimulatedBlock {
   friend class ThrmanProxy;
 

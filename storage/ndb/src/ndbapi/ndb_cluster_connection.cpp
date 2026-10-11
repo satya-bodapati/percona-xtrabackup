@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2004, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2004, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -22,6 +22,8 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 */
+
+#include <ctime>
 
 #include <ndb_global.h>
 #include "util/require.h"
@@ -181,7 +183,8 @@ int Ndb_cluster_connection::start_connect_thread(
 }
 
 void Ndb_cluster_connection::set_optimized_node_selection(int val) {
-  m_impl.m_optimized_node_selection = val;
+  // Set default value used for new Ndb objects
+  m_impl.m_conn_default_optimized_node_selection = val;
 }
 
 void Ndb_cluster_connection_impl::init_get_next_node(
@@ -420,8 +423,8 @@ class NdbApiInternalLogHandler : public LogHandler {
       : m_defaultHandler(defaultHandler), m_userConsumer(nullptr) {
     m_consumer_mutex = NdbMutex_Create();
     m_handler_mutex = NdbMutex_Create();
-    Logger::LoggerTest::setHandlerPointerAdress(*g_eventLogger,
-                                                &m_defaultHandler);
+    Logger::LoggerTest::setHandlerPointerAddress(*g_eventLogger,
+                                                 &m_defaultHandler);
   }
 
  public:
@@ -433,8 +436,8 @@ class NdbApiInternalLogHandler : public LogHandler {
     g_api_internal_log_handler = nullptr;
   }
 
-  virtual void append(const char *pCategory, Logger::LoggerLevel level,
-                      const char *pMsg, time_t now) override {
+  void append(const char *pCategory, Logger::LoggerLevel level,
+              const char *pMsg, const std::timespec *now) override {
     {
       if (m_userConsumer) {
         Guard g(m_consumer_mutex);
@@ -468,11 +471,10 @@ class NdbApiInternalLogHandler : public LogHandler {
     return true;
   }
   bool checkParams() override { return true; }
-  void writeHeader(const char *, Logger::LoggerLevel, time_t) override {
-    return;
-  }
-  void writeMessage(const char *) override { return; }
-  void writeFooter() override { return; }
+  void writeHeader(const char *, Logger::LoggerLevel,
+                   const std::timespec *) override {}
+  void writeMessage(const char *) override {}
+  void writeFooter() override {}
   void setRepeatFrequency(unsigned val) override {
     m_defaultHandler->setRepeatFrequency(val);
   }
@@ -487,13 +489,14 @@ Ndb_cluster_connection_impl::Ndb_cluster_connection_impl(
     int force_api_nodeid)
     : Ndb_cluster_connection(*this),
       m_main_connection(main_connection),
-      m_optimized_node_selection(1),
+      m_conn_default_optimized_node_selection(1),
       m_run_connect_thread(0),
       m_latest_trans_gci(0),
       m_first_ndb_object(nullptr),
       m_latest_error_msg(),
       m_latest_error(0),
       m_data_node_neighbour(0),
+      m_num_created_ndb_objects(0),
       m_multi_wait_group(nullptr),
       m_uri_scheme(nullptr),
       m_uri_host(nullptr),
@@ -504,6 +507,13 @@ Ndb_cluster_connection_impl::Ndb_cluster_connection_impl(
 
   NdbMutex_Lock(g_ndb_connection_mutex);
   if (g_ndb_connection_count++ == 0) {
+    if (g_eventLogger == nullptr) {
+      [[maybe_unused]] int ret = fprintf(stderr,
+                                         "ERROR: g_eventLogger object is "
+                                         "null. ndb_init() not called?\n");
+      require(g_eventLogger != nullptr);
+    }
+
     NdbColumnImpl::create_pseudo_columns();
     /* Setup singleton InternalLogHandler if needed */
     NdbApiInternalLogHandler::getLogHandlerInstance();
@@ -611,7 +621,14 @@ Ndb_cluster_connection_impl::~Ndb_cluster_connection_impl() {
     NdbMutex_Destroy(ndb_print_state_mutex);
     ndb_print_state_mutex = nullptr;
 #endif
-    g_eventLogger->stopAsync();
+    if (g_eventLogger != nullptr) {
+      g_eventLogger->stopAsync();
+    } else {
+      [[maybe_unused]] int ret =
+          fprintf(stderr,
+                  "WARNING: g_eventLogger object is "
+                  "deleted. ndb_end() called too soon?\n");
+    }
   }
   NdbMutex_Unlock(g_ndb_connection_mutex);
 
@@ -656,7 +673,7 @@ const Ndb *Ndb_cluster_connection::get_next_ndb_object(const Ndb *p) {
   return p->theImpl->m_next_ndb_object;
 }
 
-void Ndb_cluster_connection_impl::link_ndb_object(Ndb *p) {
+Uint64 Ndb_cluster_connection_impl::link_ndb_object(Ndb *p) {
   lock_ndb_objects();
   if (m_first_ndb_object != nullptr) {
     m_first_ndb_object->theImpl->m_prev_ndb_object = p;
@@ -665,10 +682,14 @@ void Ndb_cluster_connection_impl::link_ndb_object(Ndb *p) {
   p->theImpl->m_next_ndb_object = m_first_ndb_object;
   m_first_ndb_object = p;
 
+  const Uint64 id = m_num_created_ndb_objects++;
+
   // Wake up anyone waiting for changes to the Ndb instance list
   NdbCondition_Broadcast(m_new_delete_ndb_cond);
 
   unlock_ndb_objects();
+
+  return id;
 }
 
 void Ndb_cluster_connection_impl::unlink_ndb_object(Ndb *p) {
@@ -1328,7 +1349,7 @@ int Ndb_cluster_connection_impl::connect(int no_retries,
     }
 
     // the allocNodeId function will connect if not connected
-    int alloc_error;
+    int alloc_error = 0;
     Uint32 nodeId = m_config_retriever->allocNodeId(
         no_retries, retry_delay_in_seconds, verbose, alloc_error);
     if (!nodeId) {
@@ -1519,7 +1540,8 @@ Uint32 Ndb_cluster_connection_impl::select_any(NdbImpl *impl_ndb) {
   Uint16 prospective_node_ids[MAX_NDB_NODES];
   Uint32 num_prospective_nodes = 0;
   Uint32 my_location_domain_id = m_my_location_domain_id;
-  if (my_location_domain_id == 0) {
+  if (my_location_domain_id == 0 || !impl_ndb->m_optimized_node_selection) {
+    // No preference among nodes
     return 0;
   }
   for (Uint32 i = 0; i < m_nodes_proximity.size(); i++) {
@@ -1589,10 +1611,16 @@ Uint32 Ndb_cluster_connection_impl::select_node(NdbImpl *impl_ndb,
   Uint32 best_usage = 0;
   Int32 best_score = MAX_PROXIMITY_GROUP;  // Lower is better
 
-  if (!m_impl.m_optimized_node_selection) {
+  if (!impl_ndb->m_optimized_node_selection) {
     /**
      * optimized_node_selection is off.  Use round robin.
      * Uses hint_count in m_nodes_proximity but not the group value.
+     * Algorithm
+     * - Check all supplied candidate nodes
+     *   (those holding replicas of the partition)
+     * - Initially choose the first partition as best
+     * - Choose another partition if it has lower hint usage so that
+     *   requests are balanced across nodes holding partitions.
      */
     for (Uint32 j = 0; j < cnt; j++) {
       Uint32 candidate_node = nodes[j];
@@ -1604,8 +1632,9 @@ Uint32 Ndb_cluster_connection_impl::select_node(NdbImpl *impl_ndb,
         continue;
       }
 
+      /* Check usage of candidate node, choose if it's the lowest so far */
       for (Uint32 i = 0; i < nodes_arr_cnt; i++) {
-        if (nodes_arr[i].id == j) {
+        if (nodes_arr[i].id == candidate_node) {
           Uint32 usage = nodes_arr[i].hint_count;
           if (best_score == MAX_PROXIMITY_GROUP) {
             best_idx = i;
@@ -1624,6 +1653,11 @@ Uint32 Ndb_cluster_connection_impl::select_node(NdbImpl *impl_ndb,
   } else {
     /**
      * optimized_node_selection is on.  Use proximity.
+     * Algorithm :
+     *   Check each candidate node to find the node(s) with closest
+     *     proximity (lowest adjusted_group)
+     *   Within candidates with the same proximity, choose node
+     *     with lowest hint count (load balance)
      */
     for (Uint32 j = 0; j < cnt; j++) {
       Uint32 candidate_node = nodes[j];
@@ -1636,6 +1670,8 @@ Uint32 Ndb_cluster_connection_impl::select_node(NdbImpl *impl_ndb,
       for (Uint32 i = 0; i < nodes_arr_cnt; i++) {
         if (nodes_arr[i].adjusted_group > best_score) {
           // We already got a better match
+          // Further matches can only be the same or worse, stop
+          // search on this candidate.
           break;
         }
         if (nodes_arr[i].id == candidate_node) {

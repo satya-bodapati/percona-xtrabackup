@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1535,13 +1535,11 @@ void Item_num_op::set_numeric_type(void) {
     hybrid_type = INT_RESULT;
     result_precision();
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 }
 
 /**
@@ -1571,13 +1569,11 @@ void Item_func_num1::set_numeric_type() {
     default:
       assert(0);
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 }
 
 void Item_func_num1::fix_num_length_and_dec() {
@@ -3062,9 +3058,8 @@ longlong Item_func_shift::eval_int_op() {
   return 0;
 }
 
-/// Instantiations of the above
-template longlong Item_func_shift::eval_int_op<true>();
-template longlong Item_func_shift::eval_int_op<false>();
+longlong Item_func_shift_left::int_op() { return eval_int_op<true>(); }
+longlong Item_func_shift_right::int_op() { return eval_int_op<false>(); }
 
 /**
   Template function that evaluates the bitwise shift operation over binary
@@ -3137,9 +3132,13 @@ String *Item_func_shift::eval_str_op(String *) {
   return &tmp_value;
 }
 
-/// Instantiations of the above
-template String *Item_func_shift::eval_str_op<true>(String *);
-template String *Item_func_shift::eval_str_op<false>(String *);
+String *Item_func_shift_left::str_op(String *str) {
+  return eval_str_op<true>(str);
+}
+
+String *Item_func_shift_right::str_op(String *str) {
+  return eval_str_op<false>(str);
+}
 
 // Bit negation ('~')
 
@@ -3338,13 +3337,11 @@ bool Item_func_int_val::resolve_type_inner(THD *) {
     default:
       assert(0);
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 
   return false;
 }
@@ -4369,6 +4366,8 @@ bool Item_func_find_in_set::resolve_type(THD *thd) {
   if (args[0]->const_item() && args[1]->type() == FIELD_ITEM &&
       args[0]->may_eval_const_item(thd)) {
     Field *field = down_cast<Item_field *>(args[1])->field;
+    // Bail during CREATE TABLE/INDEX so we don't look for absent typelib.
+    if (field->is_wrapper_field()) return false;
     if (field->real_type() == MYSQL_TYPE_SET) {
       String *find = args[0]->val_str(&value);
       if (thd->is_error()) return true;
@@ -5187,7 +5186,7 @@ longlong Item_source_pos_wait::val_int() {
       return 0;
     }
 
-    mi = channel_map.get_mi(channel_str->ptr());
+    mi = channel_map.get_mi(channel_str->c_ptr_safe());
 
   } else {
     if (channel_map.get_num_instances() > 1) {
@@ -6079,7 +6078,7 @@ bool Item_func_set_user_var::resolve_type(THD *thd) {
 // static
 user_var_entry *user_var_entry::create(THD *thd, const Name_string &name,
                                        const CHARSET_INFO *cs) {
-  if (check_column_name(name.ptr())) {
+  if (check_column_name(name)) {
     my_error(ER_ILLEGAL_USER_VAR, MYF(0), name.ptr());
     return nullptr;
   }
@@ -7748,6 +7747,13 @@ bool Item_func_match::fix_fields(THD *thd, Item **ref) {
                                             arg_count, 0);
 }
 
+void Item_func_match::update_used_tables() {
+  Item_func::update_used_tables();
+  against->update_used_tables();
+  used_tables_cache |= against->used_tables();
+  add_accum_properties(against);
+}
+
 bool Item_func_match::fix_index(const THD *thd) {
   TABLE *table;
   uint ft_to_key[MAX_KEY], ft_cnt[MAX_KEY], fts = 0, keynr;
@@ -8313,6 +8319,8 @@ bool Item_func_sp::val_json(Json_wrapper *result) {
 bool Item_func_sp::execute() {
   THD *thd = current_thd;
 
+  assert(!thd->lex->is_explain() || thd->lex->is_explain_analyze);
+
   Internal_error_handler_holder<View_error_handler, Table_ref> view_handler(
       thd, context->view_error_handler, context->view_error_handler_arg);
 
@@ -8510,12 +8518,11 @@ bool Item_func_sp::fix_fields(THD *thd, Item **ref) {
     if (args[i]->data_type() == MYSQL_TYPE_INVALID) {
       sp_variable *var = sp_ctx->find_variable(i);
       if (args[i]->propagate_type(
-              thd,
-              is_numeric_type(var->type)
-                  ? Type_properties(var->type, var->field_def.is_unsigned)
-                  : is_string_type(var->type)
-                        ? Type_properties(var->type, var->field_def.charset)
-                        : Type_properties(var->type)))
+              thd, is_numeric_type(var->type)
+                       ? Type_properties(var->type, var->field_def.is_unsigned)
+                   : is_string_type(var->type)
+                       ? Type_properties(var->type, var->field_def.charset)
+                       : Type_properties(var->type)))
         return true;
     }
   }
@@ -8743,7 +8750,7 @@ static bool check_table_and_trigger_access(Item **args, bool check_trigger_acl,
   }
 
   // Check access
-  ulong db_access = 0;
+  Access_bitmask db_access = 0;
   if (check_access(thd, SELECT_ACL, schema_name_ptr->ptr(), &db_access, nullptr,
                    false, true))
     return false;

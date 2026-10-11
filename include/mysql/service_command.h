@@ -1,6 +1,6 @@
 #ifndef MYSQL_SERVICE_COMMAND_INCLUDED
 #define MYSQL_SERVICE_COMMAND_INCLUDED
-/*  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/*  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
@@ -397,7 +397,7 @@ extern "C" struct command_service_st {
                      const struct st_command_service_cbs *callbacks,
                      enum cs_text_or_binary text_or_binary,
                      void *service_callbacks_ctx);
-} * command_service;
+} *command_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

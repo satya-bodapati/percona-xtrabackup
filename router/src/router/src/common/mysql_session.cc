@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -476,6 +476,10 @@ stdx::expected<MySQLSession::mysql_result_type, MysqlError>
 MySQLSession::logged_real_query(const std::string &q) {
   using clock_type = std::chrono::steady_clock;
 
+  if (logging_strategy_->log_will_be_ignored()) {
+    return real_query(q);
+  }
+
   auto start = clock_type::now();
   auto query_res = real_query(q);
   auto dur = clock_type::now() - start;
@@ -650,6 +654,11 @@ bool MySQLSession::is_ssl_session_reused() {
 
 unsigned long MySQLSession::server_version() {
   return connection_ ? mysql_get_server_version(connection_) : 0;
+}
+
+bool MySQLSession::LoggingStrategyDebugLogger::log_will_be_ignored() const {
+  return !mysql_harness::logging::log_level_is_handled(
+      mysql_harness::logging::LogLevel::kDebug);
 }
 
 void MySQLSession::LoggingStrategyDebugLogger::log(const std::string &msg) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -77,9 +77,7 @@ class TlsKeyManager {
   }
 
   /* Get SSL_CTX */
-  struct ssl_ctx_st *ctx() const {
-    return m_ctx;
-  }
+  struct ssl_ctx_st *ctx() const { return m_ctx; }
 
   /* Certificate table routines */
   void cert_table_set(int node_id, struct x509_st *);

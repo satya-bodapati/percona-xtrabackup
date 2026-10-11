@@ -1,4 +1,4 @@
-/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -407,9 +407,10 @@ bool sp_check_name(LEX_STRING *ident);
 Table_ref *sp_add_to_query_tables(THD *thd, LEX *lex, const char *db,
                                   const char *name);
 
-Item *sp_prepare_func_item(THD *thd, Item **it_addr);
+Item *sp_prepare_func_item(THD *thd, bool standalone, Item **it_addr);
 
-bool sp_eval_expr(THD *thd, Field *result_field, Item **expr_item_ptr);
+bool sp_eval_expr(THD *thd, bool standalone, Field *result_field,
+                  Item **expr_item_ptr);
 
 String *sp_get_item_value(THD *thd, Item *item, String *str);
 

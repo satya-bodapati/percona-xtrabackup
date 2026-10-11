@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -49,7 +49,7 @@ extern "C" struct mysql_string_service_st {
   mysql_string_handle (*mysql_string_to_lowercase_type)(mysql_string_handle);
   void (*mysql_string_free_type)(mysql_string_handle);
   void (*mysql_string_iterator_free_type)(mysql_string_iterator_handle);
-} * mysql_string_service;
+} *mysql_string_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

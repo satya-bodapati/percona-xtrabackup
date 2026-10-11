@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -26,11 +26,12 @@
 #ifndef ROUTER_DEFAULT_PATHS_INCLUDED
 #define ROUTER_DEFAULT_PATHS_INCLUDED
 
+#include "mysqlrouter/router_utils_export.h"
+
 #include <map>
 #include <string>
 
 #include "mysql/harness/filesystem.h"  // Path
-#include "mysqlrouter/router_export.h"
 
 namespace mysqlrouter {
 
@@ -46,7 +47,7 @@ namespace mysqlrouter {
  *
  * @throws std::invalid_argument (std::logic_error) if `origin` is empty
  */
-std::map<std::string, std::string> ROUTER_LIB_EXPORT
+std::map<std::string, std::string> ROUTER_UTILS_EXPORT
 get_default_paths(const mysql_harness::Path &origin);
 
 /**
@@ -59,7 +60,7 @@ get_default_paths(const mysql_harness::Path &origin);
  *
  * @note argv0 is currently ignored on Windows platforms
  */
-std::string ROUTER_LIB_EXPORT
+std::string ROUTER_UTILS_EXPORT
 find_full_executable_path(const std::string &argv0);
 
 }  // namespace mysqlrouter

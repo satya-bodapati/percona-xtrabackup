@@ -1,4 +1,4 @@
-# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -38,6 +38,7 @@ MYSQL_ADD_EXECUTABLE(
   ${PROTOC_PLUGIN_SRC}
   SKIP_INSTALL
 )
+DOWNGRADE_STRINGOP_WARNINGS(xprotocol_plugin)
 
 TARGET_LINK_LIBRARIES(
   xprotocol_plugin

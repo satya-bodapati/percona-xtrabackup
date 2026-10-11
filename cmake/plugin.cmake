@@ -1,4 +1,4 @@
-# Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -191,7 +191,7 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
       ENDIF()
     ENDIF()
 
-    ADD_VERSION_INFO(${target} MODULE SOURCES)
+    ADD_VERSION_INFO(MODULE SOURCES "")
     ADD_LIBRARY(${target} MODULE ${SOURCES}) 
     IF(COMPRESS_DEBUG_SECTIONS)
       MY_TARGET_LINK_OPTIONS(${target}
@@ -254,8 +254,9 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugin_output_directory
       )
 
-    # For APPLE: adjust path dependecy for SSL shared libraries.
+    # For APPLE: adjust path dependecy for SSL/KERBEROS shared libraries.
     SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(${target})
+    SET_PATH_TO_CUSTOM_KERBEROS_FOR_APPLE(${target})
 
     # Install dynamic library
     IF(NOT ARG_SKIP_INSTALL)
@@ -305,7 +306,7 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
   ENDIF()
 
   # Add SYSTEM INCLUDE_DIRECTORIES
-  IF(ARG_SYSTEM_INCLUDE_DIRECTORIES)
+  IF(BUILD_PLUGIN AND ARG_SYSTEM_INCLUDE_DIRECTORIES)
     TARGET_INCLUDE_DIRECTORIES(${target} SYSTEM PRIVATE
       ${ARG_SYSTEM_INCLUDE_DIRECTORIES})
   ENDIF()
@@ -325,6 +326,10 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
   IF(BUILD_PLUGIN AND ARG_MODULE_ONLY)
     ADD_OBJDUMP_TARGET(show_${target} "$<TARGET_FILE:${target}>"
       DEPENDS ${target})
+  ENDIF()
+
+  IF(BUILD_PLUGIN AND ARG_MODULE_ONLY AND APPLE)
+    TARGET_LINK_OPTIONS(${target} PRIVATE LINKER:-no_warn_duplicate_libraries)
   ENDIF()
 
   IF(BUILD_PLUGIN)

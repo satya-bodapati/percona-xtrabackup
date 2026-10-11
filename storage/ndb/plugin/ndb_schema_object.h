@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -109,10 +109,12 @@ class NDB_SCHEMA_OBJECT {
     // received the final ack which cleared all the slock bits
     bool m_coordinator_completed{false};
 
+    bool dbug_lock() { return m_lock.try_lock(); }
+    bool dbug_unlock() { return m_lock.unlock(), true; }
   } state;
 
   uint increment_use_count() const;
-  uint decremement_use_count() const;
+  uint decrement_use_count() const;
 
   NDB_SCHEMA_OBJECT() = delete;
   NDB_SCHEMA_OBJECT(const NDB_SCHEMA_OBJECT &) = delete;

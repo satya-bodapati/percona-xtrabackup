@@ -1,4 +1,4 @@
-# Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -56,6 +56,7 @@ MYSQL_ADD_EXECUTABLE(xplugin_unit_tests
   ADD_TEST xplugin
 )
 SET_TESTS_PROPERTIES(xplugin PROPERTIES TIMEOUT 300)
+DOWNGRADE_STRINGOP_WARNINGS(xplugin_unit_tests)
 
 ADD_COMPILE_FLAGS(${XPL_TEST_SRC}
   COMPILE_FLAGS "${MYSQLX_PROTOCOL_FLAGS}"

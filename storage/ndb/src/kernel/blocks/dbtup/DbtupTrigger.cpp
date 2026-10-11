@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2019,7 +2019,13 @@ fail:
     req->errorCode = RNIL;
     c_tux->execTUX_MAINT_REQ(signal);
     jamEntryDebug();
-    ndbrequire(req->errorCode == 0);
+    if (req->errorCode != 0) {
+      jam();
+      g_eventLogger->error(
+          "errCode = %u, tableId = %u, indexId = %u, fragId = %u",
+          req->errorCode, req->tableId, req->indexId, req->fragId);
+      ndbrequire(req->errorCode == 0);
+    }
     triggerList.next(triggerPtr);
   }
 #ifdef VM_TRACE
@@ -2114,7 +2120,13 @@ void Dbtup::removeTuxEntries(Signal *signal, Tablerec *regTabPtr) {
     c_tux->execTUX_MAINT_REQ(signal);
     jamEntryDebug();
     // must succeed
-    ndbrequire(req->errorCode == 0);
+    if (req->errorCode != 0) {
+      jam();
+      g_eventLogger->error(
+          "errCode = %u, tableId = %u, indexId = %u, fragId = %u",
+          req->errorCode, req->tableId, req->indexId, req->fragId);
+      ndbrequire(req->errorCode == 0);
+    }
     triggerList.next(triggerPtr);
   }
 }

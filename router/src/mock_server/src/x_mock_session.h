@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -85,13 +85,16 @@ class MySQLServerMockSessionX : public MySQLServerMockSession {
   using clock_type = std::chrono::steady_clock;
 
   MySQLServerMockSessionX(
-      MySQLXProtocol protocol,
+      ProtocolBase::socket_type client_sock,
+      ProtocolBase::endpoint_type client_ep, TlsServerContext &tls_server_ctx,
       std::unique_ptr<StatementReaderBase> statement_processor,
       const bool debug_mode, bool with_tls);
 
   void run() override;
 
   void cancel() override { protocol_.cancel(); }
+
+  void terminate() override { protocol_.terminate(); }
 
   /**
    * encode all async notices.

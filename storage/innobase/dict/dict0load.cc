@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -64,6 +64,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "rem0cmp.h"
 #include "srv0srv.h"
 #include "srv0start.h"
+#include "ut0math.h"
 
 /** Following are the InnoDB system tables. The positions in
 this array are referenced by enum dict_system_table_id. */
@@ -2257,8 +2258,9 @@ void dict_load_tablespace(dict_table_t *table, dict_err_ignore_t ignore_err) {
       shared_space_name = static_cast<char *>(ut::malloc_withkey(
           UT_NEW_THIS_FILE_PSI_KEY, strlen(general_space_name) + 20));
 
-      sprintf(shared_space_name, "%s_" ULINTPF, general_space_name,
-              static_cast<ulint>(table->space));
+      if (shared_space_name != nullptr)
+        sprintf(shared_space_name, "%s_" ULINTPF, general_space_name,
+                static_cast<ulint>(table->space));
     }
     tbl_name = shared_space_name;
     space_name = shared_space_name;
@@ -2930,7 +2932,7 @@ names which must be loaded
 subsequently to load all the
 foreign key constraints. */
 {
-  ulint tuple_buf[(DTUPLE_EST_ALLOC(1) + sizeof(ulint) - 1) / sizeof(ulint)];
+  ulint tuple_buf[ut::div_ceil(DTUPLE_EST_ALLOC(1), sizeof(ulint))];
   btr_pcur_t pcur;
   dtuple_t *tuple;
   dfield_t *dfield;

@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # -*- cperl -*-
 
-# Copyright (c) 2004, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2004, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -118,11 +118,13 @@ my $opt_platform_exclude;
 my $opt_ps_protocol;
 my $opt_report_features;
 my $opt_skip_core;
+my $opt_skip_suite;
 my $opt_skip_test_list;
 my $opt_sp_protocol;
 my $opt_start;
 my $opt_start_dirty;
 my $opt_start_exit;
+my $opt_start_test;
 my $opt_strace_client;
 my $opt_strace_server;
 my @opt_perf_servers;
@@ -187,6 +189,7 @@ my $build_thread       = 0;
 my $daemonize_mysqld   = 0;
 my $debug_d            = "d";
 my $exe_ndbmtd_counter = 0;
+my $tmpdir_path_updated= 0;
 my $source_dist        = 0;
 my $shutdown_report    = 0;
 my $valgrind_reports   = 0;
@@ -592,6 +595,19 @@ sub main {
     $opt_suites =~ s/,$//;
   }
 
+  # Skip suites which match the --skip-suite filter
+  if ($opt_skip_suite) {
+    my $opt_skip_suite_reg = init_pattern($opt_skip_suite, "--skip-suite");
+    for my $suite (split(",", $opt_suites)) {
+      if ($opt_skip_suite_reg and $suite =~ /$opt_skip_suite_reg/) {
+        remove_suite_from_list($suite);
+      }
+    }
+
+    # Removing ',' at the end of $opt_suites if exists
+    $opt_suites =~ s/,$//;
+  }
+
   if ($opt_skip_sys_schema) {
     remove_suite_from_list("sysschema");
   }
@@ -797,6 +813,7 @@ sub main {
       if ($opt_parallel > 1) {
         set_vardir("$opt_vardir/$child_num");
         $opt_tmpdir = "$opt_tmpdir/$child_num";
+        $tmpdir_path_updated = 1;
       }
 
       init_timers();
@@ -1291,7 +1308,14 @@ sub run_test_server ($$$) {
             $next->write_test($sock, 'TESTCASE');
             $running{ $next->key() } = $next;
             $num_ndb_tests++ if ($next->{ndb_test});
-          } else {
+          } elsif($opt_start_test) {
+            # The selected test has been run; now leave the child hanging
+            sleep(1);
+            mtr_print("\nWaiting for server(s) to exit...");
+            My::SafeProcess->wait_any();
+            exit(1);
+          }
+          else {
             # No more test, tell child to exit
             print $sock "BYE\n";
 	    # Mark socket as unused, no more tests will be allocated
@@ -1398,7 +1422,10 @@ sub run_worker ($) {
 
       my $valgrind_reports = 0;
       if ($opt_valgrind_mysqld or $opt_sanitize) {
-        $valgrind_reports = valgrind_exit_reports() if not $shutdown_report;
+        # Look for leaks here, even if we aldready have $shutdown_report.
+        # shutdown_exit_reports() will report some unknown failure.
+        # valgrind_exit_reports() will look specifically for ASAN/LSAN stuff.
+        $valgrind_reports = valgrind_exit_reports();
         print $server "VALGREP\n" if $valgrind_reports;
       }
 
@@ -1672,6 +1699,7 @@ sub command_line_setup {
     'skip-im'                            => \&ignore_option,
     'skip-ndbcluster|skip-ndb'           => \$opt_skip_ndbcluster,
     'skip-rpl'                           => \&collect_option,
+    'skip-suite=s'                       => \$opt_skip_suite,
     'skip-sys-schema'                    => \$opt_skip_sys_schema,
     'skip-test=s'                        => \&collect_option,
     'start-from=s'                       => \&collect_option,
@@ -1797,6 +1825,7 @@ sub command_line_setup {
     'shutdown-timeout=i'    => \$opt_shutdown_timeout,
     'start'                 => \$opt_start,
     'start-and-exit'        => \$opt_start_exit,
+    'start-and-test'        => \$opt_start_test,
     'start-dirty'           => \$opt_start_dirty,
     'stress=s'              => \$opt_stress,
     'suite-opt=s'           => \$opt_suite_opt,
@@ -2085,7 +2114,7 @@ sub command_line_setup {
     $opt_tmpdir = "$opt_vardir/tmp" unless $opt_tmpdir;
 
     my $res =
-      check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel);
+      check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel, $tmpdir_path_updated);
 
     if ($res) {
       mtr_report("Too long tmpdir path '$opt_tmpdir'",
@@ -2334,6 +2363,16 @@ sub command_line_setup {
 
   if (@opt_perf_servers && $opt_shutdown_timeout == 0) {
     mtr_error("Using perf with --shutdown-timeout=0 produces empty perf.data");
+  }
+
+  if ($opt_start_test) {
+    collect_option('quick-collect', 1);
+    $opt_no_skip = 1;
+    $excluded_string = '';
+    $opt_check_testcases = 0;
+    if(scalar @opt_cases != 1) {
+      mtr_error("Supply a single test case when using --start-and-test");
+    }
   }
 
   mtr_report("Checking supported features");
@@ -3203,6 +3242,10 @@ sub environment_setup {
     $ENV{'MYSQLTEST_VARDIR_ABS'}  = abs_path("$opt_vardir");
   }
 
+  if($opt_start_test) {
+    $ENV{'MTR_SKIP_TEST_CLEANUP'} = 1;
+  }
+
   # Setup env for NDB
   if ($ndbcluster_enabled) {
     # Tools that supports --defaults-file=xxx
@@ -3595,7 +3638,7 @@ sub setup_vardir() {
   # UNIX domain socket's path far below PATH_MAX. Don't allow that
   # to happen.
   my $res =
-    check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel);
+    check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel, $tmpdir_path_updated);
   if ($res) {
     mtr_error("Socket path '$opt_tmpdir' too long, it would be ",
               "truncated and thus not possible to use for connection to ",
@@ -5076,8 +5119,8 @@ sub run_testcase ($) {
   # If '--start' or '--start-dirty' given, stop here to let user manually
   # run tests. If '--wait-all' is also given, do the same, but don't die
   # if one server exits.
-  if ($start_only) {
-    mtr_print("\nStarted",    started(all_servers()));
+  if ($start_only || $opt_start_test) {
+    mtr_print("Started",    started(all_servers()));
     mtr_print("Using config", $tinfo->{template_path});
     mtr_print("Port and socket path for server(s):");
 
@@ -5085,7 +5128,8 @@ sub run_testcase ($) {
       mtr_print($mysqld->name() .
                "  " . $mysqld->value('port') . "  " . $mysqld->value('socket'));
     }
-
+  }
+  if ($start_only) {
     if ($opt_start_exit) {
       mtr_print("Server(s) started, not waiting for them to finish");
       if (IS_WINDOWS) {
@@ -6026,17 +6070,24 @@ sub check_expected_crash_and_restart($$) {
           delete $mysqld->{'restart_opts'};
         }
 
-        # Attempt to remove the .expect file. If it fails in
-        # windows, retry removal after a sleep.
-        my $retry = 1;
-        while (
-          unlink($expect_file) == 0 &&
-          $! == 13 &&    # Error = 13, Permission denied
-          IS_WINDOWS && $retry-- >= 0
-          ) {
-          # Permission denied to unlink.
-          # Race condition seen on windows. Wait and retry.
-          mtr_milli_sleep(1000);
+        # Attempt to remove the .expect file. It was observed that on Windows
+        # 439 are sometimes not enough, while 440th attempt succeeded. The exact
+        # cause of the problem is unknown, as trying to list the processes with
+        # open handle using sysinternal tool named Handle, caused the tool
+        # itself to crash. We make only 30 iterations here, as a trade-off,
+        # which seems to be enough in most cases, but waitng longer seems to
+        # risk timing out the whole test suite. Not removing a file might impact
+        # the next test case, thus we emit a warning in such case.
+        my $attempts = 0;
+        while (unlink($expect_file) == 0) {
+          if ($! == 13 && IS_WINDOWS && ++$attempts < 30){
+            # Permission denied to unlink.
+            # Race condition seen on windows. Wait and retry.
+            mtr_milli_sleep(1000);
+          } else {
+            mtr_warning("attempt#$attempts to unlink($expect_file) failed: $!");
+            last;
+          }
         }
 
         # Instruct an implicit wait in case the restart is intended
@@ -7706,8 +7757,8 @@ sub valgrind_exit_reports() {
       # This line marks the start of a valgrind report
       $found_report = 1 if $line =~ /^==\d+== .* SUMMARY:/;
 
-      # This line marks the start of UBSAN memory leaks
-      $found_report = 1 if $line =~ /^==\d+==ERROR:.*/;
+      # This line marks LSAN memory leaks
+      $found_report = 1 if $line =~ /.*LeakSanitizer: detected memory leaks.*/;
 
       # Various UBSAN runtime errors
       $found_report = 1 if $line =~ /.*runtime error: .*/;
@@ -8146,6 +8197,9 @@ Misc options
                           $0 --start alias &
   start-and-exit        Same as --start, but mysql-test-run terminates and
                         leaves just the server running.
+  start-and-test        Like --start, but runs a single specified testcase
+                        with MTR_SKIP_TEST_CLEANUP set, then leaves the
+                        servers running.
   start-dirty           Only start the servers (without initialization) for
                         the first specified test case.
   stress=ARGS           Run stress test, providing options to

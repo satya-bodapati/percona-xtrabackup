@@ -1,4 +1,4 @@
-/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -23,8 +23,7 @@
 
 #include "sql/rpl_injector.h"
 
-#include "sql/binlog.h"     // mysql_bin_log
-#include "sql/log_event.h"  // Incident_log_event
+#include "sql/binlog.h"  // mysql_bin_log
 #include "sql/mdl.h"
 #include "sql/rpl_write_set_handler.h"  // add_pke
 #include "sql/sql_base.h"               // close_thread_tables
@@ -260,10 +259,12 @@ void injector::free_instance() {
   }
 }
 
-int injector::record_incident(
-    THD *thd, mysql::binlog::event::Incident_event::enum_incident incident,
-    const LEX_CSTRING &message) {
-  Incident_log_event ev(thd, incident, message);
-  return mysql_bin_log.write_incident(&ev, thd, true /*need_lock_log=true*/,
-                                      message.str);
+int injector::record_incident(THD *thd, std::string_view message) {
+  return mysql_bin_log.write_incident_commit(thd, message);
+}
+
+void injector::get_current_binlog_filename(char (&filename)[FN_REFLEN]) {
+  LOG_INFO log_info;
+  mysql_bin_log.get_current_log(&log_info);
+  strmake(filename, log_info.log_file_name, FN_REFLEN - 1);
 }

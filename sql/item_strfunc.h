@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -616,7 +616,7 @@ class Item_func_database : public Item_func_sysconst {
 
   String *val_str(String *) override;
   bool resolve_type(THD *) override {
-    set_data_type_string(uint32{MAX_FIELD_NAME});
+    set_data_type_string(uint32{NAME_CHAR_LEN});
     set_nullable(true);
     return false;
   }

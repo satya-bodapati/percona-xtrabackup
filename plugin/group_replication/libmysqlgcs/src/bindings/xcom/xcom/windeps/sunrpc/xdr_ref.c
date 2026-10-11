@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -49,7 +49,8 @@
  * size is the size of the referneced structure.
  * proc is the routine to handle the referenced structure.
  */
-bool_t xdr_reference(xdrs, pp, size, proc) XDR *xdrs;
+bool_t xdr_reference(xdrs, pp, size, proc)
+XDR *xdrs;
 caddr_t *pp;    /* the pointer to work on */
 u_int size;     /* size of the object pointed to */
 xdrproc_t proc; /* xdr routine to handle the object */
@@ -101,7 +102,8 @@ INTDEF(xdr_reference)
  * > xdr_obj: routine to XDR an object.
  *
  */
-bool_t xdr_pointer(xdrs, objpp, obj_size, xdr_obj) XDR *xdrs;
+bool_t xdr_pointer(xdrs, objpp, obj_size, xdr_obj)
+XDR *xdrs;
 char **objpp;
 u_int obj_size;
 xdrproc_t xdr_obj;

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -41,6 +41,8 @@
 namespace net {
 namespace tls {
 
+enum HandshakeType { kClient, kServer };
+
 template <typename LowerLayer>
 class TlsStream : private TlsBase<LowerLayer> {
  public:
@@ -58,6 +60,10 @@ class TlsStream : private TlsBase<LowerLayer> {
   auto get_executor() { return lower_layer().get_executor(); }
   auto cancel() { return lower_layer().cancel(); }
 
+  auto shutdown(typename LowerLayer::shutdown_type sd) {
+    return lower_layer().shutdown(sd);
+  }
+
   typename Parent::LowerLayerType &lower_layer() {
     return Parent::lower_layer_;
   }
@@ -71,7 +77,7 @@ class TlsStream : private TlsBase<LowerLayer> {
   auto connect(const endpoint_type &endpoint) {
     // The call might initialize SSL handshake.
     // Current implementation is sufficient.
-    lower_layer().connect(endpoint);
+    return lower_layer().connect(endpoint);
   }
 
   template <class CompletionToken>
@@ -79,6 +85,20 @@ class TlsStream : private TlsBase<LowerLayer> {
     // The call might initialize SSL handshake.
     // Current implementation is sufficient.
     lower_layer().async_connect(endpoint, std::forward<CompletionToken>(token));
+  }
+
+  template <class CompletionToken>
+  auto async_handshake(HandshakeType type, CompletionToken &&token) {
+    if (type == kServer) {
+      assert(false && "Server handshake is not supported.");
+      return;
+    }
+
+    SslIoCompletionToken<SslHandshakeClientOperation, net::mutable_buffer,
+                         CompletionToken, Parent>
+        io_token(*this, {}, token);
+
+    io_token.do_it();
   }
 
   template <class MutableBufferSequence, class CompletionToken>
@@ -186,6 +206,10 @@ class TlsStream : private TlsBase<LowerLayer> {
   auto close() { return lower_layer().close(); }
   auto release() { return lower_layer().release(); }
   auto native_handle() { return lower_layer().native_handle(); }
+
+#ifdef MYSQL_ROUTER_ENABLE_OPENSSL_INTERNAL_ALERT_TESTS
+  SSL *native_ssl_handle() { return Parent::ssl_.get(); }
+#endif  // MYSQL_ROUTER_ENABLE_OPENSSL_INTERNAL_ALERT_TESTS
 };
 
 }  // namespace tls

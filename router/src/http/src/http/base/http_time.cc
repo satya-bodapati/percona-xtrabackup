@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -28,9 +28,8 @@
 #include <cstring>  // memset
 #include <ctime>    // mktime, gmtime_r, gmtime_s
 #include <map>
-
-#include <iostream>  // cerr
-#include <stdexcept>
+#include <stdexcept>  // out_of_range
+#include <string>
 
 #include "http/base/http_time.h"
 

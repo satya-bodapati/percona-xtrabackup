@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -78,6 +78,11 @@ const char *ndb_thd_query(const THD *thd);
 size_t ndb_thd_query_length(const THD *thd);
 
 /*
+  @brief Get PFS id of current thread
+*/
+ulonglong ndb_thd_get_pfs_thread_id();
+
+/*
  @brief Check if THD is the "binlog injector thread"
 
  @return true if thread matches condition
@@ -143,6 +148,23 @@ class Ndb_thd_memory_guard {
  public:
   Ndb_thd_memory_guard(THD *thd);
   ~Ndb_thd_memory_guard();
+};
+
+/**
+  @brief RAII style class to create and release a THD
+
+  @note The THD will be created and configured to be a background THD
+*/
+class Ndb_thd_guard {
+  THD *const m_thd;
+  Ndb_thd_guard(const Ndb_thd_guard &) = delete;
+
+ public:
+  Ndb_thd_guard();
+
+  ~Ndb_thd_guard();
+
+  THD *get_thd() const { return m_thd; }
 };
 
 #endif

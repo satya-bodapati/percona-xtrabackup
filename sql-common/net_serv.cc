@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -81,7 +81,6 @@ using std::min;
 */
 
 #ifdef MYSQL_SERVER
-
 /*
   The following variables/functions should really not be declared
   extern, but as it's hard to include sql_class.h here, we have to
@@ -92,6 +91,13 @@ extern void thd_increment_bytes_received(size_t length);
 
 /* Additional instrumentation hooks for the server */
 #include "mysql_com_server.h"
+
+/* Refresh cached values in the THD for the server. */
+static void server_store_cached_values(const NET *net) {
+  // Refresh only if this net is the net of the current_thd
+  if (current_thd != nullptr && current_thd->get_net() == net)
+    current_thd->store_cached_properties(THD::cached_properties::RW_STATUS);
+}
 #endif
 
 static bool net_write_buff(NET *, const uchar *, size_t);
@@ -167,6 +173,7 @@ bool my_net_init(NET *net, Vio *vio) {
   net->last_errno = 0;
 #ifdef MYSQL_SERVER
   net->extension = nullptr;
+  server_store_cached_values(net);
 #else
   NET_EXTENSION *ext = net_extension_init();
   ext->net_async_context->cur_pos = net->buff + net->where_b;
@@ -1303,6 +1310,9 @@ bool net_write_packet(NET *net, const uchar *packet, size_t length) {
     return true;
 
   net->reading_or_writing = 2;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
 
   const bool do_compress = net->compress;
   if (do_compress) {
@@ -1311,6 +1321,9 @@ bool net_write_packet(NET *net, const uchar *packet, size_t length) {
       net->last_errno = ER_OUT_OF_RESOURCES;
       /* In the server, allocation failure raises a error. */
       net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+      server_store_cached_values(net);
+#endif
       return true;
     }
   }
@@ -1324,6 +1337,9 @@ bool net_write_packet(NET *net, const uchar *packet, size_t length) {
   if (do_compress) my_free(const_cast<uchar *>(packet));
 
   net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
 
   /* Socket can't be used any more */
   if (net->error == NET_ERROR_SOCKET_NOT_READABLE) {
@@ -1712,6 +1728,9 @@ static net_async_status net_read_packet_nonblocking(NET *net, ulong *ret) {
     case NET_ASYNC_PACKET_READ_IDLE:
       net_async->async_packet_read_state = NET_ASYNC_PACKET_READ_HEADER;
       net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+      server_store_cached_values(net);
+#endif
       [[fallthrough]];
     case NET_ASYNC_PACKET_READ_HEADER:
       /*
@@ -1788,6 +1807,9 @@ end:
 
   net->read_pos[*ret] = 0;
   net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
   if (net->compress) {
     mysql_compress_context *mysql_compress_ctx = compress_context(net);
     if (my_uncompress(mysql_compress_ctx, net->buff + net->where_b,
@@ -1808,6 +1830,9 @@ end:
 error:
   *ret = packet_error;
   net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
   return NET_ASYNC_COMPLETE;
 }
 
@@ -1992,51 +2017,50 @@ static ulong net_read_update_offsets(NET *net, size_t start_of_packet,
 static net_async_status net_read_compressed_nonblocking(NET *net,
                                                         ulong *len_ptr) {
   DBUG_TRACE;
+  NET_ASYNC *net_async = NET_ASYNC_DATA(net);
   assert(net->compress);
   ulong &len = *len_ptr;
-
-  /* Maintain the local states to read the multipacket asynchronously */
-  static size_t start_of_packet;
-  static size_t first_packet_offset;
-  static size_t buf_length;
-  static uint multi_byte_packet = 0;
-  static net_async_status status = NET_ASYNC_COMPLETE;
-
-  if (status != NET_ASYNC_NOT_READY)
-    net_read_init_offsets(net, start_of_packet, first_packet_offset,
-                          multi_byte_packet, buf_length);
+  if (net_async->mp_state.mp_status != NET_ASYNC_NOT_READY)
+    net_read_init_offsets(net, net_async->mp_state.mp_start_of_packet,
+                          net_async->mp_state.mp_first_packet_offset,
+                          net_async->mp_state.mp_multi_byte_packet,
+                          net_async->mp_state.mp_buf_length);
 
   for (;;) {
     /*  Read the current packet in net->buff */
-    if (net_read_process_buffer(net, start_of_packet, buf_length,
-                                multi_byte_packet, first_packet_offset))
+    if (net_read_process_buffer(net, net_async->mp_state.mp_start_of_packet,
+                                net_async->mp_state.mp_buf_length,
+                                net_async->mp_state.mp_multi_byte_packet,
+                                net_async->mp_state.mp_first_packet_offset))
       break;
 
     /*
       Read the mysql packet from vio, uncompress it and make it accessible
       through net->buff.
     */
-    status = net_read_packet_nonblocking(net, &len);
-    if (status == NET_ASYNC_NOT_READY) {
-      net->save_char = net->buff[first_packet_offset];
-      net->buf_length = buf_length;
-      return status;
+    net_async->mp_state.mp_status = net_read_packet_nonblocking(net, &len);
+    if (net_async->mp_state.mp_status == NET_ASYNC_NOT_READY) {
+      net->save_char = net->buff[net_async->mp_state.mp_first_packet_offset];
+      net->buf_length = net_async->mp_state.mp_buf_length;
+      return net_async->mp_state.mp_status;
     }
 
     if (len == packet_error) {
-      status = NET_ASYNC_COMPLETE;
-      return status;
+      net_async->mp_state.mp_status = NET_ASYNC_COMPLETE;
+      return net_async->mp_state.mp_status;
     }
-    buf_length += len;
+    net_async->mp_state.mp_buf_length += len;
   }
   /*
     Once the packets are read in the net->buff, adjust the tracking offsets to
     the appropriate values.
   */
-  len = net_read_update_offsets(net, start_of_packet, first_packet_offset,
-                                buf_length, multi_byte_packet);
-  status = NET_ASYNC_COMPLETE;
-  return status;
+  len = net_read_update_offsets(net, net_async->mp_state.mp_start_of_packet,
+                                net_async->mp_state.mp_first_packet_offset,
+                                net_async->mp_state.mp_buf_length,
+                                net_async->mp_state.mp_multi_byte_packet);
+  net_async->mp_state.mp_status = NET_ASYNC_COMPLETE;
+  return net_async->mp_state.mp_status;
 }
 
 /**
@@ -2050,33 +2074,31 @@ static net_async_status net_read_compressed_nonblocking(NET *net,
 static net_async_status net_read_uncompressed_nonblocking(NET *net,
                                                           ulong *len_ptr) {
   DBUG_TRACE;
+  NET_ASYNC *net_async = NET_ASYNC_DATA(net);
   assert(!net->compress);
   ulong &len = *len_ptr;
 
-  // Maintain the local states
-  static net_async_status status = NET_ASYNC_COMPLETE;
-  static ulong save_pos;
-  static ulong total_length;
-
   // Initialize the states
-  if (status == NET_ASYNC_COMPLETE) {
-    save_pos = net->where_b;
-    total_length = 0;
+  if (net_async->mp_state.mp_status == NET_ASYNC_COMPLETE) {
+    net_async->mp_state.mp_save_pos = net->where_b;
+    net_async->mp_state.mp_total_length = 0;
   }
 
-  status = net_read_packet_nonblocking(net, &len);
-  total_length += len;
+  net_async->mp_state.mp_status = net_read_packet_nonblocking(net, &len);
+  net_async->mp_state.mp_total_length += len;
   net->where_b += len;
 
-  if (len == MAX_PACKET_LENGTH) status = NET_ASYNC_NOT_READY;
-  if (status == NET_ASYNC_NOT_READY) return status;
+  if (len == MAX_PACKET_LENGTH)
+    net_async->mp_state.mp_status = NET_ASYNC_NOT_READY;
+  if (net_async->mp_state.mp_status == NET_ASYNC_NOT_READY)
+    return net_async->mp_state.mp_status;
 
   // Update the offsets
-  net->where_b = save_pos;
-  len = total_length;
+  net->where_b = net_async->mp_state.mp_save_pos;
+  len = net_async->mp_state.mp_total_length;
   net->read_pos = net->buff + net->where_b;
-  status = NET_ASYNC_COMPLETE;
-  return status;
+  net_async->mp_state.mp_status = NET_ASYNC_COMPLETE;
+  return net_async->mp_state.mp_status;
 }
 
 /**
@@ -2096,6 +2118,9 @@ static size_t net_read_packet(NET *net, size_t *complen) {
   *complen = 0;
 
   net->reading_or_writing = 1;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
 
   /*
     We should reset compress_packet_nr even before reading the header because
@@ -2143,12 +2168,18 @@ end:
     net->error = NET_ERROR_SOCKET_UNUSABLE;
   DBUG_DUMP("net read", net->buff + net->where_b, pkt_len);
   net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
   return pkt_len;
 
 error:
   if (net->error == NET_ERROR_SOCKET_NOT_WRITABLE)
     net->error = NET_ERROR_SOCKET_UNUSABLE;
   net->reading_or_writing = 0;
+#ifdef MYSQL_SERVER
+  server_store_cached_values(net);
+#endif
   return packet_error;
 }
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -124,7 +124,7 @@ struct XDR {
     /* get a int from underlying stream */
     bool_t (*x_putint32)(XDR *__xdrs, __const int32_t *__ip);
     /* put a int to " */
-  } * x_ops;
+  } *x_ops;
   caddr_t x_public;  /* users' data */
   caddr_t x_private; /* pointer to private data */
   caddr_t x_base;    /* private used for position info */

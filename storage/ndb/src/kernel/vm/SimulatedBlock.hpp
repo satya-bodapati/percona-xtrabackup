@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1516,6 +1516,7 @@ class alignas(NDB_CL) SimulatedBlock
   void init_global_ptrs(void **tmp, size_t cnt);
   void init_global_uint32_ptrs(void **tmp, size_t cnt);
   void init_global_uint32(void **tmp, size_t cnt);
+  void init_global_block();
   void disable_global_variables();
   void enable_global_variables();
 #endif
@@ -1573,7 +1574,7 @@ class alignas(NDB_CL) SimulatedBlock
 #endif
 
   /* Needs to be defined in mt.hpp as well to work */
-  //#define DEBUG_SCHED_STATS 1
+  // #define DEBUG_SCHED_STATS 1
 
 #define AVERAGE_SIGNAL_SIZE 16
 #define MIN_QUERY_INSTANCES_PER_RR_GROUP 4
@@ -2029,6 +2030,14 @@ class alignas(NDB_CL) SimulatedBlock
       mb();
     }
   }
+
+#if defined(USE_INIT_GLOBAL_VARIABLES)
+  /**
+   * Optional method to check / init global variables between
+   * job buffer signal executions
+   */
+  virtual void checkInitGlobalVariables();
+#endif
 
  protected:
   /**

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -253,9 +253,10 @@ struct MYSQL;
   @return A pointer to plugin-specific, per-connection data if any.
 */
 
-typedef void *(tracing_start_callback)(
-    struct st_mysql_client_plugin_TRACE *self, MYSQL *connection_handle,
-    enum protocol_stage stage);
+typedef void *(
+    tracing_start_callback)(struct st_mysql_client_plugin_TRACE *self,
+                            MYSQL *connection_handle,
+                            enum protocol_stage stage);
 
 /**
   Trace plugin tracing_stop() method.

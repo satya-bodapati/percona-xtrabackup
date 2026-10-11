@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2024, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -640,8 +640,8 @@ static inline void btr_node_ptr_set_child_page_no(
   ut_ad(!rec_offs_comp(offsets) || rec_get_node_ptr_flag(rec));
 
   /* The child address is in the last field */
-  field = const_cast<byte *>(rec_get_nth_field(
-      nullptr, rec, offsets, rec_offs_n_fields(offsets) - 1, &len));
+  field = rec_get_nth_field(nullptr, rec, offsets,
+                            rec_offs_n_fields(offsets) - 1, &len);
 
   ut_ad(len == REC_NODE_PTR_SIZE);
 

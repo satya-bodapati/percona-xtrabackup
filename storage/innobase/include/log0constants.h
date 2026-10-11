@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -43,6 +43,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /* os_offset_t, OS_FILE_LOG_BLOCK_SIZE */
 #include "os0file.h"
+
+/* UINT32_MAX */
+#include <cstdint>
 
 /** Align the log buffer (log_t::buf) to this size. This is to preserve the
 compatibility with older MySQL versions which also aligned the log buffer
@@ -492,7 +495,7 @@ constexpr ulong INNODB_LOG_BUFFER_SIZE_DEFAULT = 64 * 1024 * 1024UL;
 constexpr ulong INNODB_LOG_BUFFER_SIZE_MIN = 256 * 1024UL;
 
 /** Maximum allowed value of innodb_log_buffer_size. */
-constexpr ulong INNODB_LOG_BUFFER_SIZE_MAX = ULONG_MAX;
+constexpr ulong INNODB_LOG_BUFFER_SIZE_MAX = UINT32_MAX;
 
 /** Default value of innodb_log_recent_written_size (in bytes). */
 constexpr ulong INNODB_LOG_RECENT_WRITTEN_SIZE_DEFAULT = 1024 * 1024;

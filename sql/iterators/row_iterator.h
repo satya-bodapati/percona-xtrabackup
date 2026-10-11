@@ -1,7 +1,7 @@
 #ifndef SQL_ITERATORS_ROW_ITERATOR_H_
 #define SQL_ITERATORS_ROW_ITERATOR_H_
 
-/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -163,8 +163,8 @@ class RowIterator {
   }
 
   /** @see TimingIterator .*/
-  virtual void SetOverrideProfiler([
-      [maybe_unused]] const IteratorProfiler *profiler) {
+  virtual void SetOverrideProfiler(
+      [[maybe_unused]] const IteratorProfiler *profiler) {
     // Valid for TimingIterator only.
     assert(false);
   }

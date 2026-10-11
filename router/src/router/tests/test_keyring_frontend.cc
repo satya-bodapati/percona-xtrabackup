@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -31,7 +31,6 @@
 #include <array>
 #include <bitset>
 #include <fstream>
-#include <iostream>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -3231,16 +3230,13 @@ INSTANTIATE_TEST_SUITE_P(Fail, KeyringFrontendTest,
                          });
 
 static void init_DIM() {
+  static mysql_harness::logging::Registry static_registry;
+
   mysql_harness::DIM &dim = mysql_harness::DIM::instance();
 
   // logging facility
-  dim.set_LoggingRegistry(
-      []() {
-        static mysql_harness::logging::Registry registry;
-        return &registry;
-      },
-      [](mysql_harness::logging::Registry *) {}  // don't delete our static!
-  );
+  dim.set_static_LoggingRegistry(&static_registry);
+
   mysql_harness::logging::Registry &registry = dim.get_LoggingRegistry();
 
   mysql_harness::logging::create_module_loggers(

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -25,7 +25,6 @@
 
 #include "mysqlrouter/cluster_metadata_instance_attributes.h"
 
-#include <cstring>
 #include <stdexcept>
 
 #ifdef RAPIDJSON_NO_SIZETYPEDEFINE

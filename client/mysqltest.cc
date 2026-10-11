@@ -1,4 +1,4 @@
-// Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+// Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
@@ -2881,7 +2881,7 @@ static void var_set_escape(struct st_command *command, VAR *dst) {
     - the second string,
     - a bool that is false if the parsing succeeded; true if it failed.
   */
-  auto parse_args = [&]() -> auto {
+  auto parse_args = [&]() -> auto{
     // command->first_argument contains '(characters,text)'
     char *p = command->first_argument;
     // Find (
@@ -3557,7 +3557,7 @@ static void free_dynamic_strings(T *val) {
 ///              the function, through recursion, end up being
 ///              freed by dynstr_free().
 template <typename T1, typename... T2>
-static void free_dynamic_strings(T1 *first, T2 *... rest) {
+static void free_dynamic_strings(T1 *first, T2 *...rest) {
   free_dynamic_strings(first);
   free_dynamic_strings(rest...);
 }
@@ -4840,6 +4840,9 @@ static void do_change_user(struct st_command *command) {
     if (cur_con->stmt) mysql_stmt_close(cur_con->stmt);
     cur_con->stmt = nullptr;
     mysql_reconnect(&cur_con->mysql);
+    /* mysql_reconnect changes this setting to true. We really want it to be
+    false at all times. */
+    cur_con->mysql.reconnect = false;
   }
 
   dynstr_free(&ds_user);
@@ -6729,6 +6732,9 @@ static void do_connect(struct st_command *command) {
       if (ds_connection_name.length) set_current_connection(con_slot);
       assert(con_slot != next_con);
     }
+    /* mysql_reconnect changes this setting to true. We really want it to be
+    false at all times. */
+    con_slot->mysql.reconnect = false;
     goto free_options;
   }
 

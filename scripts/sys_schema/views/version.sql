@@ -1,4 +1,4 @@
--- Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+-- Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 --
 -- This program is free software; you can redistribute it and/or modify
 -- it under the terms of the GNU General Public License as published by
@@ -43,5 +43,5 @@ VIEW version (
   sys_version,
   mysql_version
 ) AS 
-SELECT '2.1.2' AS sys_version,
+SELECT '2.1.3' AS sys_version,
         version() AS mysql_version;

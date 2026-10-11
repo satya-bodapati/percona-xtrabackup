@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -133,6 +133,9 @@ struct EmulatorData {
   class SimBlockList *theSimBlockList;
   class SocketServer *m_socket_server;
   class Ndbd_mem_manager *m_mem_manager;
+
+  // Single threaded only
+  EmulatedJamBuffer *m_st_jam_buffer;
 
   /**
    * Constructor

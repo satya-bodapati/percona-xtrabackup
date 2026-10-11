@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -204,7 +204,6 @@ int runTestMaxTransaction(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 int runTestMaxOperations(NDBT_Context *ctx, NDBT_Step *step) {
-  Uint32 l = 1;
   int result = NDBT_OK;
   int maxOpsLimit = 1;
   const NdbDictionary::Table *pTab = ctx->getTab();
@@ -320,8 +319,6 @@ int runTestMaxOperations(NDBT_Context *ctx, NDBT_Step *step) {
     }
 
     hugoOps.closeTransaction(pNdb);
-
-    l++;
   }
   maxOpsLimit = lower_max_ops;
   ndbout << "Found max operations limit " << maxOpsLimit << endl;
@@ -5534,8 +5531,9 @@ class FragSignalChecker {
   static Uint32 getSecSz(Uint32 secNum, Uint32 iter) {
     require(secNum < 3);
     Uint32 numSizes = getNumInterestingSizes();
-    Uint32 divisor =
-        (secNum == 0 ? 1 : secNum == 1 ? numSizes : numSizes * numSizes);
+    Uint32 divisor = (secNum == 0   ? 1
+                      : secNum == 1 ? numSizes
+                                    : numSizes * numSizes);
     /* offset ensures only end sections are 0 length */
     Uint32 index = (iter / divisor) % numSizes;
     if ((index == 0) && (iter >= (divisor * numSizes)))
@@ -7464,6 +7462,126 @@ int testSlowConnectEnable(NDBT_Context *ctx, NDBT_Step *step) {
   return result;
 }
 
+int testSetVarbinaryWithSetValue(NDBT_Context *ctx, NDBT_Step *step) {
+  // Test for bug#36989337 NDB Varbinary like columns fail with OO_SETVALUE
+  Ndb *pNdb = GETNDB(step);
+  const NdbDictionary::Table *pTab = ctx->getTab();
+
+  // Run as a 'WIDE_2COL' testcase - do nothing for other tables
+  if (strcmp(pTab->getName(), "WIDE_2COL") != 0) return NDBT_SKIPPED;
+
+  NdbTransaction *pTrans;
+  NdbOperation *pOp;
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  char readbuf[NDB_MAX_TUPLE_SIZE_IN_WORDS << 2];
+
+  // Insert the test tuple ['xyz','abc']
+  CHECKE(pTrans = pNdb->startTransaction(), (*pNdb));
+  CHECKE(pOp = pTrans->getNdbOperation(pTab->getName()), (*pTrans));
+  CHECKE(pOp->insertTuple() == 0, (*pOp));
+  CHECKE(pOp->setValue("KEY", "\003\000xyz") == 0, (*pOp));
+  CHECKE(pOp->setValue("ATTR", "\003\000abc") == 0, (*pOp));
+  CHECKE(pTrans->execute(Commit) == 0, (*pTrans));
+  pTrans->close();
+
+  // Read and verify ATTR value
+  CHECKE(pTrans = pNdb->startTransaction(), (*pNdb));
+  CHECKE(pOp = pTrans->getNdbOperation(pTab->getName()), (*pTrans));
+  CHECKE(pOp->readTuple() == 0, (*pOp));
+  CHECKE(pOp->equal("KEY", "\003\000xyz") == 0, (*pOp));
+  CHECKE(pOp->getValue("ATTR", readbuf) != nullptr, (*pOp));
+  CHECKE(pTrans->execute(NoCommit) == 0, (*pTrans));
+  CHECK(memcmp(readbuf, "\003\000abc", 5) == 0);
+  CHECKE(pTrans->getNdbError().code == 0, (*pTrans));
+  CHECKE(pTrans->execute(Rollback) == 0, (*pTrans));
+  pTrans->close();
+
+  // Insert the test tuple ['XYZ','ABC'] using NdbRecord and OO_SETVALUE
+  // Whole key must be in record for writeTuple
+  const NdbRecord *tabRec;
+  NdbDictionary::RecordSpecification spec[1];
+  spec->column =
+      pTab->getColumn("KEY");  // Whole key must be in record for writeTuple
+  spec->offset = 0;
+  spec->nullbit_byte_offset = 0;
+  spec->nullbit_bit_in_byte = 0;
+  spec->column_flags = 0;
+  tabRec = dict->createRecord(
+      pTab, spec, 1, sizeof(NdbDictionary::RecordSpecification),
+      NdbDictionary::RecMysqldBitfield | NdbDictionary::RecPerColumnFlags);
+  CHECKE(tabRec != nullptr, (*dict));
+
+  const Uint32 rowLen = NDB_MAX_TUPLE_SIZE_IN_WORDS << 2;
+  char rowBuf[rowLen] = "\003\000XYZ";
+  unsigned char mask[1] = {(1 << 0) | (1 << 1)};
+
+  NdbOperation::SetValueSpec setValueSpec[1];
+  setValueSpec[0].column = pTab->getColumn("ATTR");
+  setValueSpec[0].value = "\003\000ABC";
+
+  NdbOperation::OperationOptions opts;
+  opts.optionsPresent = NdbOperation::OperationOptions::OO_SETVALUE;
+  opts.extraSetValues = setValueSpec;
+  opts.numExtraSetValues = 1;
+
+  CHECKE(pTrans = pNdb->startTransaction(), (*pNdb));
+  auto writeOp = pTrans->writeTuple(tabRec, rowBuf, tabRec, NULL, mask, &opts,
+                                    sizeof(opts));
+  CHECKE(writeOp != nullptr, (*pTrans));
+  CHECKE(pTrans->execute(Commit) == 0, (*pTrans));  // Failed by bug#xyz
+  pTrans->close();
+
+  // Read and verify ATTR value
+  CHECKE(pTrans = pNdb->startTransaction(), (*pNdb));
+  CHECKE(pOp = pTrans->getNdbOperation(pTab->getName()), (*pTrans));
+  CHECKE(pOp->readTuple() == 0, (*pOp));
+  CHECKE(pOp->equal("KEY", "\003\000XYZ") == 0, (*pOp));
+  CHECKE(pOp->getValue("ATTR", readbuf) != nullptr, (*pOp));
+  CHECKE(pTrans->execute(NoCommit) == 0, (*pTrans));
+  CHECK(memcmp(readbuf, "\003\000ABC", 5) == 0);
+  CHECKE(pTrans->execute(Rollback) == 0, (*pTrans));
+  pTrans->close();
+
+  return NDBT_OK;
+}
+
+int runIgnoreDisconnectFromInvalidNodeTypes(NDBT_Context *ctx,
+                                            NDBT_Step *step) {
+  /* This test reproduces conditions leading to Bug38857144, where API nodes
+   * unknown to data nodes would cause them to crash after disconnecting.
+   * This happens when the management node is started with the
+   * '--no-nodeid-checks' option and new API nodes are added to the
+   * configuration.* This option allows them to allocate a node ID and partially
+   * join the cluster, being recognized by data nodes that have already
+   * restarted and got the new configuration but not by the others. If such an
+   * API node disconnects, the data nodes that have not received the new
+   * configuration will try to handle the communication failure to an unknown
+   * node and crash.
+   *
+   * After the fix, data nodes should ignore the disconnect of any node whose
+   * type is invalid.
+   *
+   * More details in Bug#38857144.
+   */
+  NdbRestarter restarter;
+
+  // Sending a API_FAILREQ signal to all nodes to handle the communication
+  // failure to an unknown node.
+  const int undefinedNodeId = restarter.getUndefinedNodeId();
+  if (undefinedNodeId < 0) {
+    g_err << "Unable to find an undefined node id" << endl;
+    return NDBT_SKIPPED;
+  }
+  int dumpCodes[] = {900, undefinedNodeId};
+  restarter.dumpStateAllNodes(dumpCodes, 2);
+
+  // After receiving the API_FAILREQ signal, data nodes may take some time to
+  // crash so must wait some seconds before succeeding.
+  NdbSleep_SecSleep(10);
+
+  return NDBT_OK;
+}
+
 NDBT_TESTSUITE(testNdbApi);
 TESTCASE("MaxNdb", "Create Ndb objects until no more can be created\n") {
   INITIALIZER(runTestMaxNdb);
@@ -7842,6 +7960,14 @@ TESTCASE("DatabaseAndSchemaName",
 }
 TESTCASE("TestSlowConnectEnable", "Test behaviour with slow connection enale") {
   STEP(testSlowConnectEnable);
+}
+TESTCASE("SetVarbinaryWithSetValue", "Check OO_SETVALUE works with Varbinary") {
+  STEP(testSetVarbinaryWithSetValue);
+}
+TESTCASE("IgnoreDisconnectFromInvalidNodeTypes",
+         "Test if disconnecting API nodes unknown to data nodes are"
+         "ignored and does not make them crash") {
+  STEP(runIgnoreDisconnectFromInvalidNodeTypes);
 }
 
 NDBT_TESTSUITE_END(testNdbApi)

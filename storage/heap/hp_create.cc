@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -273,9 +273,9 @@ static void init_block(HP_BLOCK *block, uint reclength, ulong min_records,
   for (i = 0; i <= HP_MAX_LEVELS; i++)
     block->level_info[i].records_under_level =
         (!i ? 1
-            : i == 1 ? records_in_block
-                     : HP_PTRS_IN_NOD *
-                           block->level_info[i - 1].records_under_level);
+         : i == 1
+             ? records_in_block
+             : HP_PTRS_IN_NOD * block->level_info[i - 1].records_under_level);
 }
 
 static inline void heap_try_free(HP_SHARE *share) {

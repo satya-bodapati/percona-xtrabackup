@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2024, Oracle and/or its affiliates.
+  Copyright (c) 2024, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -32,7 +32,7 @@
 
 #include "mysqlrouter/http_common_export.h"
 
-HTTP_COMMON_EXPORT [[nodiscard]] std::error_code make_error_code(
+[[nodiscard]] HTTP_COMMON_EXPORT std::error_code make_error_code(
     const cno_error_t *ec);
 
 #endif  // ROUTER_SRC_HTTP_SRC_HTTP_CNO_ERROR_CODE_H_

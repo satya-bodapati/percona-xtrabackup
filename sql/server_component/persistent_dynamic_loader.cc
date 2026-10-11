@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -442,8 +442,8 @@ DEFINE_BOOL_METHOD(mysql_persistent_dynamic_loader_imp::load,
       return true;
     }
 
-    guard.commit();
-    guard_close_tables.commit();
+    guard.release();
+    guard_close_tables.release();
     trans_commit_stmt(thd);
     return false;
   } catch (...) {
@@ -552,7 +552,7 @@ DEFINE_BOOL_METHOD(mysql_persistent_dynamic_loader_imp::unload,
       return result;
     }
 
-    guard_close_tables.commit();
+    guard_close_tables.release();
     trans_commit_stmt(thd);
     return false;
   } catch (...) {

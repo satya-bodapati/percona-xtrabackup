@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -49,6 +49,7 @@ unsigned int mysql_pfs_key_t::s_count = 0;
 #endif /* HAVE_PSI_INTERFACE */
 
 #ifdef UNIV_PFS_MUTEX
+mysql_pfs_key_t alter_stage_mutex_key;
 /* Key to register autoinc_mutex with performance schema */
 mysql_pfs_key_t autoinc_mutex_key;
 mysql_pfs_key_t autoinc_persisted_mutex_key;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -619,6 +619,7 @@ class Sql_cmd_alter_table : public Sql_cmd_common_alter_table {
   using Sql_cmd_common_alter_table::Sql_cmd_common_alter_table;
 
   bool execute(THD *thd) override;
+  bool reprepare_on_execute_required() const override;
 };
 
 /**

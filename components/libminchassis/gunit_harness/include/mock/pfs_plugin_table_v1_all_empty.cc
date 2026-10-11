@@ -1,4 +1,4 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -29,13 +29,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 namespace pfs_plugin_table_v1_all_empty {
 
 DEFINE_METHOD(int, add_tables,
-              (PFS_engine_table_share_proxy * */*st_share*/,
+              (PFS_engine_table_share_proxy * * /*st_share*/,
                unsigned int /*share_count*/)) {
   return 0;
 }
 
 DEFINE_METHOD(int, delete_tables,
-              (PFS_engine_table_share_proxy * */*st_share*/,
+              (PFS_engine_table_share_proxy * * /*st_share*/,
                unsigned int /*share_count*/)) {
   return 0;
 }

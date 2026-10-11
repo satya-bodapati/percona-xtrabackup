@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -27,7 +27,7 @@
 
 #include "m_string.h"  // strlen
 #include "my_dbug.h"
-//#include <my_dir.h>
+// #include <my_dir.h>
 #include "my_sys.h"          // my_write, my_malloc
 #include "sql/sql_plugin.h"  // st_plugin_int
 

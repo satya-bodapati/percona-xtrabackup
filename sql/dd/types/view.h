@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -45,15 +45,19 @@ class View : virtual public Abstract_table {
  public:
   enum enum_check_option  // VIEW_CHECK_NONE, VIEW_CHECK_LOCAL,
                           // VIEW_CHECK_CASCADED
-  { CO_NONE = 1,
+  {
+    CO_NONE = 1,
     CO_LOCAL,
-    CO_CASCADED };
+    CO_CASCADED
+  };
 
   enum enum_algorithm  // VIEW_ALGORITHM_UNDEFINED, VIEW_ALGORITHM_TMPTABLE,
                        // VIEW_ALGORITHM_MERGE
-  { VA_UNDEFINED = 1,
+  {
+    VA_UNDEFINED = 1,
     VA_TEMPORARY_TABLE,
-    VA_MERGE };
+    VA_MERGE
+  };
 
   enum enum_security_type { ST_DEFAULT = 1, ST_INVOKER, ST_DEFINER };
 

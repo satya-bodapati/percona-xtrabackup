@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -733,8 +733,7 @@ class BtrContext {
     byte *data;
     ulint local_len;
 
-    data = const_cast<byte *>(
-        rec_get_nth_field(m_index, m_rec, m_offsets, i, &local_len));
+    data = rec_get_nth_field(m_index, m_rec, m_offsets, i, &local_len);
     ut_ad(rec_offs_nth_extern(m_index, m_offsets, i));
     ut_a(local_len >= BTR_EXTERN_FIELD_REF_SIZE);
 

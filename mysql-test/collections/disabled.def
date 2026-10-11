@@ -96,7 +96,6 @@ rpl_nogtid.rpl_nogtid_encryption_read             : Bug#36172046 Update rpl_nogt
 # rpl suite tests
 rpl.rpl_io_thd_wait_for_disk_space_stress : BUG#23581287 Disabled until bug is fixed.
 rpl.rpl_writeset_add_unique_key : Bug#33134835 RPL_WRITESET_ADD_UNIQUE_KEY FAILS SPORADICALLY
-rpl.rpl_replication_observers_example_plugin_ongoing_transaction : Bug#35982448	rpl_replication_observers_example_plugin_ongoing_transaction fails 
 
 # secondary_engine tests
 secondary_engine.query_preparation : BUG#36306426 Disabled until bug is fixed
@@ -114,6 +113,7 @@ sysschema.v_wait_classes_global_by_avg_latency : BUG#21550054 Test fails too oft
 
 # These will only run in XCom because of the following issue:
 group_replication.gr_join_with_suspect_member : BUG#31704262 XCOM CREATES NODES WITH PAST GHOST VIEWS
+group_replication.gr_kill_restart : BUG#37181867 Disabled until the bug is fixed
 group_replication.gr_leave_with_suspect_member : BUG#31704262 XCOM CREATES NODES WITH PAST GHOST VIEWS
 group_replication.gr_majority_loss_restored_after_timeout : BUG#31704262 XCOM CREATES NODES WITH PAST GHOST VIEWS
 group_replication.gr_primary_manual_failover_vs_dcl_rename_user : BUG#36020917 Disabled until bug is fixed

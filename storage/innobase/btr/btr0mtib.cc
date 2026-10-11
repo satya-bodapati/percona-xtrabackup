@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -2979,7 +2979,7 @@ dberr_t Btree_load::Merger::add_root_for_subtrees(const size_t highest_level) {
   root_load.finish();
 
   mtr.commit();
-  guard.commit();
+  guard.release();
   root_load.commit();
   return err;
 }

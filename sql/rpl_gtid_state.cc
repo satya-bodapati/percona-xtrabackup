@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -157,6 +157,7 @@ void Gtid_state::broadcast_owned_sidnos(const THD *thd) {
 
 void Gtid_state::update_commit_group(THD *first_thd) {
   DBUG_TRACE;
+  mysql_mutex_assert_owner(mysql_bin_log.get_commit_lock());
 
   bool gtid_threshold_breach = false;
   /*
@@ -721,8 +722,7 @@ int Gtid_state::save_gtids_of_last_binlog_into_table() {
   if (!ret) {
     logged_gtids_last_binlog.remove_gtid_set(&previous_gtids_logged);
     logged_gtids_last_binlog.remove_gtid_set(&gtids_only_in_table);
-    if (!logged_gtids_last_binlog.is_empty() ||
-        mysql_bin_log.is_rotating_caused_by_incident) {
+    if (!logged_gtids_last_binlog.is_empty()) {
       /* Prepare previous_gtids_logged for next binlog always. Need it
       even during shutdown to synchronize with innodb GTID persister. */
       if (previous_gtids_logged.add_gtid_set(&logged_gtids_last_binlog))
@@ -761,6 +761,9 @@ bool Gtid_state::update_gtids_impl_check_skip_gtid_rollback(THD *thd) {
   if (thd->skip_gtid_rollback) {
     DBUG_PRINT("info", ("skipping gtid rollback because "
                         "thd->skip_gtid_rollback is set"));
+    return true;
+  }
+  if (thd->shall_skip_gtid_rollback()) {
     return true;
   }
   return false;
@@ -925,8 +928,6 @@ void Gtid_state::update_gtids_impl_own_anonymous(THD *thd, bool *more_trx) {
     See comment for the update_gtids_impl_begin function.
   */
   if (opt_bin_log) {
-    // Needed before is_binlog_cache_empty.
-    thd->binlog_setup_trx_data();
     if (!thd->is_binlog_cache_empty(true)) {
       *more_trx = true;
       DBUG_PRINT("info", ("Transaction cache is non-empty: setting "

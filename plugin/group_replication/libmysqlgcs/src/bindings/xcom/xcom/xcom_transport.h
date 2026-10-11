@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -136,7 +136,7 @@ int tcp_reconnection_task(task_arg arg);
 int incoming_connection_task(task_arg arg);
 uint32_t crc32c_hash(char *buf, char *end);
 int apply_xdr(void *buff, uint32_t bufflen, xdrproc_t xdrfunc, void *xdrdata,
-              enum xdr_op op);
+              enum xdr_op op) SUPPRESS_UBSAN;
 void init_crc32c();
 void init_xcom_transport(xcom_port listen_port);
 void reset_srv_buf(srv_buf *sb);
@@ -255,5 +255,6 @@ int is_new_node_eligible_for_ipv6(xcom_proto incoming_proto,
 #define INITIAL_CONNECT_WAIT 0.1
 #define MAX_CONNECT_WAIT 10.0
 #define CONNECT_WAIT_INCREASE 1.0
+#define MAX_CONNECT_WAIT_TOTAL_TIME 300.0
 
 #endif

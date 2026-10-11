@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -32,7 +32,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <memory>  // unique_ptr
@@ -61,6 +60,7 @@
 #include "mysql/harness/process_state_component.h"
 #include "mysql/harness/section_config_exposer.h"
 #include "mysql/harness/signal_handler.h"
+#include "mysql/harness/supported_config_options.h"
 #include "mysql/harness/utility/string.h"  // string_format
 #include "mysql/harness/vt100.h"
 #include "mysql_router_thread.h"  // kDefaultStackSizeInKiloByte
@@ -89,7 +89,6 @@ const char dir_sep = '/';
 #include <string.h>
 #include "mysqlrouter/windows/password_vault.h"
 #include "mysqlrouter/windows/service_operations.h"
-#define strtok_r strtok_s
 const char dir_sep = '\\';
 #endif
 
@@ -246,6 +245,21 @@ void MySQLRouter::init(const std::string &program_name,
     return;
   }
 
+  // signal-handler
+  signal_handler_.add_sig_handler(
+      SIGTERM, [](int /* sig */, const std::string &signal_info) {
+        mysql_harness::ProcessStateComponent::get_instance()
+            .request_application_shutdown(
+                mysql_harness::ShutdownPending::Reason::REQUESTED, signal_info);
+      });
+
+  signal_handler_.add_sig_handler(
+      SIGINT, [](int /* sig */, const std::string &signal_info) {
+        mysql_harness::ProcessStateComponent::get_instance()
+            .request_application_shutdown(
+                mysql_harness::ShutdownPending::Reason::REQUESTED, signal_info);
+      });
+
   // block non-fatal signal handling for all threads
   //
   // - no other thread than the signal-handler thread should receive signals
@@ -302,11 +316,12 @@ void MySQLRouter::init(const std::string &program_name,
       config_files = std::move(config_files_res.value());
     }
 
-    DIM::instance().reset_Config();  // simplifies unit tests
-    DIM::instance().set_Config(
-        [this, &config_files]() { return make_config({}, config_files); },
-        std::default_delete<mysql_harness::LoaderConfig>());
-    mysql_harness::LoaderConfig &config = DIM::instance().get_Config();
+    auto &dim = DIM::instance();
+
+    dim.set_Config(make_config({}, config_files),
+                   std::default_delete<mysql_harness::LoaderConfig>());
+
+    mysql_harness::LoaderConfig &config = dim.get_Config();
 
     // reinit logger (right now the logger is configured to log to STDERR,
     // here we re-configure it with settings from config file)
@@ -368,15 +383,12 @@ void MySQLRouter::init_keyring(mysql_harness::Config &config) {
 }
 
 void MySQLRouter::init_dynamic_state(mysql_harness::Config &config) {
-  if (config.has_default("dynamic_state")) {
+  if (config.has_default(router::options::kDynamicState)) {
     using mysql_harness::DynamicState;
 
-    const std::string dynamic_state_file = config.get_default("dynamic_state");
     DIM::instance().set_DynamicState(
-        [=]() { return new DynamicState(dynamic_state_file); },
+        new DynamicState(config.get_default(router::options::kDynamicState)),
         std::default_delete<mysql_harness::DynamicState>());
-    // force object creation, the further code relies on it's existence
-    DIM::instance().get_DynamicState();
   }
 }
 
@@ -440,10 +452,11 @@ void MySQLRouter::init_main_logger(mysql_harness::LoaderConfig &config,
   harness_assert(use_os_log == false);
 #endif
 
-  if (!config.has_default("logging_folder"))
-    config.set_default("logging_folder", "");
+  if (!config.has_default(mysql_harness::loader::options::kLoggingFolder))
+    config.set_default(mysql_harness::loader::options::kLoggingFolder, "");
 
-  const std::string logging_folder = config.get_default("logging_folder");
+  const std::string logging_folder =
+      config.get_default(mysql_harness::loader::options::kLoggingFolder);
 
   // setup logging
   {
@@ -456,8 +469,7 @@ void MySQLRouter::init_main_logger(mysql_harness::LoaderConfig &config,
     //           with the new one at the very end.
 
     // our new logger registry, it will replace the current one if all goes well
-    std::unique_ptr<mysql_harness::logging::Registry> registry(
-        new mysql_harness::logging::Registry());
+    auto registry = std::make_unique<mysql_harness::logging::Registry>();
 
     const auto level = mysql_harness::logging::get_default_log_level(
         config, raw_mode);  // throws std::invalid_argument
@@ -477,9 +489,8 @@ void MySQLRouter::init_main_logger(mysql_harness::LoaderConfig &config,
     // nothing threw - we're good. Now let's replace the new registry with the
     // old one
     DIM::instance().set_LoggingRegistry(
-        [&registry]() { return registry.release(); },
+        registry.release(),
         std::default_delete<mysql_harness::logging::Registry>());
-    DIM::instance().reset_LoggingRegistry();
 
     // flag that the new loggers are ready for use
     DIM::instance().get_LoggingRegistry().set_ready();
@@ -555,20 +566,22 @@ void MySQLRouter::start() {
   // throws system_error() in case of failure
   const auto config_files = check_config_files();
 
+  auto &dim = DIM::instance();
+
   // read config, and also make this config globally-available via DIM
-  DIM::instance().reset_Config();  // simplifies unit tests
-  DIM::instance().set_Config(
-      [this, &config_files]() {
-        return make_config(get_default_paths(), config_files);
-      },
-      std::default_delete<mysql_harness::LoaderConfig>());
+  dim.set_Config(make_config(get_default_paths(), config_files),
+                 std::default_delete<mysql_harness::LoaderConfig>());
+
   mysql_harness::LoaderConfig &config = DIM::instance().get_Config();
 
 #ifndef _WIN32
   // --user param given on the command line has a priority over
   // the user in the configuration
-  if (user_cmd_line_.empty() && config.has_default("user")) {
-    set_user(config.get_default("user"), true, this->sys_user_operations_);
+  {
+    if (user_cmd_line_.empty() && config.has_default(router::options::kUser)) {
+      set_user(config.get_default(router::options::kUser), true,
+               this->sys_user_operations_);
+    }
   }
 #endif
 
@@ -579,8 +592,8 @@ void MySQLRouter::start() {
   // Setup pidfile path for the application.
   // Order of significance: commandline > config file > ROUTER_PID envvar
   if (pid_file_path_.empty()) {
-    if (config.has_default("pid_file")) {
-      const std::string pidfile = config.get_default("pid_file");
+    if (config.has_default(router::options::kPidFile)) {
+      const std::string pidfile = config.get_default(router::options::kPidFile);
       if (!pidfile.empty()) {
         pid_file_path_ = pidfile;
       } else {
@@ -732,15 +745,18 @@ void MySQLRouter::start() {
   auto &log_reopener = mysql_harness::LogReopenComponent::get_instance();
 
   static const char kLogReopenServiceName[]{"log_reopen"};
-  static const char kSignalHandlerServiceName[]{"signal_handler"};
 
   // report readiness of all services only after the log-reopen handlers is
   // installed ... after all plugins are started.
   loader_->waitable_services().emplace_back(kLogReopenServiceName);
+#endif
+
+  static const char kSignalHandlerServiceName[]{"signal_handler"};
 
   loader_->waitable_services().emplace_back(kSignalHandlerServiceName);
 
   loader_->after_all_started([&]() {
+#if !defined(_WIN32)
     // as the LogReopener depends on the loggers being started, it must be
     // initialized after Loader::start_all() has been called.
     log_reopener.init();
@@ -761,35 +777,21 @@ void MySQLRouter::start() {
         });
 
     mysql_harness::on_service_ready(kLogReopenServiceName);
-
-    // signal-handler
-    signal_handler_.add_sig_handler(
-        SIGTERM, [](int /* sig */, const std::string &signal_info) {
-          mysql_harness::ProcessStateComponent::get_instance()
-              .request_application_shutdown(
-                  mysql_harness::ShutdownPending::Reason::REQUESTED,
-                  signal_info);
-        });
-
-    signal_handler_.add_sig_handler(SIGINT, [](int /* sig */,
-                                               const std::string &signal_info) {
-      mysql_harness::ProcessStateComponent::get_instance()
-          .request_application_shutdown(
-              mysql_harness::ShutdownPending::Reason::REQUESTED, signal_info);
-    });
+#endif
 
     mysql_harness::on_service_ready(kSignalHandlerServiceName);
   });
 
   // after the first plugin finished, stop the log-reopener and signal-handler
   loader_->after_first_finished([&]() {
+#if !defined(_WIN32)
     signal_handler_.remove_sig_handler(SIGTERM);
     signal_handler_.remove_sig_handler(SIGINT);
 
     signal_handler_.remove_sig_handler(SIGHUP);
     log_reopener.reset();
-  });
 #endif
+  });
 
   loader_->start();
 }
@@ -1970,7 +1972,7 @@ void MySQLRouter::show_help() {
 
     // fallback to .ini for each .conf file
     const std::string conf_ext(".conf");
-    if (mysql_harness::utility::ends_with(file, conf_ext)) {
+    if (file.ends_with(conf_ext)) {
       // replace .conf by .ini
       std::string ini_filename =
           file.substr(0, file.size() - conf_ext.size()) + ".ini";
@@ -2153,7 +2155,7 @@ class RouterAppConfigExposer : public mysql_harness::SectionConfigExposer {
 
   void expose() override {
     // set "global" router options from DEFAULT section
-    auto expose_int_option = [&](const std::string &option,
+    auto expose_int_option = [&](std::string_view option,
                                  const int64_t default_val) {
       auto value = default_val;
       if (default_section_.has(option)) {
@@ -2168,7 +2170,7 @@ class RouterAppConfigExposer : public mysql_harness::SectionConfigExposer {
       expose_option(option, value, default_val);
     };
 
-    auto expose_str_option = [&](const std::string &option,
+    auto expose_str_option = [&](std::string_view option,
                                  const std::string &default_val,
                                  bool skip_if_empty = false) {
       auto value = default_val;
@@ -2187,11 +2189,11 @@ class RouterAppConfigExposer : public mysql_harness::SectionConfigExposer {
     };
 
     expose_int_option(
-        "max_total_connections",
+        router::options::kMaxTotalConnections,
         static_cast<int64_t>(routing::kDefaultMaxTotalConnections));
-    expose_str_option("name", kSystemRouterName);
+    expose_str_option(router::options::kName, kSystemRouterName);
     // only share a user if it is not empty
-    expose_str_option("user", kDefaultSystemUserName, true);
+    expose_str_option(router::options::kUser, kDefaultSystemUserName, true);
     expose_str_option("unknown_config_option", "error");
   }
 };

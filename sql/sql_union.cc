@@ -1,4 +1,4 @@
-/* Copyright (c) 2001, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2001, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -685,9 +685,9 @@ bool Query_expression::can_materialize_directly_into_result() const {
 }
 
 /**
-  Prepares all query blocks of a query expression, including
-  fake_query_block. If a recursive query expression, this also creates the
-  materialized temporary table.
+  Prepares all query blocks of a query expression.
+  If a recursive query expression, this also creates the materialized temporary
+  table.
 
   @param thd           Thread handler
   @param sel_result    Result object where the unit's output should go.
@@ -875,6 +875,18 @@ bool Query_expression::prepare(THD *thd, Query_result *sel_result,
 
     for (size_t i = 0; i < types.size(); i++)
       types[i]->set_nullable(nullable[i]);
+  }
+  if (thd->lex->is_explain()) {
+    WalkQueryExpression(this,
+                        enum_walk::SUBQUERY_POSTFIX,  // Use SUBQUERY_POSTFIX to
+                                                      // traverse subqueries
+                        [this](Item *item) {
+                          if (item->has_stored_program()) {
+                            this->m_has_stored_program = true;
+                            return true;  // Stop walking
+                          }
+                          return false;  // Continue walking
+                        });
   }
 
   // Query blocks are prepared, update the state
@@ -2120,11 +2132,11 @@ void Query_block::destroy() {
     unit->destroy();
     unit = next;
   }
-
   List_iterator<Window> li(m_windows);
   Window *w;
-  while ((w = li++)) w->destroy();
-
+  while ((w = li++)) {
+    w->destroy();
+  }
   // Destroy allocated derived tables
   destroy_tmp_tables(get_table_list());
 

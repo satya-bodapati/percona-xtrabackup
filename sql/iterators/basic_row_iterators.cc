@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -150,24 +150,8 @@ IndexDistanceScanIterator::IndexDistanceScanIterator(THD *thd, TABLE *table,
 // i.e. IndexDistanceScanIterator destructor, IndexDistanceScanIterator::Init(),
 // IndexDistanceScanIterator::Read() when innodb implements index distance scan.
 
-IndexDistanceScanIterator::~IndexDistanceScanIterator() {
-  if (table() && table()->key_read) {
-    /* purecov: begin deadcode */
-    table()->set_keyread(false);
-    /* purecov: end */
-  }
-}
-
 bool IndexDistanceScanIterator::Init() {
   if (!table()->file->inited) {
-    // TODO(WL9440): Check if spatial index scans can be covering. If not,
-    // replace this by an assert.
-    if (table()->covering_keys.is_set(m_idx) && !table()->no_keyread) {
-      /* purecov: begin deadcode */
-      table()->set_keyread(true);
-      /* purecov: end */
-    }
-
     int error = table()->file->ha_index_init(m_idx, true);
     if (error) {
       /* purecov: begin deadcode */

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -54,10 +54,10 @@ bool SimpleProperties::Writer::add(Uint16 key, Uint32 value) {
 bool SimpleProperties::Writer::add(const char *value, int len) {
   const Uint32 valLen = (len + 3) / 4;
 
-  if ((len % 4) == 0) return putWords((const Uint32 *)value, valLen);
+  if ((len % 4) == 0) return putWordsFromChar(value, valLen);
 
   const Uint32 putLen = valLen - 1;
-  if (!putWords((const Uint32 *)value, putLen)) return false;
+  if (!putWordsFromChar(value, putLen)) return false;
 
   // Special handling of last bytes
   union {
@@ -395,7 +395,7 @@ bool LinearWriter::putWord(Uint32 val) {
   return false;
 }
 
-bool LinearWriter::putWords(const Uint32 *src, Uint32 len) {
+bool LinearWriter::putWordsFromChar(const char *src, Uint32 len) {
   if (m_pos + len <= m_len) {
     memcpy(&m_src[m_pos], src, 4 * len);
     m_pos += len;
@@ -417,7 +417,7 @@ bool UtilBufferWriter::putWord(Uint32 val) {
   return (m_buf.append(&val, 4) == 0);
 }
 
-bool UtilBufferWriter::putWords(const Uint32 *src, Uint32 len) {
+bool UtilBufferWriter::putWordsFromChar(const char *src, Uint32 len) {
   return (m_buf.append(src, 4 * len) == 0);
 }
 

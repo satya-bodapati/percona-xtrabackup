@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -3207,6 +3207,153 @@ static int runTestCreateLogEvent(NDBT_Context *ctx, NDBT_Step *step) {
   return NDBT_OK;
 }
 
+static int runCheckClusterStarted(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+
+  if (restarter.waitConnected() != NDBT_OK) {
+    ndbout_c("Timed out waiting to connect to MGMD");
+    return NDBT_FAILED;
+  }
+
+  if (restarter.waitClusterStarted() != NDBT_OK) {
+    ndbout_c("Timed out waiting for nodes to be started");
+    return NDBT_FAILED;
+  }
+  return NDBT_OK;
+}
+
+static int runGracefulStopRestartNodesInNG0(NDBT_Context *ctx,
+                                            NDBT_Step *step) {
+  /**
+   * Find nodes in NG0
+   * Decide which one (if any) I will stop
+   * Wait for permission to go
+   * Issue restart command
+   */
+  NdbRestarter restarter;
+  const int numReplicas = restarter.getNumReplicas();
+  if (numReplicas < 2) {
+    ndbout_c("Too few replicas for test");
+    return NDBT_SKIPPED;
+  }
+
+  const int stepNo = step->getStepTypeNo();
+  if (numReplicas <= stepNo) {
+    // This step thread not needed
+    return NDBT_OK;
+  }
+
+  int ng0members[4];
+  int c = 0;
+  for (int n = 0; n < restarter.getNumDbNodes(); n++) {
+    const Uint32 nodeId = restarter.getDbNodeId(n);
+    if (restarter.getNodeGroup(nodeId) == 0) {
+      ng0members[c++] = nodeId;
+    }
+  }
+
+  if (c != numReplicas) {
+    ndbout_c("Cluster mismatch, count %d numReplicas %d", c, numReplicas);
+    return NDBT_FAILED;
+  }
+
+  const int myNodeId = ng0members[step->getStepTypeNo()];
+  ndbout_c("Step %u/%u restarting node id %u", stepNo, step->getStepTypeCount(),
+           myNodeId);
+  ndbout_c("Wait for sync");
+  ctx->incProperty("ReplicasReady");
+  ctx->getPropertyWait("ReplicasReady", numReplicas);
+
+  int res = restarter.restartOneDbNode(myNodeId, false, true, false, false);
+
+  ndbout_c("restart node %u result : %d", myNodeId, res);
+
+  if (res == 0) {
+    ctx->incProperty("ReplicasRestarted");
+  } else {
+    ndbout_c("ndb_mgm_restart failed %s %d",
+             ndb_mgm_get_latest_error_msg(restarter.handle),
+             ndb_mgm_get_latest_error(restarter.handle));
+    if (res == -2) {
+      // Timeout, unknown state of restart
+      return NDBT_FAILED;
+    }
+  }
+
+  return NDBT_OK;
+}
+
+static int runCheckOutcome(NDBT_Context *ctx, NDBT_Step *step) {
+  const int replicas = ctx->getProperty("ReplicasReady");
+  const int replicasRestarted = ctx->getProperty("ReplicasRestarted");
+  ndbout_c("Replicas %u, replicas restarted %u", replicas, replicasRestarted);
+  if (replicasRestarted != replicas - 1) {
+    ndbout_c("Failed - wrong number of replicas successfully restarted");
+    return NDBT_FAILED;
+  }
+  return NDBT_OK;
+}
+
+static int runStartNodes(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+
+  ndbout_c("Starting all NOT-STARTED nodes");
+  restarter.startAll();
+  restarter.waitClusterStarted();
+  ndbout_c("Done");
+
+  return NDBT_OK;
+}
+
+static int runReportCommandsUntilStopped(NDBT_Context *ctx, NDBT_Step *step) {
+  constexpr int numEventTypes = 3;
+  Ndb_logevent_type types[numEventTypes] = {
+      NDB_LE_BackupStatus, NDB_LE_MemoryUsage, NDB_LE_SavedEvent};
+  NdbMgmd mgmd;
+  struct ndb_mgm_events *events;
+  mgmd.use_tls(opt_tls_search_path, opt_mgm_tls);
+  if (!mgmd.connect()) return NDBT_FAILED;
+  int result = NDBT_OK;
+  while (!ctx->isTestStopped() && result == NDBT_OK) {
+    for (int i = 0; i < numEventTypes; i++) {
+      events = ndb_mgm_dump_events(mgmd.handle(), types[i], 0, nullptr);
+      if (!events) {
+        ndbout_c("Failed to get events");
+        result = NDBT_FAILED;
+        continue;
+      }
+      free(events);
+    }
+  }
+  return result;
+}
+static int restartDataNode(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  int result = NDBT_FAILED;
+  const int nodeId = restarter.getNode(NdbRestarter::NS_RANDOM);
+  ndbout_c("Restarting node %u", nodeId);
+  do {
+    if (restarter.restartOneDbNode(nodeId,
+                                   false,  // initial
+                                   true)   // nostart
+        != NDBT_OK) {
+      ndbout_c("Failed to restart node %u", nodeId);
+      break;
+    }
+    if (restarter.waitNodesNoStart(&nodeId, 1) != NDBT_OK) {
+      ndbout_c("Node failed to enter NOT STARTED state");
+      break;
+    }
+    if ((restarter.startNodes(&nodeId, 1) != NDBT_OK) ||
+        (restarter.waitNodesStarted(&nodeId, 1) != NDBT_OK)) {
+      ndbout_c("Node failed to start");
+      break;
+    }
+    result = NDBT_OK;
+  } while (0);
+  ctx->stopTest();
+  return result;
+}
 NDBT_TESTSUITE(testMgm);
 DRIVER(DummyDriver); /* turn off use of NdbApi */
 TESTCASE("ApiSessionFailure", "Test failures in MGMAPI session") {
@@ -3334,7 +3481,22 @@ TESTCASE("TestCreateLogEvent", "Test ndb_mgm_create_log_event_handle") {
 TESTCASE("TestConnectionFailure",
          "Test if Read Error is received after mgmd is restarted") {
   INITIALIZER(runTestMgmApiReadErrorRestart);
+  FINALIZER(runCheckClusterStarted);
 }
+TESTCASE("TestConcurrentGracefulStop",
+         "Test that concurrent single node graceful stops do not "
+         "succeed.") {
+  INITIALIZER(runCheckClusterStarted);
+  STEPS(runGracefulStopRestartNodesInNG0, 4);
+  VERIFIER(runCheckOutcome);
+  FINALIZER(runStartNodes);
+}
+TESTCASE("TestReportCommandsRestart",
+         "Test report commands work over node restarts") {
+  STEP(runReportCommandsUntilStopped);
+  STEP(restartDataNode);
+}
+
 NDBT_TESTSUITE_END(testMgm)
 
 int main(int argc, const char **argv) {

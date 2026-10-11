@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -58,6 +58,8 @@ Certifier_broadcast_thread::Certifier_broadcast_thread()
       broadcast_gtid_executed_period(BROADCAST_GTID_EXECUTED_PERIOD) {
   DBUG_EXECUTE_IF("group_replication_certifier_broadcast_thread_big_period",
                   { broadcast_gtid_executed_period = 600; });
+  DBUG_EXECUTE_IF("group_replication_certifier_broadcast_thread_short_period",
+                  { broadcast_gtid_executed_period = 1; });
 
   mysql_mutex_init(key_GR_LOCK_cert_broadcast_run, &broadcast_run_lock,
                    MY_MUTEX_INIT_FAST);
@@ -89,8 +91,11 @@ int Certifier_broadcast_thread::initialize() {
   if ((mysql_thread_create(key_GR_THD_cert_broadcast, &broadcast_pthd,
                            get_connection_attrib(), launch_broadcast_thread,
                            (void *)this))) {
-    mysql_mutex_unlock(&broadcast_run_lock); /* purecov: inspected */
-    return 1;                                /* purecov: inspected */
+    /* purecov: begin inspected */
+    mysql_mutex_unlock(&broadcast_run_lock);
+    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_CERT_BROADCAST_THREAD_CREATE_FAILED);
+    return 1;
+    /* purecov: end */
   }
   broadcast_thd_state.set_created();
 
@@ -103,13 +108,13 @@ int Certifier_broadcast_thread::initialize() {
   return 0;
 }
 
-int Certifier_broadcast_thread::terminate() {
+void Certifier_broadcast_thread::terminate() {
   DBUG_TRACE;
 
   mysql_mutex_lock(&broadcast_run_lock);
   if (broadcast_thd_state.is_thread_dead()) {
     mysql_mutex_unlock(&broadcast_run_lock);
-    return 0;
+    return;
   }
 
   aborted = true;
@@ -127,8 +132,6 @@ int Certifier_broadcast_thread::terminate() {
     mysql_cond_wait(&broadcast_run_cond, &broadcast_run_lock);
   }
   mysql_mutex_unlock(&broadcast_run_lock);
-
-  return 0;
 }
 
 void Certifier_broadcast_thread::dispatcher() {
@@ -147,6 +150,8 @@ void Certifier_broadcast_thread::dispatcher() {
   broadcast_thd_state.set_running();
   mysql_cond_broadcast(&broadcast_run_cond);
   mysql_mutex_unlock(&broadcast_run_lock);
+
+  LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_CERT_BROADCAST_THREAD_STARTED);
 
   while (!aborted) {
     // Broadcast Transaction identifiers every 30 seconds
@@ -200,6 +205,8 @@ void Certifier_broadcast_thread::dispatcher() {
   broadcast_thd_state.set_terminated();
   mysql_cond_broadcast(&broadcast_run_cond);
   mysql_mutex_unlock(&broadcast_run_lock);
+
+  LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_CERT_BROADCAST_THREAD_STOPPED);
 
   my_thread_exit(nullptr);
 }
@@ -262,6 +269,7 @@ Certifier::Certifier()
       positive_cert(0),
       negative_cert(0),
       parallel_applier_last_committed_global(1),
+      parallel_applier_last_sequence_number(1),
       parallel_applier_sequence_number(2),
       certifying_already_applied_transactions(false),
       conflict_detection_enable(!local_member_info->in_primary_mode()) {
@@ -308,6 +316,10 @@ Certifier::Certifier()
 Certifier::~Certifier() {
   mysql_mutex_lock(&LOCK_certification_info);
   initialized = false;
+
+  broadcast_thread->terminate();
+  delete broadcast_thread;
+
   clear_certification_info();
   delete certification_info_tsid_map;
 
@@ -318,7 +330,6 @@ Certifier::~Certifier() {
   delete group_gtid_extracted;
   delete group_gtid_tsid_map;
   mysql_mutex_unlock(&LOCK_certification_info);
-  delete broadcast_thread;
 
   mysql_mutex_lock(&LOCK_members);
   clear_members();
@@ -491,7 +502,15 @@ void Certifier::clear_certification_info() {
   for (Certification_info::iterator it = certification_info.begin();
        it != certification_info.end(); ++it) {
     // We can only delete the last reference.
-    if (it->second->unlink() == 0) delete it->second;
+    if (it->second->unlink() == 0) {
+      /*
+        Claim Gtid_set_ref used memory to
+        `thread/group_rpl/THD_certifier_broadcast` thread, since this is thread
+        that does release the memory.
+      */
+      it->second->claim_memory_ownership(true);
+      delete it->second;
+    }
   }
 
   certification_info.clear();
@@ -542,26 +561,35 @@ int Certifier::initialize(ulonglong gtid_assignment_block_size) {
   return error;
 }
 
-int Certifier::terminate() {
-  DBUG_TRACE;
-  int error = 0;
-
-  if (is_initialized()) error = broadcast_thread->terminate();
-
-  return error;
-}
-
-void Certifier::increment_parallel_applier_sequence_number(
-    bool update_parallel_applier_last_committed_global) {
+void Certifier::update_parallel_applier_indexes(
+    bool update_parallel_applier_last_committed_global,
+    bool increment_parallel_applier_sequence_number) {
   DBUG_TRACE;
   mysql_mutex_assert_owner(&LOCK_certification_info);
+  assert(parallel_applier_last_committed_global <
+         parallel_applier_sequence_number);
+  assert(parallel_applier_last_sequence_number <
+         parallel_applier_sequence_number);
+  assert(parallel_applier_last_committed_global <=
+         parallel_applier_last_sequence_number);
+
+  if (update_parallel_applier_last_committed_global) {
+    parallel_applier_last_committed_global =
+        (increment_parallel_applier_sequence_number
+             ? parallel_applier_sequence_number
+             : parallel_applier_last_sequence_number);
+  }
+
+  if (increment_parallel_applier_sequence_number) {
+    parallel_applier_last_sequence_number = parallel_applier_sequence_number++;
+  }
 
   assert(parallel_applier_last_committed_global <
          parallel_applier_sequence_number);
-  if (update_parallel_applier_last_committed_global)
-    parallel_applier_last_committed_global = parallel_applier_sequence_number;
-
-  parallel_applier_sequence_number++;
+  assert(parallel_applier_last_sequence_number <
+         parallel_applier_sequence_number);
+  assert(parallel_applier_last_committed_global <=
+         parallel_applier_last_sequence_number);
 }
 
 namespace {
@@ -693,6 +721,15 @@ Certification_result Certifier::add_writeset_to_certification_info(
         item_previous_sequence_number != parallel_applier_sequence_number)
       transaction_last_committed = item_previous_sequence_number;
   }
+  /*
+    The memory used by Gtid_set_ref is allocated by
+    `thread/group_rpl/THD_applier_module_receiver`, though it will be released
+    by `thread/group_rpl/THD_certifier_broadcast` thread.  To avoid untracked
+    memory release on `thread/group_rpl/THD_applier_module_receiver` we do
+    dissociate this used memory from this thread.
+  */
+  snapshot_version_value->claim_memory_ownership(false);
+
   return Certification_result::positive;
 }
 
@@ -743,6 +780,7 @@ void Certifier::update_transaction_dependency_timestamps(
     Gtid_log_event &gle, bool has_write_set, bool has_write_set_large_size,
     int64 transaction_last_committed) {
   bool update_parallel_applier_last_committed_global = false;
+  bool is_empty_transaction = false;
 
   /*
     'CREATE TABLE ... AS SELECT' is considered a DML, though in reality it
@@ -755,8 +793,19 @@ void Certifier::update_transaction_dependency_timestamps(
     update_parallel_applier_last_committed_global = true;
   }
 
-  if (!has_write_set || has_write_set_large_size ||
-      update_parallel_applier_last_committed_global) {
+  /*
+    Empty transactions, despite not having write-set, can be
+    applied in parallel with any other transaction.
+    Empty transactions are assigned `last_committed = -1` by GR
+    before send.
+  */
+  else if (!has_write_set && -1 == gle.last_committed) {
+    is_empty_transaction = true;
+  }
+
+  if (!is_empty_transaction &&
+      (!has_write_set || has_write_set_large_size ||
+       update_parallel_applier_last_committed_global)) {
     /*
       DDL does not have write-set, so we need to ensure that it
       is applied without any other transaction in parallel.
@@ -770,9 +819,11 @@ void Certifier::update_transaction_dependency_timestamps(
   assert(gle.sequence_number > 0);
   assert(gle.last_committed < gle.sequence_number);
 
-  increment_parallel_applier_sequence_number(
-      !has_write_set || has_write_set_large_size ||
-      update_parallel_applier_last_committed_global);
+  update_parallel_applier_indexes(
+      (!is_empty_transaction &&
+       (!has_write_set || has_write_set_large_size ||
+        update_parallel_applier_last_committed_global)),
+      true);
 
   /*
     Every Group Replication is started and the first remote transaction
@@ -828,7 +879,7 @@ Certified_gtid Certifier::certify(Gtid_set *snapshot_version,
     &is_gtid_specified, &gtid_global_sidno, &gtid_group_sidno, &gtid_gno,
     local_transaction,
     this
-  ](Certification_result result) -> auto {
+  ](Certification_result result) -> auto{
     update_certified_transaction_count(result == Certification_result::positive,
                                        local_transaction);
     return end_certification_result(gtid_global_sidno, gtid_group_sidno,
@@ -1014,7 +1065,15 @@ bool Certifier::add_item(const char *item, Gtid_set_ref *snapshot_version,
     *item_previous_sequence_number =
         it->second->get_parallel_applier_sequence_number();
 
-    if (it->second->unlink() == 0) delete it->second;
+    if (it->second->unlink() == 0) {
+      /*
+        Claim Gtid_set_ref used memory to
+        `thread/group_rpl/THD_certifier_broadcast` thread, since this is thread
+        that does release the memory.
+      */
+      it->second->claim_memory_ownership(true);
+      delete it->second;
+    }
 
     it->second = snapshot_version;
     error = false;
@@ -1201,12 +1260,41 @@ void Certifier::garbage_collect_internal(Gtid_set *executed_gtid_set,
       Certification_info::iterator it = certification_info.begin();
       stable_gtid_set_lock->wrlock();
 
+      uint64 garbage_collector_counter =
+          metrics_handler->get_certification_garbage_collector_count();
+
+      DBUG_EXECUTE_IF("group_replication_garbage_collect_counter_overflow", {
+        DBUG_SET("-d,group_replication_garbage_collect_counter_overflow");
+        garbage_collector_counter = 0;
+      });
+
       while (it != certification_info.end()) {
-        if (it->second->is_subset_not_equals(stable_gtid_set)) {
-          if (it->second->unlink() == 0) delete it->second;
+        uint64 write_set_counter = it->second->get_garbage_collect_counter();
+
+        /*
+           we need to clear gtid_set_ref if marked with UINT64_MAX or
+           subset_not_equals of stable_gtid_set
+        */
+        if (write_set_counter == UINT64_MAX ||
+            (write_set_counter < garbage_collector_counter &&
+             it->second->is_subset_not_equals(stable_gtid_set))) {
+          it->second->set_garbage_collect_counter(UINT64_MAX);
+          if (it->second->unlink() == 0) {
+            /*
+              Claim Gtid_set_ref used memory to
+              `thread/group_rpl/THD_certifier_broadcast` thread, since this is
+              thread that does release the memory.
+            */
+            it->second->claim_memory_ownership(true);
+            delete it->second;
+          }
           certification_info.erase(it++);
-        } else
+        } else {
+          DBUG_EXECUTE_IF("group_replication_ci_rows_counter_high",
+                          { assert(write_set_counter > 0); });
+          it->second->set_garbage_collect_counter(garbage_collector_counter);
           ++it;
+        }
       }
       stable_gtid_set_lock->unlock();
     }
@@ -1216,7 +1304,7 @@ void Certifier::garbage_collect_internal(Gtid_set *executed_gtid_set,
       what write sets were purged, which may cause transactions
       last committed to be incorrectly computed.
       */
-    increment_parallel_applier_sequence_number(true);
+    update_parallel_applier_indexes(true, false);
 
 #if !defined(NDEBUG)
     /*
@@ -1230,6 +1318,13 @@ void Certifier::garbage_collect_internal(Gtid_set *executed_gtid_set,
       // my_sleep expects a given number of microseconds.
       my_sleep(broadcast_thread->BROADCAST_GTID_EXECUTED_PERIOD * 1500000);
     }
+
+    DBUG_EXECUTE_IF("group_replication_certifier_garbage_collection_ran", {
+      const char act[] =
+          "now signal "
+          "signal.group_replication_certifier_garbage_collection_finished";
+      assert(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+    });
 #endif
   }
 
@@ -1714,6 +1809,15 @@ bool Certifier::set_certification_info_part(
       value->link();
       certification_info.insert(
           std::pair<std::string, Gtid_set_ref *>(key, value));
+      /*
+        The memory used by Gtid_set_ref is allocated by
+        `thread/group_rpl/THD_applier_module_receiver`, though it will be
+        released by `thread/group_rpl/THD_certifier_broadcast` thread.  To avoid
+        untracked memory release on
+        `thread/group_rpl/THD_applier_module_receiver` we do dissociate this
+        used memory from this thread.
+      */
+      value->claim_memory_ownership(false);
     }
 
     return false;
@@ -1963,6 +2067,14 @@ int Certifier::set_certification_info(
     value->link();
     certification_info.insert(
         std::pair<std::string, Gtid_set_ref *>(key, value));
+    /*
+      The memory used by Gtid_set_ref is allocated by
+      `thread/group_rpl/THD_applier_module_receiver`, though it will be released
+      by `thread/group_rpl/THD_certifier_broadcast` thread.  To avoid untracked
+      memory release on `thread/group_rpl/THD_applier_module_receiver` we do
+      dissociate this used memory from this thread.
+    */
+    value->claim_memory_ownership(false);
   }
 
   if (initialize_server_gtid_set()) {

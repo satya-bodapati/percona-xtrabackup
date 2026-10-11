@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -718,7 +718,7 @@ void warn_on_deprecated_user_defined_collation(
 %token<lexer.keyword> CPU_SYM 353
 %token  CREATE 354                        /* SQL-2003-R */
 %token  CROSS 355                         /* SQL-2003-R */
-%token<lexer.keyword> CUBE_SYM 356        /* SQL-2003-R */
+%token  CUBE_SYM 356                      /* SQL-2003-R */
 %token  CURDATE 357                       /* MYSQL-FUNC */
 %token<lexer.keyword> CURRENT_SYM 358           /* SQL-2003-R */
 %token  CURRENT_USER 359                  /* SQL-2003-R */
@@ -1448,12 +1448,12 @@ void warn_on_deprecated_user_defined_collation(
 
 %token<lexer.keyword> PARALLEL_SYM       1208      /* MYSQL */
 %token<lexer.keyword> S3_SYM             1209      /* MYSQL */
-%token<lexer.keyword> QUALIFY_SYM        1210      /* MYSQL */
+%token  QUALIFY_SYM                      1210      /* MYSQL */
 
 %token<lexer.keyword> AUTO_SYM                   1211   /* MYSQL */
 %token<lexer.keyword> MANUAL_SYM                 1212   /* MYSQL */
 %token<lexer.keyword> BERNOULLI_SYM              1213  /* SQL-2016-N */
-%token<lexer.keyword> TABLESAMPLE_SYM            1214  /* SQL-2016-R */
+%token  TABLESAMPLE_SYM                          1214  /* SQL-2016-R */
 
 /*
   NOTE! When adding new non-standard keywords, make sure they are added to the
@@ -9793,17 +9793,26 @@ query_expression_body:
           }
         | query_expression_body UNION_SYM union_option query_expression_body
           {
-            $$ = {NEW_PTN PT_union(@$, $1.body, $3, $4.body, $4.is_parenthesized),
+            $$ = {flatten_equal_set_ops<PT_union,
+                                        PT_set_operation::UNION>(
+                      YYMEM_ROOT, @$, $1.body, $3, $4.body,
+                      $4.is_parenthesized),
                   false};
           }
         | query_expression_body EXCEPT_SYM union_option query_expression_body
           {
-            $$ = {NEW_PTN PT_except(@$, $1.body, $3, $4.body, $4.is_parenthesized),
+            $$ = {flatten_equal_set_ops<PT_except,
+                                        PT_set_operation::EXCEPT>(
+                      YYMEM_ROOT, @$, $1.body, $3, $4.body,
+                      $4.is_parenthesized),
                   false};
           }
         | query_expression_body INTERSECT_SYM union_option query_expression_body
           {
-            $$ = {NEW_PTN PT_intersect(@$, $1.body, $3, $4.body, $4.is_parenthesized),
+            $$ = {flatten_equal_set_ops<PT_intersect,
+                                        PT_set_operation::INTERSECT>(
+                      YYMEM_ROOT, @$, $1.body, $3, $4.body,
+                      $4.is_parenthesized),
                   false};
           }
         ;
@@ -14060,6 +14069,9 @@ opt_explain_into:
           }
         | INTO '@' ident_or_text
           {
+            if(check_column_name($3)) {
+              MYSQL_YYABORT_ERROR(ER_ILLEGAL_USER_VAR, MYF(0), $3.str);
+            }
             $$ = $3;
           }
         ;
@@ -15463,6 +15475,7 @@ ident_keywords_unambiguous:
         | LOGS_SYM
         | LOG_SYM
         | NETWORK_NAMESPACE_SYM
+        | MANUAL_SYM
         | MASTER_SYM
         | MAX_CONNECTIONS_PER_HOUR
         | MAX_QUERIES_PER_HOUR
@@ -15517,6 +15530,7 @@ ident_keywords_unambiguous:
         | OWNER_SYM
         | PACK_KEYS_SYM
         | PAGE_SYM
+        | PARALLEL_SYM
         | PARSER_SYM
         | PARSE_TREE_SYM
         | PARTIAL
@@ -17493,7 +17507,7 @@ view_tail:
               for (auto column_alias : $4)
               {
                 // Report error if the column name/length is incorrect.
-                if (check_column_name(column_alias.str))
+                if (check_column_name(column_alias))
                 {
                   my_error(ER_WRONG_COLUMN_NAME, MYF(0), column_alias.str);
                   MYSQL_YYABORT;

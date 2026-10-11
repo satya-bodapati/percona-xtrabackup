@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -775,8 +775,8 @@ struct dict_col_t {
   bool assert_equal(const dtype_t *type) const {
     ut_ad(type);
 
-    ut_ad(mtype == type->mtype);
-    ut_ad(prtype == type->prtype);
+    ut_ad_eq(mtype, type->mtype);
+    ut_ad_eq((prtype | DATA_VIRTUAL), (type->prtype | DATA_VIRTUAL));
     // ut_ad(col->len == type->len);
 #ifndef UNIV_HOTBACKUP
     ut_ad(mbminmaxlen == type->mbminmaxlen);
@@ -1698,6 +1698,15 @@ struct dict_foreign_t {
 
   dict_vcol_set *v_cols; /*!< set of virtual columns affected
                          by foreign key constraint. */
+
+  /** Check whether foreign key constraint contains a column with a full
+  index on it. The function is used in the context of cascading DML
+  operations.
+  @retval true  if the column has FTS index on it.
+  @retval false if the FK table has no FTS index or has self referential
+               relationship
+  */
+  bool is_fts_col_affected() const;
 };
 
 std::ostream &operator<<(std::ostream &out, const dict_foreign_t &foreign);

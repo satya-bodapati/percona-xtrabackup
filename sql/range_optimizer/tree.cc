@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -463,7 +463,7 @@ SEL_ROOT::SEL_ROOT(SEL_ARG *root_arg)
       elements(count_elements(root_arg)) {}
 
 SEL_ROOT::SEL_ROOT(MEM_ROOT *mem_root, Type type_arg)
-    : type(type_arg), root(new (mem_root) SEL_ARG()), elements(1) {
+    : type(type_arg), root(new(mem_root) SEL_ARG()), elements(1) {
   assert(type_arg == Type::MAYBE_KEY || type_arg == Type::IMPOSSIBLE);
   root->make_root();
   if (type_arg == Type::MAYBE_KEY) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -63,7 +63,7 @@ struct Transaction_termination_ctx {
 extern "C" struct rpl_transaction_ctx_service_st {
   int (*set_transaction_ctx)(
       Transaction_termination_ctx transaction_termination_ctx);
-} * rpl_transaction_ctx_service;
+} *rpl_transaction_ctx_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -79,6 +79,7 @@ class Filename {
   const char *c_str() const;          // Complete name including dirname
   const char *get_base_name() const;  // Exclude fs (or backup) path
   Uint32 get_base_path_spec() const;
+  bool is_under_base_path() const;
 
  private:
   char theName[PATH_MAX];

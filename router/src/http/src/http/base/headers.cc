@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -48,6 +48,11 @@ Headers::~Headers() {}
 void Headers::add(const std::string_view &key, std::string &&value) {
   remove(key);
   map_.emplace_back(key, std::move(value));
+}
+
+void Headers::insert(Iterator it, const std::string_view &key,
+                     std::string &&value) {
+  map_.insert(it, Map::value_type{key, std::move(value)});
 }
 
 Headers::Iterator Headers::begin() { return map_.begin(); }

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -118,7 +118,10 @@ void Ndb::setup(Ndb_cluster_connection *ndb_cluster_connection,
     }
   }
 
-  theImpl->m_ndb_cluster_connection.link_ndb_object(this);
+  const Uint64 id = theImpl->m_ndb_cluster_connection.link_ndb_object(this);
+
+  /* Give unhinted TC choice alg an offset to use in init() */
+  theImpl->theCurrentConnectIndex = id;
 
   DBUG_VOID_RETURN;
 }
@@ -236,7 +239,7 @@ NdbImpl::NdbImpl(Ndb_cluster_connection *ndb_cluster_connection, Ndb &ndb)
     the_release_ind[i] = 0;
   }
   m_optimized_node_selection =
-      m_ndb_cluster_connection.m_optimized_node_selection;
+      m_ndb_cluster_connection.m_conn_default_optimized_node_selection;
 
   forceShortRequests = false;
 

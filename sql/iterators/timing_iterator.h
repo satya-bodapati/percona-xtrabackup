@@ -1,7 +1,7 @@
 #ifndef SQL_ITERATORS_TIMING_ITERATOR_H_
 #define SQL_ITERATORS_TIMING_ITERATOR_H_
 
-/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -159,7 +159,7 @@ template <class RealIterator>
 class TimingIterator final : public RowIterator {
  public:
   template <class... Args>
-  TimingIterator(THD *thd, Args &&... args)
+  TimingIterator(THD *thd, Args &&...args)
       : RowIterator(thd), m_iterator(thd, std::forward<Args>(args)...) {}
 
   bool Init() override {
@@ -220,7 +220,7 @@ class TimingIterator final : public RowIterator {
 
 template <class RealIterator, class... Args>
 unique_ptr_destroy_only<RowIterator> NewIterator(THD *thd, MEM_ROOT *mem_root,
-                                                 Args &&... args) {
+                                                 Args &&...args) {
   if (thd->lex->is_explain_analyze) {
     return unique_ptr_destroy_only<RowIterator>(
         new (mem_root)

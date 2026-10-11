@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1332,7 +1332,7 @@ void NdbImportUtil::free_rows(RowList &src) {
 NdbImportUtil::Blob::Blob() {
   m_blobsize = 0;
   m_allocsize = 0;
-  m_data = new uchar[0];
+  m_data = nullptr;
 }
 
 NdbImportUtil::Blob::~Blob() { delete[] m_data; }
@@ -1347,7 +1347,9 @@ NdbImportUtil::BlobList::~BlobList() {
 }
 
 void NdbImportUtil::Blob::resize(uint size) {
-  if (m_allocsize < size) {
+  if (m_data == nullptr ||  // Make sure to always allocate data buffer as it's
+                            // used to distinguish between empty and NULL data
+      m_allocsize < size) {
     delete[] m_data;
     m_data = new uchar[size];
     m_allocsize = size;

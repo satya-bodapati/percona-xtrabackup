@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -44,8 +44,8 @@ static NdbCondition *g_freeze_condition = 0;
 static Uint32 g_freeze_waiters = 0;
 static bool g_freeze_wakeup = 0;
 
-//#define DEBUG_SPIN 1
-//#define DEBUG_SCHED_WEIGHTS 1
+// #define DEBUG_SPIN 1
+// #define DEBUG_SCHED_WEIGHTS 1
 
 #ifdef DEBUG_SPIN
 #define DEB_SPIN(arglist)        \
@@ -70,7 +70,7 @@ static bool g_freeze_wakeup = 0;
 #endif
 
 // define HIGH_DEBUG_CPU_USAGE 1
-//#define DEBUG_CPU_USAGE 1
+// #define DEBUG_CPU_USAGE 1
 
 Thrman::Thrman(Block_context &ctx, Uint32 instanceno)
     : SimulatedBlock(THRMAN, ctx, instanceno),
@@ -4037,31 +4037,18 @@ void Thrman::execDBINFO_SCANREQ(Signal *signal) {
                 measure.m_elapsed_time;
 
             /* Ensure that total percentage reported is always 100% */
-            Uint64 exec_full_percentage =
-                exec_percentage + buffer_full_percentage;
-            Uint64 exec_full_send_percentage =
-                exec_percentage + buffer_full_percentage + send_percentage;
-            Uint64 all_exec_percentage = exec_percentage +
-                                         buffer_full_percentage +
-                                         send_percentage + spin_percentage;
-            Uint64 sleep_percentage = 0;
-            if (buffer_full_percentage > Uint64(100)) {
-              buffer_full_percentage = Uint64(100);
-              exec_percentage = 0;
-              send_percentage = 0;
-              spin_percentage = 0;
-            } else if (exec_full_percentage > Uint64(100)) {
-              exec_percentage = Uint64(100) - buffer_full_percentage;
-              send_percentage = 0;
-              spin_percentage = 0;
-            } else if (exec_full_send_percentage > Uint64(100)) {
-              exec_percentage = Uint64(100) - exec_full_percentage;
-              spin_percentage = 0;
-            } else if (all_exec_percentage > Uint64(100)) {
-              exec_percentage = Uint64(100) - exec_full_send_percentage;
-            } else {
-              sleep_percentage = Uint64(100) - all_exec_percentage;
-            }
+            Uint64 remain = 100;
+            buffer_full_percentage = std::min(remain, buffer_full_percentage);
+            remain -= buffer_full_percentage;
+            exec_percentage = std::min(remain, exec_percentage);
+            remain -= exec_percentage;
+            send_percentage = std::min(remain, send_percentage);
+            remain -= send_percentage;
+            spin_percentage = std::min(remain, spin_percentage);
+            remain -= spin_percentage;
+
+            const Uint64 sleep_percentage = remain;
+
             ndbrequire(exec_percentage + buffer_full_percentage +
                            send_percentage + spin_percentage +
                            sleep_percentage ==

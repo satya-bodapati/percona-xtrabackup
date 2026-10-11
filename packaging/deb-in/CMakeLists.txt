@@ -1,4 +1,4 @@
-# Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -57,6 +57,13 @@ ENDIF()
 
 # Change uppercase first letter of Ubuntu/Debian
 string(TOLOWER "${DEB_ID}" DEB_ID)
+
+# Ubuntu 20.04 and 22.04 has too old zlib
+IF(DEB_CODENAME STREQUAL "focal" OR DEB_CODENAME STREQUAL "jammy")
+  SET (DEB_ZLIB_OPTION "bundled")
+ELSE()
+  SET (DEB_ZLIB_OPTION "system")
+ENDIF()
 
 IF (WITH_NDB)
   SET (DEB_BASE_PRODUCT "cluster-")
@@ -255,7 +262,7 @@ ENDIF()
 # Enable various apparmor systems for Ubuntu
 IF(DEB_ID STREQUAL "ubuntu")
   SET (DEB_CONTROL_BDEPS ", dh-apparmor")
-  SET (DEB_RULES_INSTALL_APPARMOR "install -g root -o root -m 0644 -D debian/extra/apparmor-profile debian/tmp/etc/apparmor.d/usr.sbin.mysqld")
+  SET (DEB_RULES_INSTALL_APPARMOR "install -m 0644 -D debian/extra/apparmor-profile debian/tmp/etc/apparmor.d/usr.sbin.mysqld")
   SET (DEB_RULES_APPARMOR_LOAD "dh_apparmor -pmysql-${DEB_PRODUCTNAME}-server --profile-name=usr.sbin.mysqld")
   SET (DEB_INSTALL_SERVER_APPARMOR "etc/apparmor.d/usr.sbin.mysqld")
   SET (DEB_INSTALL_ROUTER_APPARMOR "etc/apparmor.d/usr.bin.mysqlrouter")

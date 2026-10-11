@@ -1,7 +1,7 @@
 #ifndef SQL_ITERATORS_BASIC_ROW_ITERATORS_H_
 #define SQL_ITERATORS_BASIC_ROW_ITERATORS_H_
 
-/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -146,7 +146,6 @@ class IndexDistanceScanIterator final : public TableRowIterator {
   IndexDistanceScanIterator(THD *thd, TABLE *table, int idx,
                             QUICK_RANGE *query_mbr, double expected_rows,
                             ha_rows *examined_rows);
-  ~IndexDistanceScanIterator() override;
 
   bool Init() override;
   int Read() override;

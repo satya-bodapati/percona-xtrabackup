@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -41,6 +41,16 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 
+#include <openssl/bio.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
+#if defined(_WIN32)
+// needed for BootstrapCertTest.CheckGeneratedCertDetails
+// OPENSSL_Uplink(00007FFD74D4CC88,08): no OPENSSL_Applink
+#include <openssl/applink.c>
+#endif
+
 #include "common.h"  // truncate_string
 #include "config_builder.h"
 #include "dim.h"
@@ -55,12 +65,14 @@
 #include "mysqld_error.h"
 #include "mysqlrouter/cluster_metadata.h"
 #include "mysqlrouter/utils.h"  // getpwuid
+#include "openssl_version.h"    // ROUTER_OPENSSL_VERSION
 #include "random_generator.h"
 #include "rest_api_testutils.h"
 #include "router_component_test.h"
 #include "router_component_testutils.h"
 #include "router_config.h"
 #include "router_test_helpers.h"  // get_file_output
+#include "scope_guard.h"
 #include "script_generator.h"
 #include "socket_operations.h"
 #include "tcp_port_pool.h"
@@ -76,7 +88,8 @@ using namespace std::string_literals;
 using mysqlrouter::ClusterType;
 
 // for the test with no param
-class RouterBootstrapTest : public RouterComponentBootstrapTest {};
+class RouterBootstrapTest
+    : public RouterComponentBootstrapWithDefaultCertsTest {};
 
 // if we plan to run the Router after the bootstrap we want to overwrite the
 // bind adddresses to prevent MacOS firewall pop ups
@@ -174,8 +187,21 @@ auto get_test_description(
 }
 
 class RouterBootstrapOkTest
-    : public RouterComponentBootstrapTest,
-      public ::testing::WithParamInterface<BootstrapTestParam> {};
+    : public RouterComponentBootstrapWithDefaultCertsTest,
+      public ::testing::WithParamInterface<BootstrapTestParam> {
+ public:
+  void verify_password_not_logged(const std::string &console_output) {
+    const auto lines = mysql_harness::split_string(console_output, '\n');
+    size_t found_create_statements{0};
+    for (const auto &line : lines) {
+      if (line.find("CREATE USER") != std::string::npos) {
+        EXPECT_THAT(line, ::testing::HasSubstr("***"));
+        ++found_create_statements;
+      }
+    }
+    EXPECT_GT(found_create_statements, 0);
+  }
+};
 
 /**
  * @test
@@ -210,7 +236,7 @@ TEST_P(RouterBootstrapOkTest, BootstrapOk) {
 
   std::vector<std::string> bootstrap_params{
       "--bootstrap=127.0.0.1:" + std::to_string(server_port), "-d",
-      bootstrap_dir.name()};
+      bootstrap_dir.name(), "--logger.level=debug"};
 
   auto &router = launch_router_for_bootstrap(bootstrap_params);
 
@@ -225,6 +251,8 @@ TEST_P(RouterBootstrapOkTest, BootstrapOk) {
     EXPECT_TRUE(pattern_found(router_console_output, expected_output_string))
         << router_console_output;
   }
+
+  verify_password_not_logged(router_console_output);
 
   const std::string conf_file = bootstrap_dir.name() + "/mysqlrouter.conf";
   // 'config_file' is set as side-effect of bootstrap_failover()
@@ -567,7 +595,7 @@ struct BootstrapOkBasePortTestParam {
 };
 
 class RouterBootstrapOkBasePortTest
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapOkBasePortTestParam> {};
 
 namespace {
@@ -684,7 +712,7 @@ struct BootstrapErrorBasePortTestParam {
 };
 
 class RouterBootstrapErrorBasePortTest
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapErrorBasePortTestParam> {};
 
 /**
@@ -753,7 +781,7 @@ struct ReBootstrapOkBasePortTestParam {
 };
 
 class RouterReBootstrapOkBasePortTest
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<ReBootstrapOkBasePortTestParam> {};
 
 /**
@@ -928,7 +956,7 @@ INSTANTIATE_TEST_SUITE_P(
  *       - PRIMARY
  */
 class RouterBootstrapUserIsCurrentUser
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 TEST_P(RouterBootstrapUserIsCurrentUser, BootstrapUserIsCurrentUser) {
@@ -965,7 +993,7 @@ INSTANTIATE_TEST_SUITE_P(
 #endif
 
 class RouterBootstrapailoverClusterIdDiffers
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1013,7 +1041,7 @@ INSTANTIATE_TEST_SUITE_P(
  *       - PRIMARY
  */
 class RouterBootstrapOnlySockets
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 TEST_P(RouterBootstrapOnlySockets, BootstrapOnlySockets) {
@@ -1055,7 +1083,7 @@ INSTANTIATE_TEST_SUITE_P(
     get_test_description);
 
 class BootstrapUnsupportedSchemaVersionTest
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<mysqlrouter::MetadataSchemaVersion> {
 };
 
@@ -1103,7 +1131,7 @@ INSTANTIATE_TEST_SUITE_P(
  *       verify that the router errors out cleanly when received some unexpected
  *       error from the metadata server
  */
-TEST_F(RouterComponentBootstrapTest, BootstrapErrorOnFirstQuery) {
+TEST_F(RouterBootstrapTest, BootstrapErrorOnFirstQuery) {
   std::vector<Config> mock_servers{
       {"127.0.0.1", port_pool_.get_next_available(),
        port_pool_.get_next_available(),
@@ -1121,7 +1149,7 @@ TEST_F(RouterComponentBootstrapTest, BootstrapErrorOnFirstQuery) {
  *       verify that the router's \c --bootstrap detects an upgrade
  *       metadata schema version and gives a proper message
  */
-TEST_F(RouterComponentBootstrapTest, BootstrapWhileMetadataUpgradeInProgress) {
+TEST_F(RouterBootstrapTest, BootstrapWhileMetadataUpgradeInProgress) {
   std::vector<Config> mock_servers{
       {"127.0.0.1", port_pool_.get_next_available(),
        port_pool_.get_next_available(),
@@ -1141,7 +1169,7 @@ TEST_F(RouterComponentBootstrapTest, BootstrapWhileMetadataUpgradeInProgress) {
  *       command line correctly
  *       TS_FR12_01
  */
-TEST_F(RouterComponentBootstrapTest, BootstrapPidfileOpt) {
+TEST_F(RouterBootstrapTest, BootstrapPidfileOpt) {
   std::string pidfile =
       mysql_harness::Path(get_test_temp_dir_name()).join("test.pid").str();
 
@@ -1170,7 +1198,7 @@ TEST_F(RouterComponentBootstrapTest, BootstrapPidfileOpt) {
  *       config file correctly
  *       TS_FR13_01
  */
-TEST_F(RouterComponentBootstrapTest, BootstrapPidfileCfg) {
+TEST_F(RouterBootstrapTest, BootstrapPidfileCfg) {
   std::string pidfile = mysql_harness::Path(get_test_temp_dir_name())
                             .real_path()
                             .join("test.pid")
@@ -1214,7 +1242,7 @@ TEST_F(RouterComponentBootstrapTest, BootstrapPidfileCfg) {
  *       ROUTER_PID is specified
  *       TS_FR13_02
  */
-TEST_F(RouterComponentBootstrapTest, BootstrapPidfileEnv) {
+TEST_F(RouterBootstrapTest, BootstrapPidfileEnv) {
   // Set ROUTER_PID
   std::string pidfile = mysql_harness::Path(get_test_temp_dir_name())
                             .real_path()
@@ -1262,7 +1290,7 @@ TEST_F(RouterComponentBootstrapTest, BootstrapPidfileEnv) {
 }
 
 class RouterBootstrapFailoverSuperReadonly
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1304,7 +1332,7 @@ INSTANTIATE_TEST_SUITE_P(
     get_test_description);
 
 class RouterBootstrapFailoverSuperReadonly2ndNodeDead
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1370,7 +1398,7 @@ INSTANTIATE_TEST_SUITE_P(
     get_test_description);
 
 class RouterBootstrapFailoverPrimaryUnreachable
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1423,7 +1451,7 @@ INSTANTIATE_TEST_SUITE_P(
     get_test_description);
 
 class RouterBootstrapFailoverSuperReadonlyCreateAccountFails
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1475,7 +1503,7 @@ INSTANTIATE_TEST_SUITE_P(
     get_test_description);
 
 class RouterBootstrapFailoverSuperReadonlyCreateAccountGrantFails
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1562,7 +1590,7 @@ TEST_F(RouterBootstrapTest, DISABLED_BootstrapFailoverSuperReadonlyFromSocket) {
 }
 
 class RouterBootstrapFailoverSuperReadonlyNewPrimaryCrash
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -1725,7 +1753,7 @@ TEST_F(RouterBootstrapTest, BootstrapAccessErrorAtGrantStatement) {
 }
 
 class RouterBootstrapBootstrapNoGroupReplicationSetup
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapTestParam> {};
 
 /**
@@ -2013,7 +2041,7 @@ INSTANTIATE_TEST_SUITE_P(
                                      "auth_cache_refresh_interval=2"},
                                     {2, 1, 0}}));
 
-class ErrorReportTest : public RouterComponentBootstrapTest {};
+class ErrorReportTest : public RouterComponentBootstrapWithDefaultCertsTest {};
 
 /**
  * @test
@@ -2317,6 +2345,51 @@ TEST_F(RouterBootstrapTest, BootstrapRouterDuplicateEntryOverwrite) {
        bootstrap_directory.name(), "--force"},
       EXIT_SUCCESS);
 
+  check_exit_code(router, EXIT_SUCCESS);
+}
+
+/**
+ * @test
+ *       verify that Router creates an account even if the router_id
+ * AUTOINCREMENT value is high
+ */
+TEST_F(RouterBootstrapTest, BootstrapRouterRouterIdMax) {
+  TempDirectory bootstrap_directory;
+  const auto server_port = port_pool_.get_next_available();
+  // const auto server_http_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
+  const std::string json_stmts = get_data_dir().join("bootstrap_gr.js").str();
+
+  // launch mock server that is our metadata server for the bootstrap
+  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false,
+                           http_port);
+  set_mock_metadata(http_port, "cluster-specific-id",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+
+  {
+    std::string server_globals =
+        MockServerRestClient(http_port).get_globals_as_json_string();
+    JsonDocument globals;
+    if (globals.Parse<0>(server_globals.c_str()).HasParseError()) {
+      FAIL() << "Failed parsing mock server globals";
+    }
+
+    JsonAllocator allocator;
+    // mimic the highiest possible router_id (2^32-1)
+    globals.AddMember("last_insert_id", std::numeric_limits<uint32_t>::max(),
+                      allocator);
+
+    server_globals = json_to_string(globals);
+    MockServerRestClient(http_port).set_globals(server_globals);
+  }
+
+  // launch the router in bootstrap mode
+  auto &router = launch_router_for_bootstrap(
+      {"--bootstrap=127.0.0.1:" + std::to_string(server_port), "-d",
+       bootstrap_directory.name()},
+      EXIT_SUCCESS);
+
+  // the bootstrap should be fine even with the router_id that high
   check_exit_code(router, EXIT_SUCCESS);
 }
 
@@ -2789,7 +2862,7 @@ TEST_F(RouterBootstrapTest, SSLOptions) {
  *       verify that Router can be re-bootstrapped using the same directory if
  * the cluster name has changed in the meantime
  */
-TEST_F(RouterComponentBootstrapTest, RouterReBootstrapClusterNameChange) {
+TEST_F(RouterBootstrapTest, RouterReBootstrapClusterNameChange) {
   const std::string tracefile = "bootstrap_gr.js";
 
   const std::string kInitialClusterName = "initial_cluster_name";
@@ -2831,7 +2904,7 @@ TEST_F(RouterComponentBootstrapTest, RouterReBootstrapClusterNameChange) {
  *       verify that using --force-password-validation is still supported for
  * backward compatibility
  */
-TEST_F(RouterComponentBootstrapTest, ForcePasswordValidation) {
+TEST_F(RouterBootstrapTest, ForcePasswordValidation) {
   const std::string tracefile = "bootstrap_gr.js";
 
   const auto classic_port = port_pool_.get_next_available();
@@ -2854,7 +2927,7 @@ TEST_F(RouterComponentBootstrapTest, ForcePasswordValidation) {
   check_exit_code(router_bs, EXIT_SUCCESS);
 }
 
-TEST_F(RouterComponentBootstrapTest, ShowCipherInvalidResult) {
+TEST_F(RouterBootstrapTest, ShowCipherInvalidResult) {
   const std::string tracefile =
       get_data_dir()
           .join("bootstrap_show_cipher_status_invalid_result.js")
@@ -2889,7 +2962,7 @@ struct BootstrapErrorTestParam {
 };
 
 class BootstrapErrorTest
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapErrorTestParam> {};
 
 TEST_P(BootstrapErrorTest, Spec) {
@@ -2933,7 +3006,7 @@ INSTANTIATE_TEST_SUITE_P(
             "a non-'localhost' hostname: abc.nodomain.com"}));
 
 class BootstrapErrorTestWithMock
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<BootstrapErrorTestParam> {};
 
 TEST_P(BootstrapErrorTestWithMock, Spec) {
@@ -3020,7 +3093,7 @@ struct AuthPluginTestParam {
 };
 
 class BootstrapChangeAuthPluginTest
-    : public RouterComponentBootstrapTest,
+    : public RouterComponentBootstrapWithDefaultCertsTest,
       public ::testing::WithParamInterface<AuthPluginTestParam> {};
 
 /**
@@ -3208,7 +3281,7 @@ INSTANTIATE_TEST_SUITE_P(
              "Failed changing the authentication plugin for account "
              "'.*'@'localhost': Error executing MySQL query \"alter user "
              "'.*'@'localhost' identified with `caching_sha2_password` by "
-             "'.*'\": Unexpected error .*"},
+             "\\*\\*\\*\": Unexpected error .*"},
             /*unexpected_output_strings*/
             {"Successfully changed the authentication plugin for .*"},
             /*test_description*/
@@ -3221,7 +3294,7 @@ INSTANTIATE_TEST_SUITE_P(
  *       Verify that when the Router is bootstrapped over existing confuguration
  * it removes unsupported bootstrap_server_addresses from the configuration file
  */
-TEST_F(RouterComponentBootstrapTest, BootstrapRemoveServerAddressesOption) {
+TEST_F(RouterBootstrapTest, BootstrapRemoveServerAddressesOption) {
   RecordProperty("Worklog", "15867");
   RecordProperty("RequirementId", "FR2");
   RecordProperty(
@@ -3270,6 +3343,189 @@ TEST_F(RouterComponentBootstrapTest, BootstrapRemoveServerAddressesOption) {
   EXPECT_THAT(
       get_file_output(bs_dir + "/mysqlrouter.conf"),
       ::testing::Not(::testing::HasSubstr("bootstrap_server_addresses")));
+}
+
+static constexpr const unsigned long max_supported_version =
+    MYSQL_ROUTER_VERSION_MAJOR * 10000 + MYSQL_ROUTER_VERSION_MINOR * 100 + 99;
+
+struct ServerCompatTestParam {
+  std::string description;
+  std::string tracefile;
+  std::string server_version;
+  bool expect_failure;
+  std::string expected_error_msg;
+};
+
+class CheckServerCompatibilityTest
+    : public RouterComponentBootstrapTest,
+      public ::testing::WithParamInterface<ServerCompatTestParam> {};
+
+/**
+ * @test
+ *       Verifies that the server version is checked for compatibility when the
+ * Router is bootstrapped against the GR Cluster and Replica Set
+ */
+TEST_P(CheckServerCompatibilityTest, Spec) {
+  RecordProperty("Description", GetParam().description);
+
+  const auto classic_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
+
+  const std::string tracefile = get_data_dir().join(GetParam().tracefile).str();
+  launch_mysql_server_mock(tracefile, classic_port, EXIT_SUCCESS, false,
+                           http_port);
+
+  set_mock_metadata(http_port, "gr-uuid",
+                    classic_ports_to_gr_nodes({classic_port}), 0,
+                    {classic_port});
+
+  set_mock_server_version(http_port, GetParam().server_version);
+
+  std::vector<std::string> cmdline_bs = {"--bootstrap=root:"s + kRootPassword +
+                                             "@localhost:"s +
+                                             std::to_string(classic_port),
+                                         "-d", bootstrap_dir.name()};
+
+  const auto expected_exit_code =
+      GetParam().expect_failure ? EXIT_FAILURE : EXIT_SUCCESS;
+  auto &router = launch_router_for_bootstrap(cmdline_bs, expected_exit_code);
+  check_exit_code(router, expected_exit_code);
+
+  if (GetParam().expect_failure) {
+    const std::string router_console_output = router.get_full_output();
+    EXPECT_TRUE(
+        pattern_found(router_console_output, GetParam().expected_error_msg))
+        << router_console_output;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Spec, CheckServerCompatibilityTest,
+    ::testing::Values(
+        ServerCompatTestParam{
+            "GR Cluster; Server is the same version as Router - bootstrap OK",
+            "bootstrap_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            false, ""},
+        ServerCompatTestParam{
+            "Replica Set; Server is the same version as Router - bootstrap OK",
+            "bootstrap_ar.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            false, ""},
+        ServerCompatTestParam{
+            "GR Cluster; Server major version is highier than Router - "
+            "bootstrap should fail",
+            "bootstrap_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            true,
+            "Error: Unsupported MySQL Server version '.*'. Maximal supported "
+            "version is '" +
+                std::to_string(max_supported_version) + "'."},
+        ServerCompatTestParam{
+            "GR Cluster; Server minor version is highier than Router - "
+            "bootstrap should fail",
+            "bootstrap_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            true,
+            "Error: Unsupported MySQL Server version '.*'. Maximal supported "
+            "version is '" +
+                std::to_string(max_supported_version) + "'."},
+        ServerCompatTestParam{
+            "GR Cluster; Server patch version is highier than Router - "
+            "bootstrap OK",
+            "bootstrap_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH + 1),
+            false, ""},
+        ServerCompatTestParam{
+            "Replica Set; Server major version is highier than Router - "
+            "bootstrap should fail",
+            "bootstrap_ar.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            true,
+            "Error: Unsupported MySQL Server version '.*'. Maximal supported "
+            "version is '" +
+                std::to_string(max_supported_version) + "'."}));
+
+std::string get_x509_name(X509_NAME *name) {
+  char buffer[256];
+  X509_NAME_oneline(name, buffer, sizeof(buffer));
+  return std::string(buffer);
+}
+
+class BootstrapCertTest : public RouterComponentBootstrapTest {};
+
+TEST_F(BootstrapCertTest, CheckGeneratedCertDetails) {
+  const auto server_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
+
+  const std::string tracefile = "bootstrap_gr.js";
+  const std::string json_stmts = get_data_dir().join(tracefile).str();
+  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false,
+                           http_port);
+
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+
+  std::vector<std::string> cmdline_bs = {"--bootstrap=root:"s + kRootPassword +
+                                             "@localhost:"s +
+                                             std::to_string(server_port),
+                                         "-d", bootstrap_dir.name()};
+
+  auto &router = launch_router_for_bootstrap(cmdline_bs, EXIT_SUCCESS,
+                                             /*disable_rest*/ false);
+  check_exit_code(router, EXIT_SUCCESS);
+
+  Path tmp(bootstrap_dir.name());
+  Path cert_file(tmp.join("data").join("router-cert.pem").str());
+  ASSERT_TRUE(cert_file.exists());
+
+  SCOPED_TRACE("// Open certificate file");
+  FILE *file = fopen(cert_file.str().c_str(), "r");
+  ASSERT_TRUE(file);
+  Scope_guard file_guard([&]() { fclose(file); });
+
+  SCOPED_TRACE("// Read certificate");
+  X509 *cert = PEM_read_X509(file, nullptr, nullptr, nullptr);
+  ASSERT_TRUE(cert);
+  Scope_guard cert_guard([&]() { X509_free(cert); });
+
+  SCOPED_TRACE("// Check certificate validity");
+#if OPENSSL_VERSION_NUMBER >= ROUTER_OPENSSL_VERSION(1, 1, 0)
+  const ASN1_TIME *notBefore = X509_get0_notBefore(cert);
+  const ASN1_TIME *notAfter = X509_get0_notAfter(cert);
+#else
+  ASN1_TIME *notBefore = X509_get_notBefore(cert);
+  ASN1_TIME *notAfter = X509_get_notAfter(cert);
+#endif
+  int days = 0, seconds = 0;
+  ASSERT_TRUE(ASN1_TIME_diff(&days, &seconds, notBefore, notAfter));
+  const auto k_year = 365;
+  EXPECT_LE(days, k_year);
+
+  SCOPED_TRACE("// Check certificate serial number");
+  ASN1_INTEGER *serial = X509_get_serialNumber(cert);
+  const auto serialNumber = ASN1_INTEGER_get(serial);
+  EXPECT_NE(serialNumber, 0);
+
+  SCOPED_TRACE("// Check issuer and subject CN");
+  EXPECT_THAT(
+      get_x509_name(X509_get_issuer_name(cert)),
+      ::testing::HasSubstr("MySQL_Router_Auto_Generated_CA_Certificate"));
+  EXPECT_THAT(
+      get_x509_name(X509_get_subject_name(cert)),
+      ::testing::HasSubstr("MySQL_Router_Auto_Generated_Router_Certificate"));
 }
 
 int main(int argc, char *argv[]) {

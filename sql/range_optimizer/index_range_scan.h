@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -99,7 +99,7 @@ class IndexRangeScanIterator : public RowIDCapableRowIterator {
  private:
   MEM_ROOT *mem_root;
   bool inited = false;
-  const bool m_expected_rows;
+  const double m_expected_rows;
   ha_rows *m_examined_rows;
 
   int cmp_next(QUICK_RANGE *range);

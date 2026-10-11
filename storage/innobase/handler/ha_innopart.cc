@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1137,7 +1137,7 @@ int ha_innopart::open(const char *name, int mode [[maybe_unused]],
     return HA_ERR_OUT_OF_MEM;
   }
 
-  m_sql_stat_start_parts.init(m_bitset, UT_BITS_IN_BYTES(m_tot_parts));
+  m_sql_stat_start_parts = {m_bitset, UT_BITS_IN_BYTES(m_tot_parts)};
   m_reuse_mysql_template = false;
 
   info(HA_STATUS_NO_LOCK | HA_STATUS_VARIABLE | HA_STATUS_CONST);
@@ -1274,7 +1274,7 @@ void ha_innopart::set_partition(uint part_id) {
 
   if (part_id >= m_tot_parts) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
   if (m_pcur_parts != nullptr) {
     m_prebuilt->pcur = &m_pcur_parts[m_pcur_map[part_id]];
@@ -1322,7 +1322,7 @@ void ha_innopart::update_partition(uint part_id) {
 
   if (part_id >= m_tot_parts) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   /* Update all m_parts[part_id] fields with corresponding m_prebuilt's fields,
@@ -1487,39 +1487,36 @@ int ha_innopart::index_init(uint keynr, bool sorted) {
   }
 
   error = ph_index_init_setup(keynr, sorted);
-  if (error != 0) {
-    return error;
-  }
 
-  if (sorted) {
+  if (!error && sorted) {
     error = init_record_priority_queue();
-    if (error != 0) {
-      /* Needs cleanup in case it returns error. */
-      destroy_record_priority_queue();
-      return error;
+  }
+
+  if (!error) {
+    /* Disable prefetch for ordered scans.
+    The prefetch buffer is not partitioning aware, so it may return rows from a
+    different partition. This is relevant only when we interleave reads across
+    partitions (sorted/ordered scan with priority queue). */
+    if (sorted) {
+      m_prebuilt->m_no_prefetch = true;
     }
-    /* Disable prefetch.
-    The prefetch buffer is not partitioning aware, so it may return
-    rows from a different partition if either the prefetch buffer is
-    full, or it is non-empty and the partition is exhausted. */
-    m_prebuilt->m_no_prefetch = true;
+
+    /* For scan across partitions, the keys needs to be materialized */
+    m_prebuilt->m_read_virtual_key = true;
+
+    error = change_active_index(part_id, keynr);
+
+    DBUG_EXECUTE_IF("partition_fail_index_init",
+                    { error = HA_ERR_NO_PARTITION_FOUND; });
   }
 
-  /* For scan across partitions, the keys needs to be materialized */
-  m_prebuilt->m_read_virtual_key = true;
-
-  error = change_active_index(part_id, keynr);
-  if (error != 0) {
+  if (error) {
     destroy_record_priority_queue();
-    return error;
+    m_prebuilt->m_no_prefetch = false;
+    m_prebuilt->m_read_virtual_key = false;
   }
 
-  DBUG_EXECUTE_IF("partition_fail_index_init", {
-    destroy_record_priority_queue();
-    return HA_ERR_NO_PARTITION_FOUND;
-  });
-
-  return 0;
+  return error;
 }
 
 /** End index cursor.
@@ -1528,17 +1525,17 @@ int ha_innopart::index_end() {
   uint part_id = m_part_info->get_first_used_partition();
   DBUG_TRACE;
 
-  if (part_id == MY_BIT_NONE) {
-    /* Never initialized any index. */
-    active_index = MAX_KEY;
-    return 0;
-  }
-  if (m_ordered) {
+  if (m_queue) {
     destroy_record_priority_queue();
     m_prebuilt->m_no_prefetch = false;
   }
   m_prebuilt->m_read_virtual_key = false;
 
+  if (part_id == MY_BIT_NONE) {
+    /* Never initialized any index. */
+    active_index = MAX_KEY;
+    return 0;
+  }
   return ha_innobase::index_end();
 }
 
@@ -3189,10 +3186,9 @@ int ha_innopart::records(ha_rows *num_rows) {
 
   n_threads = Parallel_reader::available_threads(n_threads, false);
 
-  if (n_threads > 0 && trx->isolation_level > TRX_ISO_READ_UNCOMMITTED &&
+  if (n_threads > 1 && trx->isolation_level > TRX_ISO_READ_UNCOMMITTED &&
       m_prebuilt->select_lock_type == LOCK_NONE &&
-      trx->mysql_n_tables_locked == 0 && !m_prebuilt->ins_sel_stmt &&
-      n_threads > 1) {
+      trx->mysql_n_tables_locked == 0 && !m_prebuilt->ins_sel_stmt) {
     trx_start_if_not_started_xa(trx, false, UT_LOCATION_HERE);
     trx_assign_read_view(trx);
 
@@ -3207,8 +3203,19 @@ int ha_innopart::records(ha_rows *num_rows) {
       if (dict_table_is_discarded(m_prebuilt->table)) {
         ib_senderrf(ha_thd(), IB_LOG_LEVEL_ERROR, ER_TABLESPACE_DISCARDED,
                     m_prebuilt->table->name.m_name);
+
+        /* Restore the parallel read thread count if parallel read is not
+        executed */
+        Parallel_reader::release_threads(n_threads);
+
         *num_rows = HA_POS_ERROR;
         return (HA_ERR_NO_SUCH_TABLE);
+      }
+
+      m_prebuilt->index_usable = m_prebuilt->index->is_usable(trx);
+      if (!m_prebuilt->index_usable) {
+        *num_rows = HA_POS_ERROR;
+        return HA_ERR_TABLE_DEF_CHANGED;
       }
 
       build_template(true);
@@ -3218,6 +3225,8 @@ int ha_innopart::records(ha_rows *num_rows) {
 
     ulint n_rows{};
 
+    /* There is no need to restore the parallel read thread count after this
+    method call as it takes the ownership of n_threads. */
     auto err =
         row_mysql_parallel_select_count_star(trx, indexes, n_threads, &n_rows);
 
@@ -3236,6 +3245,10 @@ int ha_innopart::records(ha_rows *num_rows) {
     /* The index scan is probably so expensive, so the overhead
     of the rest of the function is neglectable for each partition.
     So no current reason for optimizing this further. */
+
+    /* Restore the parallel read thread count if parallel read is not
+    executed */
+    Parallel_reader::release_threads(n_threads);
 
     for (uint i = m_part_info->get_first_used_partition(); i < m_tot_parts;
          i = m_part_info->get_next_used_partition(i)) {
@@ -4098,7 +4111,7 @@ void ha_innopart::get_auto_increment(ulonglong, ulonglong increment,
     /* Only first key part allowed as autoinc for InnoDB tables! */
     *first_value = ULLONG_MAX;
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
   get_auto_increment_first_field(increment, nb_desired_values, first_value,
                                  nb_reserved_values);

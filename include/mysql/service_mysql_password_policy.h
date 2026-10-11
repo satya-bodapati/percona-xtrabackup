@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -58,7 +58,7 @@ extern "C" struct mysql_password_policy_service_st {
     st_mysql_validate_password::get_password_strength
   */
   int (*my_calculate_password_strength_func)(const char *, unsigned int);
-} * mysql_password_policy_service;
+} *mysql_password_policy_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2005, 2024, Oracle and/or its affiliates.
+Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -135,7 +135,7 @@ bool page_zip_is_too_big(const dict_index_t *index, const dtuple_t *entry) {
   modification log. */
   ulint free_space_zip =
       page_zip_empty_size(index->n_fields, page_size.physical());
-  ulint n_uniq = dict_index_get_n_unique_in_tree(index);
+  const auto n_uniq = dict_index_get_n_unique_in_tree_nonleaf(index);
 
   ut_ad(dict_table_is_comp(index->table));
   ut_ad(page_size.is_compressed());
@@ -2117,8 +2117,7 @@ void page_zip_write_trx_id_and_roll_ptr(page_zip_des_t *page_zip, byte *rec,
       page_zip_dir_start(page_zip) -
       (rec_get_heap_no_new(rec) - 1) * (DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN);
 
-  field = const_cast<byte *>(
-      rec_get_nth_field(nullptr, rec, offsets, trx_id_col, &len));
+  field = rec_get_nth_field(nullptr, rec, offsets, trx_id_col, &len);
   ut_ad(len == DATA_TRX_ID_LEN);
   ut_ad(field + DATA_TRX_ID_LEN ==
         rec_get_nth_field(nullptr, rec, offsets, trx_id_col + 1, &len));

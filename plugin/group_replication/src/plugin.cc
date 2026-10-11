@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -218,6 +218,15 @@ void set_auto_increment_handler_values();
 
 static void check_deprecated_variables() {
   MYSQL_THD thd = lv.plugin_is_auto_starting_on_install ? nullptr : current_thd;
+  if (static_cast<enum_transport_protocol>(ov.communication_stack_var) !=
+      MYSQL_PROTOCOL) {
+    push_deprecated_warn(thd, "group_replication_communication_stack=XCOM",
+                         "group_replication_communication_stack=MYSQL");
+  }
+  if (ov.ip_allowlist_var != nullptr &&
+      strcmp(ov.ip_allowlist_var, "AUTOMATIC")) {
+    push_deprecated_warn_no_replacement(thd, "group_replication_ip_allowlist");
+  }
   if (ov.view_change_uuid_var != nullptr &&
       strcmp(ov.view_change_uuid_var, "AUTOMATIC")) {
     push_deprecated_warn_no_replacement(thd,
@@ -3175,9 +3184,9 @@ static int check_flow_control_min_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_min_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3193,9 +3202,9 @@ static int check_flow_control_min_recovery_quota(MYSQL_THD, SYS_VAR *,
   if (check_flow_control_min_recovery_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
   return 0;
 }
 
@@ -3209,9 +3218,9 @@ static int check_flow_control_max_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_max_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3235,11 +3244,10 @@ static int check_sysvar_ulong_timeout(MYSQL_THD, SYS_VAR *var, void *save,
   longlong in_val;
   value->val_int(value, &in_val);
 
-  *(longlong *)save = (in_val < minimum)
-                          ? minimum
-                          : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
-                                ? in_val
-                                : LONG_TIMEOUT;
+  *(longlong *)save = (in_val < minimum) ? minimum
+                      : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
+                          ? in_val
+                          : LONG_TIMEOUT;
 
   return 0;
 }
@@ -3511,6 +3519,8 @@ static int check_ip_allowlist_preconditions(MYSQL_THD thd, SYS_VAR *var,
   char buff[IP_ALLOWLIST_STR_BUFFER_LENGTH];
   const char *str;
   int length = sizeof(buff);
+
+  push_deprecated_warn_no_replacement(thd, "group_replication_ip_allowlist");
 
   Checkable_rwlock::Guard g(*lv.plugin_running_lock,
                             Checkable_rwlock::TRY_READ_LOCK);
@@ -3994,10 +4004,9 @@ static int check_member_weight(MYSQL_THD, SYS_VAR *, void *save,
     }
   }
 
-  *(uint *)save =
-      (in_val < MIN_MEMBER_WEIGHT)
-          ? MIN_MEMBER_WEIGHT
-          : (in_val < MAX_MEMBER_WEIGHT) ? in_val : MAX_MEMBER_WEIGHT;
+  *(uint *)save = (in_val < MIN_MEMBER_WEIGHT)   ? MIN_MEMBER_WEIGHT
+                  : (in_val < MAX_MEMBER_WEIGHT) ? in_val
+                                                 : MAX_MEMBER_WEIGHT;
 
   return 0;
 }
@@ -5244,6 +5253,17 @@ static MYSQL_SYSVAR_STR(
     nullptr,                /* update func*/
     "AUTOMATIC");           /* default*/
 
+static void update_communication_stack(MYSQL_THD thd, SYS_VAR *, void *var_ptr,
+                                       const void *save_ptr) {
+  const ulong val = *static_cast<const long *>(save_ptr);
+  *static_cast<ulong *>(var_ptr) = val;
+
+  if (static_cast<enum_transport_protocol>(val) == XCOM_PROTOCOL) {
+    push_deprecated_warn(thd, "group_replication_communication_stack=XCOM",
+                         "group_replication_communication_stack=MYSQL");
+  }
+}
+
 static MYSQL_SYSVAR_ENUM(
     communication_stack,                                   /* name */
     ov.communication_stack_var,                            /* var */
@@ -5252,7 +5272,7 @@ static MYSQL_SYSVAR_ENUM(
     "use : Legacy XCom or MySQL.This option only takes effect after a group "
     "replication restart. Default: XCom",
     nullptr,                                 /* check func. */
-    nullptr,                                 /* update func. */
+    update_communication_stack,              /* update func. */
     XCOM_PROTOCOL,                           /* default */
     &ov.communication_stack_values_typelib_t /* type lib */
 );

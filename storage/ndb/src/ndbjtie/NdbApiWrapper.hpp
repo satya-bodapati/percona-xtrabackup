@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+ Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -66,30 +66,6 @@ struct NdbApiWrapper {
   // mapped by "com_mysql_ndbjtie_ndbapi_NdbDictionary.h"
 
   // mapped by "com_mysql_ndbjtie_ndbapi_NdbDictionary_Dictionary.h"
-
-  static int
-      NdbDictionary__Dictionary__listObjects__0  // disambiguate overloaded
-                                                 // const/non-const function
-      (const NdbDictionary::Dictionary &obj,
-       NdbDictionary::Dictionary::List &p0, NdbDictionary::Object::Type p1) {
-    return obj.listObjects(p0, p1);
-  }
-
-  static int
-      NdbDictionary__Dictionary__listIndexes__0  // disambiguate overloaded
-                                                 // const/non-const function
-      (const NdbDictionary::Dictionary &obj,
-       NdbDictionary::Dictionary::List &p0, const char *p1) {
-    return obj.listIndexes(p0, p1);
-  }
-
-  static int
-      NdbDictionary__Dictionary__listEvents__0  // disambiguate overloaded
-                                                // const/non-const function
-      (const NdbDictionary::Dictionary &obj,
-       NdbDictionary::Dictionary::List &p0) {
-    return obj.listEvents(p0);
-  }
 
   // ---------------------------------------------------------------------------
 

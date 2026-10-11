@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2009, 2010 Facebook, Inc.
-Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -351,7 +351,7 @@ you can write:
 template <size_t iterations>
 struct Loop {
   template <typename Step_executor, typename... Args>
-  static void run(Args &&... args) {
+  static void run(Args &&...args) {
     Loop<iterations - 1>::template run<Step_executor, Args...>(
         std::forward<Args>(args)...);
     Step_executor::template run<iterations - 1>(std::forward<Args>(args)...);

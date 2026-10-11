@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2007, 2024, Oracle and/or its affiliates.
+Copyright (c) 2007, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -39,6 +39,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <sql_time.h>
 #include <sys/types.h>
 #include <time.h>
+#include <string_view>
+#include <unordered_map>
 
 #include "auth_acls.h"
 #include "btr0btr.h"
@@ -118,6 +120,48 @@ constexpr uint64_t i_s_innodb_plugin_version =
 /* Check if we can hold all page types */
 static_assert(I_S_PAGE_TYPE_LAST < (1 << I_S_PAGE_TYPE_BITS),
               "i_s_page_type[] is too large");
+
+namespace {
+const char *state_str(buf_page_state state) {
+  const std::string_view state_str = buf_page_state_str.at(state);
+  if (state_str.length() == 0) {
+    return nullptr;
+  }
+  return state_str.data();
+}
+
+const std::unordered_map<buf_io_fix, std::string_view> buf_io_fix_str{
+    {BUF_IO_NONE, "IO_NONE"},
+    {BUF_IO_READ, "IO_READ"},
+    {BUF_IO_WRITE, "IO_WRITE"},
+    {BUF_IO_PIN, "IO_PIN"},
+};
+
+const char *io_fix_str(buf_io_fix io_fix) {
+  return buf_io_fix_str.at(io_fix).data();
+}
+
+const std::unordered_map<buf_page_state, std::string_view>
+    buf_lru_page_state_str{/* Compressed page */
+                           {BUF_BLOCK_ZIP_PAGE, "YES"},
+                           {BUF_BLOCK_ZIP_DIRTY, "YES"},
+                           /* Uncompressed page */
+                           {BUF_BLOCK_FILE_PAGE, "NO"},
+                           /* We should not see following states */
+                           {BUF_BLOCK_POOL_WATCH, ""},
+                           {BUF_BLOCK_READY_FOR_USE, ""},
+                           {BUF_BLOCK_NOT_USED, ""},
+                           {BUF_BLOCK_MEMORY, ""},
+                           {BUF_BLOCK_REMOVE_HASH, ""}};
+
+const char *lru_page_state_str(buf_page_state lru_state) {
+  const std::string_view lru_state_str = buf_lru_page_state_str.at(lru_state);
+  if (lru_state_str.length() == 0) {
+    return nullptr;
+  }
+  return lru_state_str.data();
+}
+}  // namespace
 
 /** Name string for File Page Types */
 static buf_page_desc_t i_s_page_type[] = {
@@ -1237,6 +1281,7 @@ static int i_s_cmp_per_index_fill_low(
     inconsistent, but it is an acceptable compromise. */
     if (i % 1000 == 0) {
       dict_sys_mutex_exit();
+      std::this_thread::yield();
       dict_sys_mutex_enter();
     }
   }
@@ -2642,13 +2687,15 @@ static int i_s_fts_index_cache_fill_one_index(
       ptr = node->ilist;
 
       while (decoded < node->ilist_size) {
-        ulint pos = fts_decode_vlc(&ptr);
+        const uint64_t delta = fts_decode_vlc(&ptr);
 
-        doc_id += pos;
+        doc_id += delta;
 
         /* Get position info */
         while (*ptr) {
-          pos = fts_decode_vlc(&ptr);
+          const auto decoded_pos = fts_decode_vlc(&ptr);
+          ut_ad(decoded_pos <= std::numeric_limits<ulint>::max());
+          const auto pos = static_cast<ulint>(decoded_pos);
 
           OK(field_store_string(fields[I_S_FTS_WORD], word_str));
 
@@ -2986,13 +3033,15 @@ static int i_s_fts_index_table_fill_one_fetch(
       ptr = node->ilist;
 
       while (decoded < node->ilist_size) {
-        ulint pos = fts_decode_vlc(&ptr);
+        const uint64_t delta = fts_decode_vlc(&ptr);
 
-        doc_id += pos;
+        doc_id += delta;
 
         /* Get position info */
         while (*ptr) {
-          pos = fts_decode_vlc(&ptr);
+          const auto decoded_pos = fts_decode_vlc(&ptr);
+          ut_ad(decoded_pos <= std::numeric_limits<ulint>::max());
+          const auto pos = static_cast<ulint>(decoded_pos);
 
           OK(field_store_string(fields[I_S_FTS_WORD], word_str));
 
@@ -4259,12 +4308,8 @@ static int i_s_innodb_buffer_page_fill(
     const buf_page_info_t *page_info;
     char table_name[MAX_FULL_NAME_LEN + 1];
     const char *table_name_end = nullptr;
-    const char *state_str;
-    enum buf_page_state state;
 
     page_info = info_array + i;
-
-    state_str = nullptr;
 
     OK(fields[IDX_BUFFER_POOL_ID]->store(page_info->pool_id, true));
 
@@ -4341,50 +4386,13 @@ static int i_s_innodb_buffer_page_fill(
                   "BUF_PAGE_STATE_BITS > 3, please ensure that all "
                   "1<<BUF_PAGE_STATE_BITS values are checked for");
 
-    state = static_cast<enum buf_page_state>(page_info->page_state);
+    OK(field_store_string(
+        fields[IDX_BUFFER_PAGE_STATE],
+        state_str(static_cast<enum buf_page_state>(page_info->page_state))));
 
-    switch (state) {
-      /* First three states are for compression pages and
-      are not states we would get as we scan pages through
-      buffer blocks */
-      case BUF_BLOCK_POOL_WATCH:
-      case BUF_BLOCK_ZIP_PAGE:
-      case BUF_BLOCK_ZIP_DIRTY:
-        state_str = nullptr;
-        break;
-      case BUF_BLOCK_NOT_USED:
-        state_str = "NOT_USED";
-        break;
-      case BUF_BLOCK_READY_FOR_USE:
-        state_str = "READY_FOR_USE";
-        break;
-      case BUF_BLOCK_FILE_PAGE:
-        state_str = "FILE_PAGE";
-        break;
-      case BUF_BLOCK_MEMORY:
-        state_str = "MEMORY";
-        break;
-      case BUF_BLOCK_REMOVE_HASH:
-        state_str = "REMOVE_HASH";
-        break;
-    };
-
-    OK(field_store_string(fields[IDX_BUFFER_PAGE_STATE], state_str));
-
-    switch (page_info->io_fix) {
-      case BUF_IO_NONE:
-        OK(field_store_string(fields[IDX_BUFFER_PAGE_IO_FIX], "IO_NONE"));
-        break;
-      case BUF_IO_READ:
-        OK(field_store_string(fields[IDX_BUFFER_PAGE_IO_FIX], "IO_READ"));
-        break;
-      case BUF_IO_WRITE:
-        OK(field_store_string(fields[IDX_BUFFER_PAGE_IO_FIX], "IO_WRITE"));
-        break;
-      case BUF_IO_PIN:
-        OK(field_store_string(fields[IDX_BUFFER_PAGE_IO_FIX], "IO_PIN"));
-        break;
-    }
+    OK(field_store_string(
+        fields[IDX_BUFFER_PAGE_IO_FIX],
+        io_fix_str(static_cast<enum buf_io_fix>(page_info->io_fix))));
 
     OK(field_store_string(fields[IDX_BUFFER_PAGE_IS_OLD],
                           (page_info->is_old) ? "YES" : "NO"));
@@ -4432,10 +4440,11 @@ static void i_s_innodb_set_page_type(
       page_info->page_type = I_S_PAGE_TYPE_INDEX;
     }
 
-    page_info->data_size = (ulint)(
-        page_header_get_field(page, PAGE_HEAP_TOP) -
-        (page_is_comp(page) ? PAGE_NEW_SUPREMUM_END : PAGE_OLD_SUPREMUM_END) -
-        page_header_get_field(page, PAGE_GARBAGE));
+    page_info->data_size =
+        (ulint)(page_header_get_field(page, PAGE_HEAP_TOP) -
+                (page_is_comp(page) ? PAGE_NEW_SUPREMUM_END
+                                    : PAGE_OLD_SUPREMUM_END) -
+                page_header_get_field(page, PAGE_GARBAGE));
 
     page_info->num_recs = page_get_n_recs(page);
   } else if (page_type > FIL_PAGE_TYPE_LAST) {
@@ -4910,10 +4919,6 @@ static int i_s_innodb_buf_page_lru_fill(
     const buf_page_info_t *page_info;
     char table_name[MAX_FULL_NAME_LEN + 1];
     const char *table_name_end = nullptr;
-    const char *state_str;
-    enum buf_page_state state;
-
-    state_str = nullptr;
 
     page_info = info_array + i;
 
@@ -4982,44 +4987,13 @@ static int i_s_innodb_buf_page_lru_fill(
     OK(fields[IDX_BUF_LRU_PAGE_ZIP_SIZE]->store(
         page_info->zip_ssize ? 512 << page_info->zip_ssize : 0, true));
 
-    state = static_cast<enum buf_page_state>(page_info->page_state);
+    OK(field_store_string(fields[IDX_BUF_LRU_PAGE_STATE],
+                          lru_page_state_str(static_cast<enum buf_page_state>(
+                              page_info->page_state))));
 
-    switch (state) {
-      /* Compressed page */
-      case BUF_BLOCK_ZIP_PAGE:
-      case BUF_BLOCK_ZIP_DIRTY:
-        state_str = "YES";
-        break;
-      /* Uncompressed page */
-      case BUF_BLOCK_FILE_PAGE:
-        state_str = "NO";
-        break;
-      /* We should not see following states */
-      case BUF_BLOCK_POOL_WATCH:
-      case BUF_BLOCK_READY_FOR_USE:
-      case BUF_BLOCK_NOT_USED:
-      case BUF_BLOCK_MEMORY:
-      case BUF_BLOCK_REMOVE_HASH:
-        state_str = nullptr;
-        break;
-    };
-
-    OK(field_store_string(fields[IDX_BUF_LRU_PAGE_STATE], state_str));
-
-    switch (page_info->io_fix) {
-      case BUF_IO_NONE:
-        OK(field_store_string(fields[IDX_BUF_LRU_PAGE_IO_FIX], "IO_NONE"));
-        break;
-      case BUF_IO_READ:
-        OK(field_store_string(fields[IDX_BUF_LRU_PAGE_IO_FIX], "IO_READ"));
-        break;
-      case BUF_IO_WRITE:
-        OK(field_store_string(fields[IDX_BUF_LRU_PAGE_IO_FIX], "IO_WRITE"));
-        break;
-      case BUF_IO_PIN:
-        OK(field_store_string(fields[IDX_BUF_LRU_PAGE_IO_FIX], "IO_PIN"));
-        break;
-    }
+    OK(field_store_string(
+        fields[IDX_BUF_LRU_PAGE_IO_FIX],
+        io_fix_str(static_cast<enum buf_io_fix>(page_info->io_fix))));
 
     OK(field_store_string(fields[IDX_BUF_LRU_PAGE_IS_OLD],
                           (page_info->is_old) ? "YES" : "NO"));
@@ -6122,7 +6096,7 @@ static ST_FIELD_INFO innodb_columns_fields_info[] = {
      STRUCT_FLD(field_flags, 0), STRUCT_FLD(old_name, ""),
      STRUCT_FLD(open_method, 0)},
 
-#define SYS_COLUMN__PRTYPE 4
+#define SYS_COLUMN_PRTYPE 4
     {STRUCT_FLD(field_name, "PRTYPE"),
      STRUCT_FLD(field_length, MY_INT32_NUM_DECIMAL_DIGITS),
      STRUCT_FLD(field_type, MYSQL_TYPE_LONG), STRUCT_FLD(value, 0),
@@ -6229,7 +6203,7 @@ static int i_s_dict_fill_innodb_columns(THD *thd, table_id_t table_id,
 
   OK(fields[SYS_COLUMN_MTYPE]->store(column->mtype));
 
-  OK(fields[SYS_COLUMN__PRTYPE]->store(column->prtype));
+  OK(fields[SYS_COLUMN_PRTYPE]->store(column->prtype));
 
   OK(fields[SYS_COLUMN_COLUMN_LEN]->store(column->len));
 

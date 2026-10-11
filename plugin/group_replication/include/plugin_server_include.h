@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -27,9 +27,7 @@
 /*
   Includes only from server include folder.
 */
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+#include "my_config.h"
 
 #include "my_stacktrace.h"
 #include "my_sys.h"

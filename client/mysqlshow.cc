@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -567,12 +567,7 @@ static int list_tables(MYSQL *mysql, const char *db, const char *table) {
     counter++;
     if (opt_verbose > 0) {
       if (!(mysql_select_db(mysql, db))) {
-        mysql_real_escape_string_quote(mysql, rows, row[0],
-                                       (unsigned long)strlen(row[0]), '`');
-        snprintf(query, sizeof(query), "SELECT * FROM `%s` LIMIT 0", rows);
-        MYSQL_RES *rresult = (0 == mysql_query(mysql, query))
-                                 ? mysql_store_result(mysql)
-                                 : nullptr;
+        MYSQL_RES *rresult = mysql_list_fields(mysql, row[0], nullptr);
         ulong rowcount = 0L;
         if (!rresult) {
           my_stpcpy(fields, "N/A");
@@ -619,9 +614,15 @@ static int list_tables(MYSQL *mysql, const char *db, const char *table) {
   }
 
   print_trailer(
-      head_length, (opt_table_type ? 10 : opt_verbose > 0 ? 8 : 0),
+      head_length,
+      (opt_table_type    ? 10
+       : opt_verbose > 0 ? 8
+                         : 0),
       (opt_table_type ? (opt_verbose > 0 ? 8 : 0) : (opt_verbose > 1 ? 10 : 0)),
-      !opt_table_type ? 0 : opt_verbose > 1 ? 10 : 0, 0);
+      !opt_table_type   ? 0
+      : opt_verbose > 1 ? 10
+                        : 0,
+      0);
 
   if (counter && opt_verbose)
     printf("%u row%s in set.\n\n", counter, (counter > 1) ? "s" : "");

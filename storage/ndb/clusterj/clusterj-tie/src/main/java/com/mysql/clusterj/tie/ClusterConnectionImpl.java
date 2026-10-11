@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+ *  Copyright (c) 2010, 2026, Oracle and/or its affiliates.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License, version 2.0,
@@ -72,7 +72,7 @@ public class ClusterConnectionImpl
     final String connectString;
 
     /** The node id requested for this connection; 0 for default */
-    final int nodeId;
+    int nodeId;
 
     /** The timeout value to connect to mgm */
     final int connectTimeoutMgm;
@@ -97,12 +97,6 @@ public class ClusterConnectionImpl
 
     /** The byte buffer pool for DbImpl error buffers */
     protected FixedByteBufferPoolImpl byteBufferPoolForDBImplError;
-
-    /** The size of the coordinated transaction identifier buffer */
-    private final static int COORDINATED_TRANSACTION_ID_SIZE = 44;
-
-    /** The byte buffer pool for coordinated transaction id */
-    protected FixedByteBufferPoolImpl byteBufferPoolForCoordinatedTransactionId;
 
     /** The size of the partition key scratch buffer */
     private final static int PARTITION_KEY_BUFFER_SIZE = 10000;
@@ -135,8 +129,6 @@ public class ClusterConnectionImpl
         this.connectTimeoutMgm = connectTimeoutMgm;
         byteBufferPoolForDBImplError =
                 new FixedByteBufferPoolImpl(errorBufferSize, "DBImplErrorBufferPool");
-        byteBufferPoolForCoordinatedTransactionId =
-                new FixedByteBufferPoolImpl(COORDINATED_TRANSACTION_ID_SIZE, "CoordinatedTransactionIdBufferPool");
         byteBufferPoolForPartitionKey =
                 new FixedByteBufferPoolImpl(PARTITION_KEY_BUFFER_SIZE, "PartitionKeyBufferPool");
         clusterConnection = Ndb_cluster_connection.create(connectString, nodeId);
@@ -151,6 +143,7 @@ public class ClusterConnectionImpl
         checkConnection();
         int returnCode = clusterConnection.connect(connectRetries, connectDelay, verbose?1:0);
         handleError(returnCode, clusterConnection, connectString, nodeId);
+        nodeId = clusterConnection.node_id();
     }
 
     public Db createDb(String database, int maxTransactions) {

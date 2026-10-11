@@ -1,4 +1,4 @@
-/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -72,7 +72,7 @@ class Auth_chaining_test_suite_base : public Xcl_session_impl_tests {
   }
 
   template <typename... Types>
-  Mysqlx::Connection::Capabilities *make_capability(const Types &... values) {
+  Mysqlx::Connection::Capabilities *make_capability(const Types &...values) {
     auto result = new Mysqlx::Connection::Capabilities();
     auto cap = result->add_capabilities();
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -56,7 +56,7 @@ const handler::Table_flags HA_INNOPART_DISABLED_TABLE_FLAGS =
     (HA_CAN_FULLTEXT | HA_CAN_FULLTEXT_EXT | HA_CAN_GEOMETRY |
      HA_DUPLICATE_POS | HA_READ_BEFORE_WRITE_REMOVAL);
 
-typedef Bitset Sql_stat_start_parts;
+typedef Bitset<> Sql_stat_start_parts;
 
 /** InnoDB partition specific Handler_share. */
 class Ha_innopart_share : public Partition_share {

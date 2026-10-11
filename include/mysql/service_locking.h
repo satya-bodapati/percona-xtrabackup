@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -108,7 +108,7 @@ typedef int (*mysql_release_locks_t)(MYSQL_THD opaque_thd,
 extern "C" struct mysql_locking_service_st {
   mysql_acquire_locks_t mysql_acquire_locks;
   mysql_release_locks_t mysql_release_locks;
-} * mysql_locking_service;
+} *mysql_locking_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

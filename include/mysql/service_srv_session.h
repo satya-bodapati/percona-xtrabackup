@@ -1,4 +1,4 @@
-/*  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/*  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
@@ -54,7 +54,7 @@ extern "C" struct srv_session_service_st {
   int (*server_is_available)();
 
   int (*attach_session)(MYSQL_SESSION session, MYSQL_THD *ret_previous_thd);
-} * srv_session_service;
+} *srv_session_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

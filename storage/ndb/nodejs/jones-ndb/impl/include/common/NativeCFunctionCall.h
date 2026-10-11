@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+ Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -153,9 +153,10 @@ class NativeCFunctionCall_4_ : public AsyncCall_Returning<R>,
 
   /* Methods */
   void run() override {
-    AsyncCall_Returning<R>::return_val = (function)(
-        Call_4_<A0, A1, A2, A3>::arg0, Call_4_<A0, A1, A2, A3>::arg1,
-        Call_4_<A0, A1, A2, A3>::arg2, Call_4_<A0, A1, A2, A3>::arg3);
+    AsyncCall_Returning<R>::return_val =
+        (function)(Call_4_<A0, A1, A2, A3>::arg0, Call_4_<A0, A1, A2, A3>::arg1,
+                   Call_4_<A0, A1, A2, A3>::arg2,
+                   Call_4_<A0, A1, A2, A3>::arg3);
   }
 };
 

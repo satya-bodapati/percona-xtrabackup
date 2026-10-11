@@ -1,4 +1,4 @@
-/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -228,6 +228,12 @@
    - WL#15059: PERFORMANCE_SCHEMA, OTEL TRACE INTERFACE
      New column TELEMETRY_ACTIVE added to performance_schema.threads
 
+  80040:
+
+   - Bug#31763497 PERFORMANCE DEGRADATION CAUSED BY MONITORING
+     SYS.INNODB_LOCK_WAITS IN MYSQL 8.0
+     - Table performance_schema.data_lock_waits, add PRIMARY KEY.
+
   80200:
 
    - WL#15199: PERFORMANCE_SCHEMA, OTEL METRICS INTERFACE
@@ -253,8 +259,18 @@
       - events_transactions_history_long:
         - GTID 64->90 bytes
 
+  80403:
+
+   - Bug#31763497 PERFORMANCE DEGRADATION CAUSED BY MONITORING
+     SYS.INNODB_LOCK_WAITS IN MYSQL 8.0
+     - Table performance_schema.data_lock_waits, add PRIMARY KEY.
+
+  80409:
+
+   - WL#15201 PERFORMANCE_SCHEMA, OTEL INTERFACE: LOG
+     - New table performance_schema.setup_logger.
 */
 
-static const uint PFS_DD_VERSION = 80300;
+static const uint PFS_DD_VERSION = 80409;
 
 #endif /* PFS_DD_VERSION_H */

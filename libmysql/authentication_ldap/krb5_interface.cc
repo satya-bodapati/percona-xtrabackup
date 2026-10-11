@@ -1,4 +1,4 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -63,7 +63,9 @@ Krb5_interface::Krb5_interface()
       krb5_timeofday_ptr(nullptr),
       krb5_unparse_name_ptr(nullptr),
       krb5_verify_init_creds_ptr(nullptr),
-      profile_get_boolean_ptr(nullptr),
+      krb5_appdefault_boolean_ptr(nullptr),
+      krb5_appdefault_string_ptr(nullptr),
+      krb5_free_string_ptr(nullptr),
       profile_get_string_ptr(nullptr),
       profile_release_ptr(nullptr),
       profile_release_string_ptr(nullptr) {}
@@ -159,8 +161,14 @@ path.
       !get_function<krb5_verify_init_creds_type>(krb5_lib_handle,
                                                  "krb5_verify_init_creds",
                                                  krb5_verify_init_creds_ptr) ||
-      !get_function<profile_get_boolean_type>(
-          profile_lib_handle, "profile_get_boolean", profile_get_boolean_ptr) ||
+      !get_function<krb5_appdefault_boolean_type>(
+          krb5_lib_handle, "krb5_appdefault_boolean",
+          krb5_appdefault_boolean_ptr) ||
+      !get_function<krb5_appdefault_string_type>(krb5_lib_handle,
+                                                 "krb5_appdefault_string",
+                                                 krb5_appdefault_string_ptr) ||
+      !get_function<krb5_free_string_type>(krb5_lib_handle, "krb5_free_string",
+                                           krb5_free_string_ptr) ||
       !get_function<profile_get_string_type>(
           profile_lib_handle, "profile_get_string", profile_get_string_ptr) ||
       !get_function<profile_release_type>(profile_lib_handle, "profile_release",
@@ -238,7 +246,9 @@ void Krb5_interface::close_libs() {
   krb5_timeofday_ptr = nullptr;
   krb5_unparse_name_ptr = nullptr;
   krb5_verify_init_creds_ptr = nullptr;
-  profile_get_boolean_ptr = nullptr;
+  krb5_verify_init_creds_ptr = nullptr;
+  krb5_appdefault_boolean_ptr = nullptr;
+  krb5_appdefault_string_ptr = nullptr;
   profile_get_string_ptr = nullptr;
   profile_release_ptr = nullptr;
   profile_release_string_ptr = nullptr;

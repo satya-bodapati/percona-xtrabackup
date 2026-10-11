@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -33,7 +33,7 @@
 #define JAM_FILE_ID 442
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_EXEC_SR 1
+// #define DEBUG_EXEC_SR 1
 #endif
 
 #ifdef DEBUG_EXEC_SR

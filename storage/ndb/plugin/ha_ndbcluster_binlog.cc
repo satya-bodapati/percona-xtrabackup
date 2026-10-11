@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -25,17 +25,18 @@
 
 #include "storage/ndb/plugin/ha_ndbcluster_binlog.h"
 
+#include <chrono>
 #include <unordered_map>
 
 #include "m_string.h"
 #include "my_config.h"  // WORDS_BIGENDIAN
 #include "my_dbug.h"
+#include "my_io.h"  // FN_REFLEN
 #include "my_thread.h"
 #include "mysql/plugin.h"
 #include "mysql/strings/m_ctype.h"
 #include "nulls.h"
 #include "sql/auth/acl_change_notification.h"
-#include "sql/binlog.h"
 #include "sql/dd/types/abstract_table.h"  // dd::enum_table_type
 #include "sql/dd/types/tablespace.h"      // dd::Tablespace
 #include "sql/debug_sync.h"               // debug_sync_set_action, DEBUG_SYNC
@@ -50,6 +51,7 @@
 #include "sql/sql_thd_internal_api.h"
 #include "sql/thd_raii.h"
 #include "sql/transaction.h"
+#include "storage/ndb/include/kernel/ndb_limits.h"
 #include "storage/ndb/include/ndbapi/NdbDictionary.hpp"
 #include "storage/ndb/include/ndbapi/ndb_cluster_connection.hpp"
 #include "storage/ndb/plugin/ha_ndbcluster_connection.h"
@@ -57,6 +59,7 @@
 #include "storage/ndb/plugin/ndb_apply_status_table.h"
 #include "storage/ndb/plugin/ndb_binlog_client.h"
 #include "storage/ndb/plugin/ndb_binlog_extra_row_info.h"
+#include "storage/ndb/plugin/ndb_binlog_purger.h"
 #include "storage/ndb/plugin/ndb_binlog_thread.h"
 #include "storage/ndb/plugin/ndb_bitmap.h"
 #include "storage/ndb/plugin/ndb_blobs_buffer.h"
@@ -92,7 +95,6 @@
 #include "storage/ndb/plugin/ndb_thd.h"
 #include "storage/ndb/plugin/ndb_thd_ndb.h"
 #include "storage/ndb/plugin/ndb_upgrade_util.h"
-#include "string_with_len.h"
 
 typedef NdbDictionary::Event NDBEVENT;
 typedef NdbDictionary::Table NDBTAB;
@@ -118,10 +120,15 @@ extern ulong opt_ndb_report_thresh_binlog_epoch_slip;
 extern ulong opt_ndb_report_thresh_binlog_mem_usage;
 extern ulonglong opt_ndb_eventbuffer_max_alloc;
 extern uint opt_ndb_eventbuffer_free_percent;
+extern ulong opt_ndb_log_purge_rate;
+extern ulong opt_ndb_log_cache_size;
 
 void ndb_index_stat_restart();
 
 extern Ndb_cluster_connection *g_ndb_cluster_connection;
+
+/* Number of schema distribution protocol participants */
+static std::atomic_int g_subscriber_count{0};
 
 /*
   Timeout for syncing schema events between
@@ -223,6 +230,10 @@ static ulonglong ndb_latest_applied_binlog_epoch = 0;
 static ulonglong ndb_latest_handled_binlog_epoch = 0;
 static ulonglong ndb_latest_received_binlog_epoch = 0;
 
+#ifndef NDEBUG
+static std::unordered_map<std::string, bool> dbg_table_map_tables;
+#endif
+
 /*
   @brief Wait until the last committed epoch from the session enters the
          binlog. Wait a maximum of 30 seconds. This wait is necessary in
@@ -295,42 +306,10 @@ static void ndbcluster_binlog_wait(THD *thd) {
   thd->set_proc_info(save_info);
 }
 
-/*
-  Setup THD object
-  'Inspired' from ha_ndbcluster.cc : ndb_util_thread_func
-*/
-THD *ndb_create_thd(char *stackptr) {
-  DBUG_TRACE;
-  THD *thd = new THD; /* note that constructor of THD uses DBUG_ */
-  if (thd == nullptr) {
-    return nullptr;
-  }
-  THD_CHECK_SENTRY(thd);
-
-  thd->thread_stack = stackptr; /* remember where our stack is */
-  thd->store_globals();
-
-  thd->init_query_mem_roots();
-  thd->set_command(COM_DAEMON);
-  thd->system_thread = SYSTEM_THREAD_NDBCLUSTER_BINLOG;
-  thd->get_protocol_classic()->set_client_capabilities(0);
-  thd->lex->start_transaction_opt = 0;
-  thd->security_context()->skip_grants();
-
-  CHARSET_INFO *charset_connection =
-      get_charset_by_csname("utf8mb3", MY_CS_PRIMARY, MYF(MY_WME));
-  thd->variables.character_set_client = charset_connection;
-  thd->variables.character_set_results = charset_connection;
-  thd->variables.collation_connection = charset_connection;
-  thd->update_charset();
-  return thd;
-}
-
-// Instantiate Ndb_binlog_thread component
+// Instantiate ndb binlog components
 static Ndb_binlog_thread ndb_binlog_thread;
-
-// Forward declaration
-static bool ndbcluster_binlog_index_remove_file(THD *thd, const char *filename);
+static Ndb_binlog_purger ndb_binlog_purger(&opt_bin_log,
+                                           &opt_ndb_log_purge_rate);
 
 /*
   @brief called when a binlog file is purged(i.e the physical
@@ -344,61 +323,54 @@ static bool ndbcluster_binlog_index_remove_file(THD *thd, const char *filename);
    - rotate+purge triggered by writing to binlog, this means that the
      ndb binlog thread itself may invoke this function when writing epoch
      transactions to binlog.
+   - Applier thread(s) purging relay logs or binlogs. It's very rare that an
+     applier thread triggers a binlog purge as it may happen only when applying
+     a DDL. This is because DDL uses special case and is written directly to the
+     binlog on the local server, if the auto purge conditions are exceeded at
+     that time the applier will trigger a purge of the binlog.
+
+  @note This callback is normally called with the `LOCK_index` mutex held, this
+  means that time consuming work should not be performed as the mutex is
+  needed for other functionality and are assumed to not be held for long.
+  Instead, the work to remove references to the purged file are started
+  asynchronously in the background and waited for completion from
+  ndbcluster_binlog_index_purge_wait() which is then called after releasing
+  the mutex.
 
   @param thd Thread handle
   @param filename Name of the binlog file which has been removed
-
-  @return 0 for success
 */
 
-static int ndbcluster_binlog_index_purge_file(THD *thd, const char *filename) {
+static void ndbcluster_binlog_index_purge_file(THD *thd, const char *filename) {
   DBUG_TRACE;
   DBUG_PRINT("enter", ("filename: %s", filename));
 
-  // Check if the binlog thread can handle the purge.
-  // This functionality is initially only implemented for the case when the
-  // "server started" state has not yet been reached, but could in the future be
-  // extended to handle all purging by the binlog thread(this would most likley
-  // eliminate the need to create a separate THD further down in this function)
-  if (ndb_binlog_thread.handle_purge(filename)) {
-    return 0;  // Ok, purge handled by binlog thread
-  }
-
-  if (!ndb_binlog_running) {
-    return 0;  // Nothing to do, binlog thread not running
-  }
-
-  if (thd_slave_thread(thd)) {
-    return 0;  // Nothing to do, slave thread
+  if (thd == nullptr) {
+    // No thd indicates auto purge at server startup, just submit the purged
+    // file to purger who will remove the rows when server has started properly.
+    ndb_log_info("Purging binlog file at server startup: '%s'", filename);
+    ndb_binlog_purger.submit_purge_binlog_file(nullptr, filename);
+    return;
   }
 
   ndb_log_info("Purging binlog file: '%s'", filename);
+  ndb_binlog_purger.submit_purge_binlog_file(thd, filename);
+}
 
-  // Create a separate temporary THD, primarily in order to isolate from any
-  // active transactions in the THD passed by caller. NOTE! This should be
-  // revisited
-  int stack_base = 0;
-  THD *tmp_thd = ndb_create_thd((char *)&stack_base);
-  if (!tmp_thd) {
-    ndb_log_warning("Binlog: Failed to purge: '%s' (create THD failed)",
-                    filename);
-    return 0;
-  }
+static void ndbcluster_binlog_index_purge_wait(THD *thd) {
+  DBUG_TRACE;
+  assert(thd);
+  // Only PURGE BINARY LOGS TO and PURGE BINARY LOGS BEFORE calls wait
+  assert(thd_sql_command(thd) == SQLCOM_PURGE ||
+         thd_sql_command(thd) == SQLCOM_PURGE_BEFORE);
 
-  int error = 0;
-  if (ndbcluster_binlog_index_remove_file(tmp_thd, filename)) {
-    // Failed to delete rows from table
-    ndb_log_warning("Binlog: Failed to purge: '%s'", filename);
-    error = 1;  // Failed
-  }
-  delete tmp_thd;
+  // When the ndb binlog thread triggers a purge it should never wait
+  assert(!ndb_thd_is_binlog_thread(thd));
 
-  /* Relink original THD */
-  thd->store_globals();
-
-  if (error == 0) ndb_log_info("Purged binlog file: '%s'", filename);
-
-  return error;
+  // Wait until purger has removed all files requested by this session
+  ndb_log_info("Waiting for purge");
+  ndb_binlog_purger.wait_purge_completed_for_session(thd);
+  ndb_log_info("Done waiting for purge");
 }
 
 /*
@@ -586,12 +558,17 @@ static void ndbcluster_acl_notify(THD *thd,
     raise_error("as statement");
 }
 
-/*
-  End use of the NDB Cluster binlog
-   - wait for binlog thread to shutdown
-*/
+void ndbcluster_binlog_pre_dd_shutdown() {
+  // Stop to avoid active transactions in InnoDB
+  ndb_binlog_purger.stop();
+}
 
-int ndbcluster_binlog_end() {
+/*
+  Stop the binlog components
+   - wait for both binlog thread and purger to shutdown
+   - release resources
+*/
+void ndbcluster_binlog_end() {
   DBUG_TRACE;
 
   if (ndbcluster_binlog_inited) {
@@ -600,12 +577,13 @@ int ndbcluster_binlog_end() {
     ndb_binlog_thread.stop();
     ndb_binlog_thread.deinit();
 
+    ndb_binlog_purger.stop();
+    ndb_binlog_purger.deinit();
+
     mysql_mutex_destroy(&injector_event_mutex);
     mysql_mutex_destroy(&injector_data_mutex);
     mysql_cond_destroy(&injector_data_cond);
   }
-
-  return 0;
 }
 
 /*****************************************************************
@@ -637,7 +615,6 @@ static void ndbcluster_reset_slave(THD *thd) {
 static int ndbcluster_binlog_func(handlerton *, THD *thd, enum_binlog_func fn,
                                   void *arg) {
   DBUG_TRACE;
-  int res = 0;
   switch (fn) {
     case BFN_RESET_LOGS:
       ndbcluster_reset_logs();
@@ -649,13 +626,16 @@ static int ndbcluster_binlog_func(handlerton *, THD *thd, enum_binlog_func fn,
       ndbcluster_binlog_wait(thd);
       break;
     case BFN_BINLOG_END:
-      res = ndbcluster_binlog_end();
+      ndbcluster_binlog_end();
       break;
     case BFN_BINLOG_PURGE_FILE:
-      res = ndbcluster_binlog_index_purge_file(thd, (const char *)arg);
+      ndbcluster_binlog_index_purge_file(thd, (const char *)arg);
+      break;
+    case BFN_BINLOG_PURGE_WAIT:
+      ndbcluster_binlog_index_purge_wait(thd);
       break;
   }
-  return res;
+  return 0;
 }
 
 bool ndbcluster_binlog_init(handlerton *h) {
@@ -1353,6 +1333,16 @@ class Ndb_schema_dist_data {
     return subscriber_bitmap;
   }
 
+  void publish_subscriber_count(int count) const {
+    g_subscriber_count.store(count);
+  }
+
+  void publish_subscriber_count() const {
+    std::unordered_set<uint32> subscribers;
+    get_subscriber_list(subscribers);
+    publish_subscriber_count(subscribers.size());
+  }
+
   // Holds the new key for a table to be renamed
   struct NDB_SHARE_KEY *m_prepared_rename_key;
 
@@ -1370,7 +1360,7 @@ class Ndb_schema_dist_data {
   bool metadata_changed;
 
   void init(Ndb_cluster_connection *cluster_connection) {
-    const Uint32 max_subscribers = cluster_connection->max_api_nodeid() + 1;
+    const Uint32 max_subscribers = MAX_NODES;
     m_own_nodeid = cluster_connection->node_id();
     NDB_SCHEMA_OBJECT::init(m_own_nodeid);
 
@@ -1391,6 +1381,7 @@ class Ndb_schema_dist_data {
       delete subscriber_bitmap;
     }
     m_subscriber_bitmaps.clear();
+    publish_subscriber_count(0);
 
     // Release the prepared rename key, it's very unlikely
     // that the key is still around here, but just in case
@@ -1418,6 +1409,7 @@ class Ndb_schema_dist_data {
 
       ndb_log_verbose(19, "Subscribers[%d]: %s", data_node_id,
                       subscribers->to_string().c_str());
+      publish_subscriber_count();
     }
   }
 
@@ -1426,12 +1418,21 @@ class Ndb_schema_dist_data {
                     data_node_id, subscriber_node_id);
     ndbcluster::ndbrequire(subscriber_node_id != 0);
 
+    if (subscriber_node_id > MAX_NODES_ID) {
+      ndb_log_error(
+          "Ignoring subscribe from node %u. "
+          "The maximum supported node ID is %u",
+          subscriber_node_id, MAX_NODES_ID);
+      return;
+    }
+
     Node_subscribers *subscribers = find_node_subscribers(data_node_id);
     if (subscribers) {
       subscribers->set(subscriber_node_id);
 
       ndb_log_verbose(19, "Subscribers[%d]: %s", data_node_id,
                       subscribers->to_string().c_str());
+      publish_subscriber_count();
     }
   }
 
@@ -1440,12 +1441,21 @@ class Ndb_schema_dist_data {
                     data_node_id, subscriber_node_id);
     ndbcluster::ndbrequire(subscriber_node_id != 0);
 
+    if (subscriber_node_id > MAX_NODES_ID) {
+      ndb_log_error(
+          "Ignoring unsubscribe from node %u. "
+          "The maximum supported node ID is %u",
+          subscriber_node_id, MAX_NODES_ID);
+      return;
+    }
+
     Node_subscribers *subscribers = find_node_subscribers(data_node_id);
     if (subscribers) {
       subscribers->clear(subscriber_node_id);
 
       ndb_log_verbose(19, "Subscribers[%d]: %s", data_node_id,
                       subscribers->to_string().c_str());
+      publish_subscriber_count();
     }
   }
 
@@ -1455,6 +1465,7 @@ class Ndb_schema_dist_data {
       Node_subscribers *subscribers = it.second;
       subscribers->clear_all();
     }
+    publish_subscriber_count(0);
   }
 
   /**
@@ -2347,6 +2358,13 @@ class Ndb_schema_event_handler {
       return false;
     }
     dd_client.commit();
+
+    /**
+     * table_share may cache old schema, clear it out with atomicity
+     * wrt DD changes via MDL Exclusive lock
+     */
+    ndb_tdc_close_cached_table(m_thd, schema_name, table_name);
+
     return true;
   }
 
@@ -4165,6 +4183,23 @@ class Ndb_schema_event_handler {
                                             pOp->getReqNodeId());
         // No 'check_wakeup_clients', adding subscribers doesn't complete
         // anything
+
+        DBUG_EXECUTE_IF("ndb_test_high_api_node_id", {
+          // Test the subscription of an API node with an ID higher than
+          // the existing ones.
+          m_schema_dist_data.report_subscribe(pOp->getNdbdNodeId(),
+                                              MAX_NODES_ID);
+
+          // Test the subscription of a node with an ID higher than
+          // the cluster limit.
+          m_schema_dist_data.report_subscribe(pOp->getNdbdNodeId(),
+                                              MAX_NODES_ID + 1);
+
+          // Clean up step to revert the fake subscription introduced
+          // by the test.
+          m_schema_dist_data.report_unsubscribe(pOp->getNdbdNodeId(),
+                                                MAX_NODES_ID);
+        });
         break;
       }
 
@@ -4172,6 +4207,14 @@ class Ndb_schema_event_handler {
         /* Remove node as subscriber */
         m_schema_dist_data.report_unsubscribe(pOp->getNdbdNodeId(),
                                               pOp->getReqNodeId());
+
+        DBUG_EXECUTE_IF("ndb_test_high_api_node_id", {
+          // Test the unsubscription of a node with an ID higher than
+          // the cluster limit.
+          m_schema_dist_data.report_unsubscribe(pOp->getNdbdNodeId(),
+                                                MAX_NODES_ID + 1);
+        });
+
         check_wakeup_clients(Ndb_schema_dist::NODE_UNSUBSCRIBE,
                              "Node unsubscribed");
         break;
@@ -4635,52 +4678,7 @@ class Ndb_binlog_index_table_util {
     // Relink this thread with original THD
     orig_thd->store_globals();
   }
-
-  /*
-    @brief Remove all rows from mysql.ndb_binlog_index table that contain
-    references to the given binlog filename.
-
-    @note this function modifies THD state. Caller must ensure that
-    the passed in THD is not affected by these changes. Presumably
-    the state fixes should be moved down into Ndb_local_connection.
-
-    @param thd The thread handle
-    @param filename Name of the binlog file whose references should be removed
-
-    @return true if failure to delete from the table occurs
-  */
-
-  static bool remove_rows_for_file(THD *thd, const char *filename) {
-    Ndb_local_connection mysqld(thd);
-
-    // Set isolation level to be independent from server settings
-    thd->variables.transaction_isolation = ISO_REPEATABLE_READ;
-
-    // Turn autocommit on, this will make delete_rows() commit
-    thd->variables.option_bits &= ~OPTION_NOT_AUTOCOMMIT;
-
-    // Ensure that file paths are escaped in a way that does not
-    // interfere with path separator on Windows
-    thd->variables.sql_mode |= MODE_NO_BACKSLASH_ESCAPES;
-
-    // ignore "table does not exist" as it is a "consistent" behavior
-    const bool ignore_no_such_table = true;
-    std::string where;
-    where.append("File='").append(filename).append("'");
-    if (mysqld.delete_rows(DB_NAME, TABLE_NAME, ignore_no_such_table, where)) {
-      // Failed
-      return true;
-    }
-    return false;
-  }
 };
-
-// Wrapper function allowing Ndb_binlog_index_table_util::remove_rows_for_file()
-// to be forward declared
-static bool ndbcluster_binlog_index_remove_file(THD *thd,
-                                                const char *filename) {
-  return Ndb_binlog_index_table_util::remove_rows_for_file(thd, filename);
-}
 
 /*********************************************************************
   Functions for start, stop, wait for ndbcluster binlog thread
@@ -4725,6 +4723,7 @@ int ndbcluster_binlog_start() {
   }
 
   ndb_binlog_thread.init();
+  ndb_binlog_purger.init();
 
   /**
    * Note that injector_event_mutex is init'ed as a 'SLOW' mutex.
@@ -4746,11 +4745,18 @@ int ndbcluster_binlog_start() {
     return -1;
   }
 
+  /* Start ndb binlog purger */
+  if (ndb_binlog_purger.start()) {
+    DBUG_PRINT("error", ("Could not start ndb binlog purger"));
+    return -1;
+  }
+
   return 0;
 }
 
 void ndbcluster_binlog_set_server_started() {
   ndb_binlog_thread.set_server_started();
+  ndb_binlog_purger.set_server_started();
 }
 
 void NDB_SHARE::set_binlog_flags(Ndb_binlog_type ndb_binlog_type) {
@@ -4818,6 +4824,18 @@ void NDB_SHARE::set_binlog_flags(Ndb_binlog_type ndb_binlog_type) {
       return;
   }
   flags &= ~NDB_SHARE::FLAG_NO_BINLOG;
+
+  // The ndb_apply_status table should always use WRITE format.
+  // NOTE! This is the second hardcoding complementing the one in
+  // read_replication_info(), that hardcoding forces use of FULL (which implies
+  // WRITE) when --ndb-log-apply-status=1. Although this setting will not have
+  // any effect unless --ndb-log-apply-status=1, it is hardcocded here again in
+  // order to make it possible to dynamically change --ndb-log-apply-status at
+  // runtime.
+  if (is_apply_status_table()) {
+    flags &= ~NDB_SHARE::FLAG_BINLOG_MODE_USE_UPDATE;
+    return;
+  }
 }
 
 /*
@@ -4835,19 +4853,17 @@ bool Ndb_binlog_client::read_replication_info(
     st_conflict_fn_arg *args, uint *num_args) {
   DBUG_TRACE;
 
-  /* Override for ndb_apply_status when logging */
-  if (opt_ndb_log_apply_status) {
-    if (Ndb_apply_status_table::is_apply_status_table(db, table_name)) {
-      // Ensure to get all columns from ndb_apply_status updates and that events
-      // are always logged as WRITES.
-      ndb_log_info(
-          "ndb-log-apply-status forcing 'mysql.ndb_apply_status' to FULL "
-          "USE_WRITE");
-      *binlog_flags = NBT_FULL;
-      *conflict_fn = nullptr;
-      *num_args = 0;
-      return false;
-    }
+  if (opt_ndb_log_apply_status &&
+      Ndb_apply_status_table::is_apply_status_table(db, table_name)) {
+    // ndb_apply_status can't be configured using ndb_replication settings.
+    // It should always receive all columns when ndb_apply_status is
+    // updated and those changes should be logged as WRITE to the binlog.
+    // NOTE! The table is always subscribed, but these updates are only written
+    // to binlog when --ndb-log-apply-status is ON.
+    *binlog_flags = NBT_FULL;
+    *conflict_fn = nullptr;
+    *num_args = 0;
+    return false;
   }
 
   Ndb_rep_tab_reader rep_tab_reader;
@@ -6023,17 +6039,25 @@ void Ndb_binlog_thread::handle_data_unpack_record(TABLE *table,
   DBUG_EXECUTE("info", Ndb_table_map::print_record(table, buf););
 }
 
-/**
-   Inject an incident (aka. 'lost events' or 'gap') into the injector,
-   indicating that problem has occurred while processing the event stream.
+void Ndb_binlog_thread::inject_incident_message(injector *inj, THD *thd,
+                                                const char *message) const {
+  DBUG_TRACE;
 
-   @param thd           The thread handle
-   @param inj           Pointer to the injector
-   @param event_type    Type of the event problem that has occurred.
-   @param gap_epoch     The epoch when problem was detected.
+  // First write the error message to log
+  log_info("Writing incident '%s' to binlog", message);
 
-*/
-void Ndb_binlog_thread::inject_incident(
+  // Write incident message to injector
+  if (inj->record_incident(thd, message) != 0) {
+    log_error("Failed to write incident to binlog");
+    return;
+  }
+
+  // Since injecting an incident to binlog is rare, also write message to log
+  // indicating that incident has been written
+  log_info("Incident '%s' written to binlog", message);
+}
+
+void Ndb_binlog_thread::inject_incident_for_event(
     injector *inj, THD *thd, NdbDictionary::Event::TableEvent event_type,
     Uint64 gap_epoch) const {
   DBUG_TRACE;
@@ -6047,20 +6071,9 @@ void Ndb_binlog_thread::inject_incident(
 
   char errmsg[80];
   snprintf(errmsg, sizeof(errmsg),
-           "Detected %s in GCI %llu, "
-           "inserting GAP event",
-           reason, gap_epoch);
-
-  // Write error message to log
-  log_error("%s", errmsg);
-
-  // Record incident in injector
-  LEX_CSTRING const msg = {errmsg, strlen(errmsg)};
-  if (inj->record_incident(
-          thd, mysql::binlog::event::Incident_event::INCIDENT_LOST_EVENTS,
-          msg) != 0) {
-    log_error("Failed to record incident");
-  }
+           "Detected %s in epoch %u/%u, inserting GAP event", reason,
+           (uint)(gap_epoch >> 32), (uint)(gap_epoch));
+  inject_incident_message(inj, thd, errmsg);
 }
 
 /**
@@ -6244,8 +6257,9 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
       read_op = true;
       anyValue = 0;
     } else {
-      log_warning("unknown value for binlog signalling 0x%X, event not logged",
-                  anyValue);
+      log_warning(
+          "unknown value for binlog signalling 0x%X (%u), event not logged",
+          anyValue, anyValue);
       return 0;
     }
   }
@@ -6457,6 +6471,14 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
           log_error("Could not log write row, error: %d", error);
           return -1;
         }
+
+        DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+          // Mark table in table maps as having a row, crash if table not found
+          // as this indicates row without table map
+          std::string fullname(std::string(table->s->db.str) + "." +
+                               table->s->table_name.str);
+          dbg_table_map_tables.at(fullname) = true;
+        });
       }
       break;
     case NDBEVENT::TE_DELETE:
@@ -6502,6 +6524,14 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
           log_error("Could not log delete row, error: %d", error);
           return -1;
         }
+
+        DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+          // Mark table in table maps as having a row, crash if table not
+          // found as this indicates row without table map
+          std::string fullname(std::string(table->s->db.str) + "." +
+                               table->s->table_name.str);
+          dbg_table_map_tables.at(fullname) = true;
+        });
       }
       break;
     case NDBEVENT::TE_UPDATE:
@@ -6579,6 +6609,14 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
             return -1;
           }
         }
+
+        DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+          // Mark table in table maps as having a row, crash if table not
+          // found as this indicates row without table map
+          std::string fullname(std::string(table->s->db.str) + "." +
+                               table->s->table_name.str);
+          dbg_table_map_tables.at(fullname) = true;
+        });
       }
       break;
     default:
@@ -6642,6 +6680,30 @@ void Ndb_binlog_thread::fix_per_epoch_trans_settings(THD *thd) {
   thd->variables.character_set_client = &my_charset_latin1;
 }
 
+bool Ndb_binlog_thread::configure_binlog_cache_size(THD *thd,
+                                                    ulong new_cache_size) {
+  if (new_cache_size == m_configured_ndb_log_cache_size) {
+    // No change detected
+    return true;
+  }
+  log_info("Reconfiguring binlog cache size");
+
+  // Make sure that binlog cache has been created. Normally, the only time when
+  // it does not exist is during startup and then it will be created with
+  // default settings before being reconfigured below.
+  if (thd->binlog_setup_trx_data() != 0) {
+    // Failed to create binlog cache resources
+    return false;
+  }
+
+  if (thd->binlog_configure_trx_cache_size(new_cache_size)) {
+    // Failed to reconfigure cache
+    return false;
+  }
+  m_configured_ndb_log_cache_size = new_cache_size;
+  return true;
+}
+
 void Ndb_binlog_thread::release_thd_resources(THD *thd) {
   {
     // Check if THD::mem_root need to be released, normally there is nothing
@@ -6691,7 +6753,7 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
   if (event_type == NdbDictionary::Event::TE_INCONSISTENT ||
       event_type == NdbDictionary::Event::TE_OUT_OF_MEMORY) {
     // Error has occurred in event stream processing, inject incident
-    inject_incident(inj, thd, event_type, current_epoch);
+    inject_incident_for_event(inj, thd, event_type, current_epoch);
 
     i_pOp = i_ndb->nextEvent2();
     return true;  // OK, error handled
@@ -6703,6 +6765,11 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
   m_binlog_index_rows.init();
 
   fix_per_epoch_trans_settings(thd);
+
+  if (!configure_binlog_cache_size(thd, opt_ndb_log_cache_size)) {
+    log_error("Failed to configure --ndb-log-cache-size");
+    return false;  // Error
+  }
 
   // Create new binlog transaction
   injector_transaction trans(thd, opt_ndb_log_trans_dependency);
@@ -6777,6 +6844,17 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
 
     i_pOp = i_ndb->nextEvent2();
   } while (i_pOp && i_pOp->getEpoch() == current_epoch);
+
+  DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+    // Make sure that all tables in table maps have got rows
+    for (const auto &el : dbg_table_map_tables) {
+      if (el.second == false) {
+        ndb_log_error("Found table in table_maps without row data!, name: %s ",
+                      el.first.c_str());
+        ndbcluster::ndbrequire(el.second == true);
+      }
+    }
+  });
 
   /*
     NOTE: i_pOp is now referring to an event in the next epoch
@@ -6853,6 +6931,7 @@ static SHOW_VAR ndb_status_vars_injector[] = {
     {"api_event_bytes_count_injector",
      reinterpret_cast<char *>(&g_event_bytes_count), SHOW_LONGLONG,
      SHOW_SCOPE_GLOBAL},
+    {"Ndb", (char *)&show_ndb_purger_stats, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 int show_ndb_status_injector(THD *, SHOW_VAR *var, char *) {
@@ -6957,6 +7036,13 @@ bool Ndb_binlog_thread::inject_apply_status_write(injector_transaction &trans,
 
   assert(ret == 0);
 
+  DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+    // Directly mark table in table maps and having a row
+    const std::string fullname(std::string(apply_status_table->s->db.str) +
+                               "." + apply_status_table->s->table_name.str);
+    dbg_table_map_tables[fullname] = true;
+  });
+
   memcpy(apply_status_table->record[0], sav_buf, sav_len);
   return true;
 }
@@ -6980,78 +7066,33 @@ void Ndb_binlog_thread::do_wakeup() {
   */
 }
 
-bool Ndb_binlog_thread::check_reconnect_incident(
+void Ndb_binlog_thread::check_reconnect_incident(
     THD *thd, injector *inj, Reconnect_type incident_id) const {
+  const char *msg = "cluster disconnect";
   log_verbose(1, "Check for incidents");
 
   if (incident_id == MYSQLD_STARTUP) {
-    LOG_INFO log_info;
-    mysql_bin_log.get_current_log(&log_info);
-    log_verbose(60, " - current binlog file: %s", log_info.log_file_name);
+    msg = "mysqld startup";
+
+    char filename[FN_REFLEN];
+    injector::get_current_binlog_filename(filename);
+    log_verbose(60, " - current binlog file: %s", filename);
 
     uint log_number = 0;
-    if ((sscanf(strend(log_info.log_file_name) - 6, "%u", &log_number) == 1) &&
+    if (sscanf(strend(filename) - 6, "%u", &log_number) == 1 &&
         log_number == 1) {
       /*
-        This is the fist binlog file, skip writing incident since
+        This is the first binlog file, skip writing incident since
         there is really no log to have a gap in
       */
       log_verbose(60, " - skipping incident for first log, log_number: %u",
                   log_number);
-      return false;  // No incident written
+      return;  // No incident written
     }
     log_verbose(60, " - current binlog file number: %u", log_number);
   }
 
-  // Write an incident event to the binlog since it's not possible to know what
-  // has happened in the cluster while not being connected.
-  LEX_CSTRING msg{};
-  switch (incident_id) {
-    case MYSQLD_STARTUP:
-      msg = {STRING_WITH_LEN("mysqld startup")};
-      break;
-    case CLUSTER_DISCONNECT:
-      msg = {STRING_WITH_LEN("cluster disconnect")};
-      break;
-  }
-  log_verbose(20, "Writing incident for %s", msg.str);
-  (void)inj->record_incident(
-      thd, mysql::binlog::event::Incident_event::INCIDENT_LOST_EVENTS, msg);
-
-  return true;  // Incident written
-}
-
-bool Ndb_binlog_thread::handle_purge(const char *filename) {
-  if (is_server_started()) {
-    // The binlog thread currently only handles purge requests
-    // that occurs before "server started"
-    return false;
-  }
-
-  // The "server started" state is not yet reached, defer the purge request of
-  // this binlog file to later and handle it just before entering main loop
-  log_verbose(1, "Remember purge binlog file: '%s'", filename);
-  std::lock_guard<std::mutex> lock_pending_purges(m_purge_mutex);
-  m_pending_purges.push_back(filename);
-  return true;
-}
-
-void Ndb_binlog_thread::recall_pending_purges(THD *thd) {
-  std::lock_guard<std::mutex> lock_pending_purges(m_purge_mutex);
-
-  // Iterate list of pending purges and delete corresponding
-  // rows from ndb_binlog_index table
-  for (const std::string &filename : m_pending_purges) {
-    log_info("Purging binlog file: '%s'", filename.c_str());
-
-    if (Ndb_binlog_index_table_util::remove_rows_for_file(thd,
-                                                          filename.c_str())) {
-      log_warning("Failed to purge binlog file: '%s'", filename.c_str());
-    }
-    log_info("Purged binlog file: '%s'", filename.c_str());
-  }
-  // All pending purges performed, clear the list
-  m_pending_purges.clear();
+  inject_incident_message(inj, thd, msg);
 }
 
 /*
@@ -7152,7 +7193,7 @@ void Ndb_binlog_thread::commit_trans(injector_transaction &trans, THD *thd,
   if (m_cache_spill_checker.check_disk_spill(binlog_cache_disk_use)) {
     log_warning(
         "Binary log cache data overflowed to disk %u time(s). "
-        "Consider increasing --binlog-cache-size.",
+        "Consider increasing --ndb-log-cache-size.",
         m_cache_spill_checker.m_disk_spills);
   }
 
@@ -7169,6 +7210,10 @@ void Ndb_binlog_thread::commit_trans(injector_transaction &trans, THD *thd,
 void Ndb_binlog_thread::inject_table_map(injector_transaction &trans,
                                          Ndb *ndb) const {
   DBUG_TRACE;
+
+  DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps",
+                  { dbg_table_map_tables.clear(); });
+
   Uint32 iter = 0;
   const NdbEventOperation *gci_op = nullptr;
   Uint32 event_types = 0;
@@ -7229,6 +7274,13 @@ void Ndb_binlog_thread::inject_table_map(injector_transaction &trans,
     injector::transaction::table tbl(table, true);
     int ret = trans.use_table(::server_id, tbl);
     ndbcluster::ndbrequire(ret == 0);
+
+    DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+      // Mark table as being in table map, haven't seen any row(s) yet
+      const std::string name(std::string(table->s->db.str) + "." +
+                             table->s->table_name.str);
+      dbg_table_map_tables[name] = false;
+    });
   }
 }
 
@@ -7348,10 +7400,13 @@ restart_cluster_failure:
   }
 
   // Create Thd_ndb after server started
-  if (!(thd_ndb = Thd_ndb::seize(thd))) {
+  // Must use the main cluster connection
+  thd_ndb = Thd_ndb::seize(thd, psi_name(), g_ndb_cluster_connection);
+  if (!thd_ndb) {
     log_error("Failed to seize Thd_ndb object");
     goto err;
   }
+
   thd_ndb->set_option(Thd_ndb::NO_LOG_SCHEMA_OP);
   thd_set_thd_ndb(thd, thd_ndb);
 
@@ -7359,19 +7414,15 @@ restart_cluster_failure:
   // wait_for_server_started() to ensure that the parts of
   // MySQL Server it uses has been created
   thd->init_query_mem_roots();
+  thd->set_time();
   lex_start(thd);
 
   if (do_reconnect_incident && ndb_binlog_running) {
-    if (check_reconnect_incident(thd, inj, reconnect_incident_id)) {
-      // Incident written, don't report incident again unless Ndb_binlog_thread
-      // is restarted
-      do_reconnect_incident = false;
-    }
+    check_reconnect_incident(thd, inj, reconnect_incident_id);
+    // Don't report incident again unless thread is restarted
+    do_reconnect_incident = false;
   }
   reconnect_incident_id = CLUSTER_DISCONNECT;
-
-  // Handle pending purge requests from before "server started" state
-  recall_pending_purges(thd);
 
   {
     Ndb_binlog_setup binlog_setup(thd);
@@ -7796,7 +7847,13 @@ restart_cluster_failure:
              i_pOp->getState() != NdbEventOperation::EO_DROPPED);
     }
 
+    // Publish current binlog filename if someone is waiting
+    m_binlog_tracker.publish_if_waiters();
+
     release_thd_resources(thd);
+
+    // Check that "microsecond timestamps used in query" has been reset
+    assert(thd->query_start_usec_used == false);
 
     if (current_epoch > ndb_latest_handled_binlog_epoch) {
       Mutex_guard injector_mutex_g(injector_data_mutex);
@@ -7831,6 +7888,15 @@ restart_cluster_failure:
     // Self test functionality
     DBUG_EXECUTE_IF("ndb_binlog_log_table_maps",
                     { dbug_log_table_maps(i_ndb, current_epoch); });
+
+    DBUG_EXECUTE_IF("ndb_binlog_log_multi_server_id",
+                    { dbug_log_multi_server_id(i_ndb, current_epoch); });
+
+    DBUG_EXECUTE_IF("ndb_binlog_inject_incident", {
+      // Test rpl_injector function for writing incident to binlog
+      const std::string message{"Epoch: " + std::to_string(current_epoch)};
+      inj->record_incident(thd, message.c_str());
+    });
   }
 
   // Check if loop has been terminated without properly handling all events
@@ -7922,6 +7988,18 @@ err:
   log_info("Stopped");
 
   DBUG_PRINT("exit", ("ndb_binlog_thread"));
+}
+
+int ndbcluster_binlog_get_schema_participant_count(THD *, SHOW_VAR *var,
+                                                   char *buf) {
+  var->type = SHOW_INT;
+  var->value = buf;
+  *(pointer_cast<int *>(buf)) = g_subscriber_count.load();
+  return 0;
+}
+
+bool ndbcluster_binlog_wait_for_published_binlog_file(std::string &filename) {
+  return ndb_binlog_thread.wait_for_published_binlog_file(filename);
 }
 
 /*

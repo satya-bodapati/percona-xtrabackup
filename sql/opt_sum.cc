@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -618,7 +618,8 @@ bool optimize_aggregated_query(THD *thd, Query_block *select,
     aggr_impossible = true;  // We didn't remove all tables
 
   *decision = aggr_impossible ? AGGR_REGULAR
-                              : aggr_delayed ? AGGR_DELAYED : AGGR_COMPLETE;
+              : aggr_delayed  ? AGGR_DELAYED
+                              : AGGR_COMPLETE;
   return false;
 }
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -693,6 +693,11 @@ class sp_instr_freturn : public sp_lex_instr {
   }
 
   LEX_CSTRING get_expr_query() const override { return m_expr_query; }
+
+  void adjust_sql_command(LEX *lex) override {
+    assert(lex->sql_command == SQLCOM_SELECT);
+    lex->sql_command = SQLCOM_END;
+  }
 
  private:
   /// RETURN-expression item.

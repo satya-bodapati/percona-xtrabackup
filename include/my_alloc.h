@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -478,7 +478,7 @@ using unique_ptr_destroy_only = std::unique_ptr<T, Destroy_only<T>>;
 
 template <typename T, typename... Args>
 unique_ptr_destroy_only<T> make_unique_destroy_only(MEM_ROOT *mem_root,
-                                                    Args &&... args) {
+                                                    Args &&...args) {
   return unique_ptr_destroy_only<T>(new (mem_root)
                                         T(std::forward<Args>(args)...));
 }

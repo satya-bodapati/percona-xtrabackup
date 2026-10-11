@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -132,6 +132,12 @@ void ProtocolBase::init_tls() {
 void ProtocolBase::cancel() {
   client_socket_.cancel();
   exec_timer_.cancel();
+}
+
+void ProtocolBase::terminate() {
+  is_terminated_([](auto &val) { val = true; });
+
+  cancel();
 }
 
 stdx::expected<void, std::error_code> ProtocolBase::tls_accept() {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -57,11 +57,11 @@
 
 #include "mysql/strings/m_ctype.h"
 
-#define char_val(X)                          \
-  (X >= '0' && X <= '9'                      \
-       ? X - '0'                             \
-       : X >= 'A' && X <= 'Z' ? X - 'A' + 10 \
-                              : X >= 'a' && X <= 'z' ? X - 'a' + 10 : '\177')
+#define char_val(X)                      \
+  (X >= '0' && X <= '9'   ? X - '0'      \
+   : X >= 'A' && X <= 'Z' ? X - 'A' + 10 \
+   : X >= 'a' && X <= 'z' ? X - 'a' + 10 \
+                          : '\177')
 
 const char *str2int(const char *src, int radix, long int lower, long int upper,
                     long int *val) {

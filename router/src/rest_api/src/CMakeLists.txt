@@ -1,4 +1,4 @@
-# Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -31,7 +31,11 @@ TARGET_INCLUDE_DIRECTORIES(rest_api_lib
     ${PROJECT_SOURCE_DIR}/src/harness/include/
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     )
-TARGET_LINK_LIBRARIES(rest_api_lib PUBLIC router_lib;http_server;http_auth_realm_lib)
+TARGET_LINK_LIBRARIES(rest_api_lib
+  PUBLIC
+  extra::rapidjson
+  http_server_lib  # http/server/request.cc
+  )
 
 ADD_HARNESS_PLUGIN(rest_api
   SOURCES
@@ -39,7 +43,11 @@ ADD_HARNESS_PLUGIN(rest_api
   rest_api_plugin.cc
   rest_api_handler.cc
   rest_api.cc
-  REQUIRES router_lib;http_server;rest_api_lib;http_auth_backend
+  REQUIRES
+  router_lib
+  http_server_lib
+  rest_api_lib
+  http_auth_backend_lib
   DESTINATION "${ROUTER_INSTALL_PLUGINDIR}")
 
 TARGET_INCLUDE_DIRECTORIES(rest_api

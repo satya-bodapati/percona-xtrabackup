@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -28,6 +28,7 @@
 #include <mysql/plugin.h>
 
 #include "sql/mysqld.h"
+#include "sql/ssl_acceptor_context_operator.h"
 
 struct CHARSET_INFO;
 
@@ -43,5 +44,13 @@ const CHARSET_INFO *get_default_charset() {
 }
 
 sigset_t get_mysqld_signal_mask() { return mysqld_signal_mask; }
+
+bool have_ssl() {
+  if (mysql_main != nullptr) {
+    Lock_and_access_ssl_acceptor_context context(mysql_main);
+    if (context.have_ssl()) return true;
+  }
+  return false;
+}
 
 }  // namespace mysqld

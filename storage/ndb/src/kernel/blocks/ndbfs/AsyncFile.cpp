@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -29,16 +29,18 @@
 #include <math.h>  // sqrt
 #include <algorithm>
 #include <memory>
+#include "AsyncFile.hpp"
+#include "Filename.hpp"
+#include "Ndbfs.hpp"
 #include "my_thread_local.h"  // my_errno
+#include "portlib/NdbTick.h"
+#include "util/cstrbuf.h"
 #include "util/ndb_az31.h"
 #include "util/ndb_math.h"
 #include "util/ndb_ndbxfrm1.h"
 #include "util/ndb_openssl_evp.h"
 #include "util/ndb_rand.h"
 #include "util/ndb_zlib.h"
-
-#include "AsyncFile.hpp"
-#include "Ndbfs.hpp"
 
 #include <NdbThread.h>
 #include <kernel_types.h>
@@ -50,8 +52,6 @@
 #include <signaldata/FsRef.hpp>
 
 #define JAM_FILE_ID 387
-
-//#define DEBUG_ODIRECT
 
 AsyncFile::AsyncFile(Ndbfs &fs)
     : theFileName(), m_thread_bound(false), m_fs(fs) {
@@ -193,28 +193,15 @@ void AsyncFile::openReq(Request *request) {
     } else {
 #if defined(VM_TRACE) || !defined(NDEBUG)
       /*
-       * LCP/0/T13F7.ctl has been seen with zero size, open flags OM_READWRITE |
-       * OM_APPEND Likely a partial read or failed read will be caught by
-       * application level, and file ignored. Are there ever files that can be
-       * empty in ndb_x_fs? Else we could treat zero file as no file, must then
-       * remove I guess to not trick create_if_none?
-       *
-       * D1/NDBCNTR/P0.sysfile: ABORT: open empty not fake created page_size 0
-       * flags 0x00000000  : OM_READONLY?
+       * Existing files should normally not be empty. Log extra debug
+       * information here to give more context if block code fails in case this
+       * open operation or later read operation fails.
        */
-      if (strstr(theFileName.c_str(), "LCP") &&
-          strstr(theFileName.c_str(), ".ctl"))
-        ;  // TODO maybe not safe on all os file system, upper/lowercase?
-      else if (strstr(theFileName.c_str(), "NDBCNTR") &&
-               strstr(theFileName.c_str(), ".sysfile"))
-        ;  // OM_READONLY?
-      else if (strstr(theFileName.c_str(), "DBDIH") &&
-               strstr(theFileName.c_str(), ".FragList")) {
-        ;  // OM_READWRITE existing: D1/DBDIH/S17.FragList - disk full?
-        // Maybe should fail open-request? Or wait for underflow on later read?
-      } else {
-        abort();  // TODO: relax since could be caused by previous disk full?
-      }
+      g_eventLogger->info(
+          "(debug) NDBFS: signal FSOPENREQ - -: file - %s: flags=%0x. Opened "
+          "empty file!",
+          theFileName.c_str(), flags);
+
 #endif
     }
   }
@@ -243,9 +230,9 @@ void AsyncFile::openReq(Request *request) {
          * Also when using CBC-mode we use 512 byte file block size to be
          * compatible with old encrypted backup files.
          */
-        file_block_size =
-            ((use_enc && use_xts) ? xts_data_unit_size
-                                  : (use_gz || (use_enc && use_cbc)) ? 512 : 0);
+        file_block_size = ((use_enc && use_xts) ? xts_data_unit_size
+                           : (use_gz || (use_enc && use_cbc)) ? 512
+                                                              : 0);
       } else {
         key_data_unit_size = page_size;
         file_block_size = page_size;
@@ -260,9 +247,11 @@ void AsyncFile::openReq(Request *request) {
           FsOpenReq::OM_ENCRYPT_PASSWORD) {
         kdf_iter_count = -1;  // Use PBKDF2 let ndb_ndbxfrm decide iter count
       }
-      rc = m_xfile.create(m_file, use_gz, pwd, pwd_len, kdf_iter_count,
-                          enc_cipher, -1, key_data_unit_size, file_block_size,
-                          data_size, is_data_size_estimated);
+      bool partial_last_block = (flags & FsOpenReq::OM_PARTIAL_LAST_BLOCK);
+      rc = m_xfile.create(m_file, use_gz, pwd, size_t(pwd_len), kdf_iter_count,
+                          int(enc_cipher), -1, key_data_unit_size,
+                          file_block_size, data_size, is_data_size_estimated,
+                          partial_last_block);
       if (rc < 0) NDBFS_SET_REQUEST_ERROR(request, get_last_os_error());
     } else {
       rc = m_xfile.open(m_file, pwd, pwd_len);
@@ -311,15 +300,8 @@ void AsyncFile::openReq(Request *request) {
     if (m_file.have_direct_io_support() &&
         !m_file.avoid_direct_io_on_append()) {
       const bool direct_sync = flags & FsOpenReq::OM_DIRECT_SYNC;
-      if (m_file.set_direct_io(direct_sync) == -1) {
-        ndbout_c("%s Failed to set ODirect errno: %u", theFileName.c_str(),
-                 get_last_os_error());
-      }
-#ifdef DEBUG_ODIRECT
-      else {
-        ndbout_c("%s ODirect is set.", theFileName.c_str());
-      }
-#endif
+      const int ret = m_file.set_direct_io(direct_sync);
+      log_set_odirect_result(ret);
     }
   }
 
@@ -476,15 +458,8 @@ void AsyncFile::openReq(Request *request) {
   if (flags & FsOpenReq::OM_DIRECT) {
     if (m_file.have_direct_io_support() && m_file.avoid_direct_io_on_append()) {
       const bool direct_sync = flags & FsOpenReq::OM_DIRECT_SYNC;
-      if (m_file.set_direct_io(direct_sync) == -1) {
-        g_eventLogger->info("%s Failed to set ODirect errno: %u",
-                            theFileName.c_str(), get_last_os_error());
-      }
-#ifdef DEBUG_ODIRECT
-      else {
-        g_eventLogger->info("%s ODirect is set.", theFileName.c_str());
-      }
-#endif
+      const int ret = m_file.set_direct_io(direct_sync);
+      log_set_odirect_result(ret);
     }
   }
 
@@ -579,7 +554,8 @@ remove_if_created:
   //  require(!created);
 #if TEST_UNRELIABLE_DISTRIBUTED_FILESYSTEM
   // Sometimes inject double file delete
-  if (created && ndb_rand() % 100 == 0) m_file.remove(theFileName.c_str());
+  if (created && check_inject_and_log_extra_remove(theFileName.c_str()))
+    m_file.remove(theFileName.c_str());
 #endif
   if (created && m_file.remove(theFileName.c_str()) == -1) {
 #if UNRELIABLE_DISTRIBUTED_FILESYSTEM
@@ -598,7 +574,6 @@ void AsyncFile::closeReq(Request *request) {
                       FsOpenReq::OM_APPEND)) {
     if (!abort) syncReq(request);
   }
-  int r = 0;
 #ifndef NDEBUG
   if (!m_file.is_open()) {
     DEBUG(g_eventLogger->info("close on already closed file"));
@@ -607,17 +582,17 @@ void AsyncFile::closeReq(Request *request) {
 #endif
   if (m_xfile.is_open()) {
     int r = m_xfile.close(abort);
-    if (r != 0) {
-      NDBFS_SET_REQUEST_ERROR(request,
-                              FsRef::fsErrUnknown);  // TODO better error
+    if (r == -1) {
+      NDBFS_SET_REQUEST_ERROR(request, get_last_os_error());
     }
   }
   if (m_file.is_open()) {
-    if (!abort) m_file.sync();
-    r = m_file.close();
-  }
-  if (-1 == r) {
-    NDBFS_SET_REQUEST_ERROR(request, get_last_os_error());
+    int sync_ret = 0;
+    if (!abort) sync_ret = m_file.sync();
+    int r = m_file.close();
+    if (r == -1 || sync_ret == -1) {
+      NDBFS_SET_REQUEST_ERROR(request, get_last_os_error());
+    }
   }
 }
 
@@ -957,7 +932,8 @@ void AsyncFile::syncReq(Request *request) {
 bool AsyncFile::check_odirect_request(const char *buf, size_t sz,
                                       ndb_off_t offset) {
   if (m_open_flags & FsOpenReq::OM_DIRECT) {
-    if ((sz % NDB_O_DIRECT_WRITE_ALIGNMENT) ||
+    if (/*(sz % NDB_O_DIRECT_WRITE_ALIGNMENT) ||  // Do not check size on last
+           block, but have no info about that */
         (((UintPtr)buf) % NDB_O_DIRECT_WRITE_ALIGNMENT) ||
         (offset % NDB_O_DIRECT_WRITE_ALIGNMENT)) {
       g_eventLogger->info(
@@ -986,9 +962,6 @@ void AsyncFile::appendReq(Request *request) {
   int r = m_xfile.write_forward(&in);
   if (r == -1) {
     NDBFS_SET_REQUEST_ERROR(request, get_last_os_error());
-    if (request->error.code == 0) {
-      NDBFS_SET_REQUEST_ERROR(request, FsRef::fsErrUnknown);
-    }
     return;
   }
   if (!in.empty()) {
@@ -1057,6 +1030,154 @@ bool AsyncFile::check_and_log_if_remove_failure_ok(const char *pathname) {
   return true;
 }
 #endif
+
+#if TEST_UNRELIABLE_DISTRIBUTED_FILESYSTEM
+bool AsyncFile::check_inject_and_log_extra_remove(const char *pathname) {
+  // Remove file in 1% of cases
+  if (ndb_rand() % 100 >= 1) return false;
+  /*
+   * The actual injection of an extra remove should be done by caller when
+   * this function returns true.
+   */
+  g_eventLogger->info(
+      "Injected error: expect 'Ignoring unexpected error' for path %s to "
+      "follow. Removed file twice to emulate an unreliable filesystem.",
+      pathname);
+  return true;
+}
+#endif
+
+void AsyncFile::log_set_odirect_result(int result) {
+  const char *filename = theFileName.c_str();
+  const bool success = (result == 0);
+  const bool odirect_failure = (result == -1 && errno == EINVAL);
+  const char *param = nullptr;
+  BaseString baseparam;
+  if (theFileName.is_under_base_path()) {
+    // For files under base path, suppress repeated warnings
+    const Uint32 bp_spec = theFileName.get_base_path_spec();
+
+    // Update statistics
+    if (success)
+      odirect_set_log_bp[bp_spec].successes.fetch_add(1);
+    else
+      odirect_set_log_bp[bp_spec].failures.fetch_add(1);
+
+    const NDB_TICKS now = NdbTick_getCurrentTicks();
+    NDB_TICKS last = odirect_set_log_bp[bp_spec].last_warning.load();
+    if (NdbTick_IsValid(last)) {
+      const NdbDuration elapsed = NdbTick_Elapsed(last, now);
+      if (elapsed.seconds() < odirect_set_log_suppress_period_s) {
+        // Not yet time to report statistics
+        return;
+      }
+    }
+    if (!odirect_set_log_bp[bp_spec].last_warning.compare_exchange_strong(
+            last, now)) {
+      // Another thread came in between and will report
+      return;
+    }
+
+    /*
+     * Now it will be unlikely for another thread to come in between since
+     * suppress_period_s is much bigger than milliseconds which should is
+     * much more that should be needed to read and clear statistics below.
+     */
+    const Uint32 failures = odirect_set_log_bp[bp_spec].failures.exchange(0);
+    const Uint32 successes = odirect_set_log_bp[bp_spec].successes.exchange(0);
+
+    if (failures == 0) {
+      // If no failures, skip report
+      return;
+    }
+
+    g_eventLogger->warning(
+        "Setting ODirect have failed for %u files and succeeded for %u files "
+        "under %s (%s) since last warning.",
+        failures, successes, m_fs.get_base_path(bp_spec).c_str(),
+        m_fs.get_base_path_param_name(bp_spec).c_str());
+
+    baseparam = m_fs.get_base_path_param_name(bp_spec);
+    param = baseparam.c_str();
+    assert(param != nullptr);
+  } else {
+    /*
+     * Do not report statistics or single file success for files outside base
+     * paths. That can be tablespace or logfile group files.
+     * But do report any single file failure for those. Adding tablespace and
+     * logfile group files do not happen very often.
+     */
+    if (success) return;
+  }
+
+  // Report single file failure or success for setting ODirect
+
+  if (odirect_failure)  // Failed set ODirect
+    g_eventLogger->warning(
+        "Failed to set ODirect for file %s %s%s (errno: %u, block size %ju, "
+        "alignment %ju, direct io %d, avoid on append %d, io block size %ju, "
+        "alignment %ju).",
+        filename, (param ? "under " : ""), (param ? param : ""),
+        get_last_os_error(), uintmax_t{m_file.get_block_size()},
+        uintmax_t{m_file.get_block_alignment()},
+        m_file.have_direct_io_support(), m_file.avoid_direct_io_on_append(),
+        uintmax_t{m_file.get_direct_io_block_size()},
+        uintmax_t{m_file.get_direct_io_block_alignment()});
+  else if (success)  // Succeeded to set ODirect
+    g_eventLogger->info("Succeeded to set ODirect for file %s %s%s.", filename,
+                        (param ? "under " : ""), (param ? param : ""));
+  else  // Failed checking ODirect
+    g_eventLogger->warning(
+        "Failed to probe ODirect for file %s %s%s (errno: %u, block size %ju, "
+        "alignment %ju, direct io %d, avoid on append %d, io block size %ju, "
+        "alignment %ju).",
+        filename, (param ? "under " : ""), (param ? param : ""),
+        get_last_os_error(), uintmax_t{m_file.get_block_size()},
+        uintmax_t{m_file.get_block_alignment()},
+        m_file.have_direct_io_support(), m_file.avoid_direct_io_on_append(),
+        uintmax_t{m_file.get_direct_io_block_size()},
+        uintmax_t{m_file.get_direct_io_block_alignment()});
+}
+
+void AsyncFile::log_set_odirect_result(const char *param, const char *filename,
+                                       int result) {
+  const bool success = (result == 0);
+  const bool odirect_failure = (result == -1 && errno == EINVAL);
+  if (odirect_failure)  // Failed set ODirect
+    g_eventLogger->warning(
+        "Failed to set ODirect for file %s %s%s (errno: %u).", filename,
+        (param ? "under " : ""), (param ? param : ""), get_last_os_error());
+  else if (success)  // Succeeded to set ODirect
+    g_eventLogger->info("Succeeded to set ODirect for file %s %s%s.", filename,
+                        (param ? "under " : ""), (param ? param : ""));
+  else  // Failed checking ODirect
+    g_eventLogger->warning(
+        "Failed to probe ODirect for file %s %s%s (errno: %u).", filename,
+        (param ? "under " : ""), (param ? param : ""), get_last_os_error());
+}
+
+AsyncFile::odirect_set_log_state
+    AsyncFile::odirect_set_log_bp[FsOpenReq::BP_MAX];
+
+int AsyncFile::probe_directory_direct_io(const char param[],
+                                         const char name[]) {
+  int ret = -1;  // Could not check ODirect
+  ndb_file file;
+  file.create(name);  // Ignore failure, allow leftover file to be reused.
+  if (file.open(name, FsOpenReq::OM_READWRITE) == 0) {
+    file.set_block_size_and_alignment(NDB_O_DIRECT_WRITE_BLOCKSIZE,
+                                      NDB_O_DIRECT_WRITE_ALIGNMENT);
+    /*
+     * direct_sync parameter in set_direct_io call is not relevant when
+     * probing, uses false.
+     */
+    ret = file.set_direct_io(false);
+    file.close();
+    file.remove(name);
+  }
+  log_set_odirect_result(param, name, ret);
+  return ret;
+}
 
 NdbOut &operator<<(NdbOut &out, const Request &req) {
   out << "[ Request: file: " << hex << req.file << " userRef: " << hex

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -144,7 +144,7 @@ void test(SectionSegmentPool &thePool, Uint32 sz, Uint32 loops, Uint32 iter) {
           Uint32 i = 0;
           while (i < alloc) {
             Uint32 sz = rand() % (alloc - i + 1);
-            w.putWords(&buf.buffer[i], sz);
+            w.putWordsFromChar((char *)&buf.buffer[i], sz);
             i += sz;
           }
           w.getPtr(dst);

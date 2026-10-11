@@ -1,7 +1,7 @@
 #ifndef TABLE_INCLUDED
 #define TABLE_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -45,6 +45,7 @@
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
 #include "mysql/components/services/bits/psi_table_bits.h"
 #include "mysql/strings/m_ctype.h"
+#include "sql/auth/auth_acls.h"        // Access_bitmask
 #include "sql/dd/types/foreign_key.h"  // dd::Foreign_key::enum_rule
 #include "sql/enum_query_type.h"       // enum_query_type
 #include "sql/key.h"
@@ -87,6 +88,7 @@ class Item_field;
 class Json_diff_vector;
 class Json_seekable_path;
 class Json_wrapper;
+class Name_string;
 class Opt_hints_qb;
 class Opt_hints_table;
 class Query_result_union;
@@ -401,7 +403,7 @@ struct GRANT_INFO {
 
      The set is implemented as a bitmap, with the bits defined in sql_acl.h.
    */
-  ulong privilege{0};
+  Access_bitmask privilege{0};
   /** The grant state for internal tables. */
   GRANT_INTERNAL_INFO m_internal;
 };
@@ -1023,7 +1025,7 @@ struct TABLE_SHARE {
   dd::Table *tmp_table_def{nullptr};
 
   /// For materialized derived tables; @see add_derived_key().
-  Query_block *owner_of_possible_tmp_keys{nullptr};
+  Query_block *owner_of_tmp_keys{nullptr};
 
   /**
     Arrays with descriptions of foreign keys in which this table participates
@@ -1615,9 +1617,9 @@ struct TABLE {
     m_set_counter = set_counter;
     m_last_operation_is_distinct = distinct;
     assert(m_set_op_type == SOT_NONE);
-    m_set_op_type = except
-                        ? (distinct ? SOT_EXCEPT_DISTINCT : SOT_EXCEPT_ALL)
-                        : distinct ? SOT_INTERSECT_DISTINCT : SOT_INTERSECT_ALL;
+    m_set_op_type = except ? (distinct ? SOT_EXCEPT_DISTINCT : SOT_EXCEPT_ALL)
+                    : distinct ? SOT_INTERSECT_DISTINCT
+                               : SOT_INTERSECT_ALL;
   }
 
   Field_longlong *set_counter() { return m_set_counter; }
@@ -3189,7 +3191,10 @@ class Table_ref {
     during execution. The hypergraph optimizer does not care about const tables,
     so such tables are not executed during optimization time when it is active.
   */
-  bool materializable_is_const() const;
+  bool materializable_is_const(THD *thd) const;
+
+  /// @returns true if this is a derived table containing a stored function.
+  bool has_stored_program() const;
 
   /// Return true if this is a derived table or view that is merged
   bool is_merged() const { return effective_algorithm == VIEW_ALGORITHM_MERGE; }
@@ -3541,7 +3546,9 @@ class Table_ref {
 
     @param privilege   Privileges granted for this table.
   */
-  void set_privileges(ulong privilege) { grant.privilege |= privilege; }
+  void set_privileges(Access_bitmask privilege) {
+    grant.privilege |= privilege;
+  }
 
   bool save_properties();
   void restore_properties();
@@ -4299,7 +4306,7 @@ void update_create_info_from_table(HA_CREATE_INFO *info, TABLE *form);
 Ident_name_check check_db_name(const char *name, size_t length);
 Ident_name_check check_and_convert_db_name(LEX_STRING *db,
                                            bool preserve_lettercase);
-bool check_column_name(const char *name);
+bool check_column_name(const Name_string &namestring);
 Ident_name_check check_table_name(const char *name, size_t length);
 int rename_file_ext(const char *from, const char *to, const char *ext);
 char *get_field(MEM_ROOT *mem, Field *field);

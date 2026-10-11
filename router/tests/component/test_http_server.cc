@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -23,6 +23,8 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include <fstream>
+#include <map>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -34,7 +36,9 @@
 #include "dim.h"
 #include "gtest_testname.h"
 #include "http/base/uri.h"
+#include "mysql/harness/filesystem.h"
 #include "mysql/harness/logging/registry.h"
+#include "mysql/harness/net_ts/internet.h"
 #include "mysql/harness/utility/string.h"
 #include "mysqlrouter/rest_client.h"
 #include "router_component_test.h"
@@ -183,6 +187,113 @@ class HttpServerPlainTest
     }
   }
 
+  void testcase_ensure(bool use_http2 = false) {
+    std::vector<std::pair<std::string, std::string>> http_section;
+    http_section.reserve(GetParam().http_section.size());
+
+    uint16_t http_port = http_port_;
+    bool has_port{false};
+
+    // replace the placeholder
+    for (auto const &e : GetParam().http_section) {
+      std::string value(e.second);
+
+      if (e.first == "port" && e.second == kPlaceholder) {
+        value = std::to_string(http_port_);
+        has_port = true;
+      } else if (e.first == "static_folder") {
+        if (e.second.substr(0, kPlaceholderHttpBaseDir.size()) ==
+            kPlaceholderHttpBaseDir) {
+          auto fp = mysql_harness::Path(http_base_dir_.name());
+          {
+            auto subpath = e.second.substr(kPlaceholderHttpBaseDir.size());
+            if (!subpath.empty()) {
+              fp = fp.join(subpath);
+            }
+          }
+          value = fp.real_path().str();
+        } else if (e.second.substr(0, kPlaceholderDatadir.size()) ==
+                   kPlaceholderDatadir) {
+          value = get_data_dir()
+                      .join(e.second.substr(kPlaceholderDatadir.size()))
+                      .str();
+        }
+      }
+      http_section.emplace_back(e.first, value);
+    }
+
+    if (!has_port) {
+      http_port = kHttpDefaultPort;
+    }
+
+    // Add a DEBUG level to trigger the 'Running' message.
+    std::string conf_file{create_config_file(
+        conf_dir_.name(), mysql_harness::join(
+                              std::vector<std::string>{
+                                  mysql_harness::ConfigBuilder::build_section(
+                                      "http_server", http_section)},
+                              ""))};
+
+    auto &http_server =
+        router_spawner()
+            .expected_exit_code(GetParam().expected_success ? 0 : EXIT_FAILURE)
+            .wait_for_sync_point(GetParam().expected_success
+                                     ? Spawner::SyncPoint::READY
+                                     : Spawner::SyncPoint::NONE)
+            .spawn({"-c", conf_file});
+
+    if (GetParam().expected_success) {
+      std::string rel_uri = GetParam().raw_uri_path;
+
+      if (!GetParam().raw_uri_query.empty()) {
+        rel_uri += "?" + GetParam().raw_uri_query;
+      }
+
+      SCOPED_TRACE("// preparing client and connection object");
+      IOContext io_ctx;
+
+      RestClient rest_client(io_ctx, GetParam().http_hostname, http_port, {},
+                             {}, use_http2);
+
+      SCOPED_TRACE("// wait http port connectable");
+      try {
+        ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port,
+                                                 kDefaultPortReadyTimeout,
+                                                 GetParam().http_hostname))
+            << "http-server:\n"
+            << http_server.get_current_output();
+      } catch (const std::system_error &e) {
+        SCOPED_TRACE(
+            "// wait_for_port_ready() failed, waiting for process to startup "
+            "before we can kill it");
+        // if we tried to connect to an address we can't assign (like
+        // connect(::1) on a host IPv6 disabled), skip the test
+
+        ASSERT_EQ(e.code(),
+                  make_error_condition(std::errc::address_not_available));
+
+        // wait a bit to let the process actually startup to not kill it too
+        // early
+        EXPECT_TRUE(wait_log_contains(http_server, "Running", 1000ms));
+
+        // skip
+        return;
+      }
+
+      SCOPED_TRACE("// requesting " + rel_uri);
+      auto req = rest_client.request_sync(GetParam().http_method, rel_uri);
+      ASSERT_TRUE(req) << rest_client.error_msg();
+      ASSERT_EQ(req.get_response_code(), GetParam().status_code);
+    } else {
+      check_exit_code(http_server, EXIT_FAILURE,
+                      1000ms);  // assume it finishes in 1s
+      EXPECT_THAT(http_server.get_full_output(),
+                  ::testing::ContainsRegex(GetParam().stderr_regex));
+      EXPECT_THAT(http_server.get_logfile_content(),
+                  ::testing::ContainsRegex(GetParam().errmsg_regex));
+    }
+  }
+
  protected:
   uint16_t http_port_;
   TempDirectory conf_dir_;
@@ -198,104 +309,8 @@ TempDirectory HttpServerPlainTest::http_base_dir_;
  * - start the http-server component
  * - make a client connect to the http-server
  */
-TEST_P(HttpServerPlainTest, ensure) {
-  std::vector<std::pair<std::string, std::string>> http_section;
-  http_section.reserve(GetParam().http_section.size());
-
-  uint16_t http_port = http_port_;
-  bool has_port{false};
-
-  // replace the placeholder
-  for (auto const &e : GetParam().http_section) {
-    std::string value(e.second);
-
-    if (e.first == "port" && e.second == kPlaceholder) {
-      value = std::to_string(http_port_);
-      has_port = true;
-    } else if (e.first == "static_folder") {
-      if (e.second.substr(0, kPlaceholderHttpBaseDir.size()) ==
-          kPlaceholderHttpBaseDir) {
-        auto fp = mysql_harness::Path(http_base_dir_.name());
-        {
-          auto subpath = e.second.substr(kPlaceholderHttpBaseDir.size());
-          if (!subpath.empty()) {
-            fp = fp.join(subpath);
-          }
-        }
-        value = fp.real_path().str();
-      } else if (e.second.substr(0, kPlaceholderDatadir.size()) ==
-                 kPlaceholderDatadir) {
-        value = get_data_dir()
-                    .join(e.second.substr(kPlaceholderDatadir.size()))
-                    .str();
-      }
-    }
-    http_section.emplace_back(e.first, value);
-  }
-
-  if (!has_port) {
-    http_port = kHttpDefaultPort;
-  }
-
-  // Add a DEBUG level to trigger the 'Running' message.
-  std::string conf_file{create_config_file(
-      conf_dir_.name(),
-      mysql_harness::join(
-          std::vector<std::string>{mysql_harness::ConfigBuilder::build_section(
-              "http_server", http_section)},
-          ""))};
-  ProcessWrapper &http_server{launch_router(
-      {"-c", conf_file}, GetParam().expected_success ? 0 : EXIT_FAILURE, true,
-      false, GetParam().expected_success ? 5s : -1s)};
-
-  if (GetParam().expected_success) {
-    std::string rel_uri = GetParam().raw_uri_path;
-
-    if (!GetParam().raw_uri_query.empty()) {
-      rel_uri += "?" + GetParam().raw_uri_query;
-    }
-
-    SCOPED_TRACE("// preparing client and connection object");
-    IOContext io_ctx;
-
-    RestClient rest_client(io_ctx, GetParam().http_hostname, http_port);
-
-    SCOPED_TRACE("// wait http port connectable");
-    try {
-      ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port,
-                                               kDefaultPortReadyTimeout,
-                                               GetParam().http_hostname))
-          << "http-server:\n"
-          << http_server.get_current_output();
-    } catch (const std::system_error &e) {
-      SCOPED_TRACE(
-          "// wait_for_port_ready() failed, waiting for process to startup "
-          "before we can kill it");
-      // if we tried to connect to an address we can't assign (like connect(::1)
-      // on a host IPv6 disabled), skip the test
-
-      ASSERT_EQ(e.code(),
-                make_error_condition(std::errc::address_not_available));
-
-      // wait a bit to let the process actually startup to not kill it too early
-      EXPECT_TRUE(wait_log_contains(http_server, "Running", 1000ms));
-
-      // skip
-      return;
-    }
-
-    SCOPED_TRACE("// requesting " + rel_uri);
-    auto req = rest_client.request_sync(GetParam().http_method, rel_uri);
-    ASSERT_TRUE(req) << rest_client.error_msg();
-    ASSERT_EQ(req.get_response_code(), GetParam().status_code);
-  } else {
-    check_exit_code(http_server, EXIT_FAILURE,
-                    1000ms);  // assume it finishes in 1s
-    EXPECT_THAT(http_server.get_full_output(),
-                ::testing::ContainsRegex(GetParam().stderr_regex));
-    EXPECT_THAT(http_server.get_logfile_content(),
-                ::testing::ContainsRegex(GetParam().errmsg_regex));
-  }
+TEST_P(HttpServerPlainTest, ensure_http11) {
+  ASSERT_NO_FATAL_FAILURE(testcase_ensure());
 }
 
 const std::string localhost_ipv4("127.0.0.1");
@@ -405,6 +420,118 @@ static const HttpServerPlainParams http_server_static_files_params[]{
      false,
      "",
      "option port",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_http_connections-zero",
+     "WL17288::TS-1",
+     localhost_ipv4,
+     {
+         {"max_http_connections", "0"},
+     },
+     false,
+     "",
+     "option max_http_connections",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_http_connections-non-int",
+     "WL17288::TS-2",
+     localhost_ipv4,
+     {
+         {"max_http_connections", "abc"},
+     },
+     false,
+     "",
+     "option max_http_connections",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_http_connections-out-of-range",
+     "WL17288::TS-3",
+     localhost_ipv4,
+     {
+         {"max_http_connections", "100001"},
+     },
+     false,
+     "",
+     "option max_http_connections",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_request_body_size-negative",
+     "WL17288::TS-4",
+     localhost_ipv4,
+     {
+         {"max_request_body_size", "-1"},
+     },
+     false,
+     "",
+     "option max_request_body_size",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_request_body_size-out-of-range",
+     "WL17288::TS-5",
+     localhost_ipv4,
+     {
+         {"max_request_body_size", "2147483649"},
+     },
+     false,
+     "",
+     "option max_request_body_size",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_response_body_size-negative",
+     "WL17288::TS-6",
+     localhost_ipv4,
+     {
+         {"max_response_body_size", "-1"},
+     },
+     false,
+     "",
+     "option max_response_body_size",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_response_body_size-non-int",
+     "WL17288::TS-7",
+     localhost_ipv4,
+     {
+         {"max_response_body_size", "abc"},
+     },
+     false,
+     "",
+     "option max_response_body_size",
+     HttpMethod::Get,
+     "/",
+     "",
+     404},
+
+    {"max_response_body_size-out-of-range",
+     "WL17288::TS-8",
+     localhost_ipv4,
+     {
+         {"max_response_body_size", "2147483649"},
+     },
+     false,
+     "",
+     "option max_response_body_size",
      HttpMethod::Get,
      "/",
      "",
@@ -1088,7 +1215,7 @@ TEST_P(HttpClientSecureTest, ensure) {
 
   SCOPED_TRACE("// wait http port connectable");
 
-  ProcessWrapper &http_server = launch_router({"-c", conf_file_});
+  auto &http_server = router_spawner().spawn({"-c", conf_file_});
 
   ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
 
@@ -1159,6 +1286,12 @@ struct HttpServerSecureParams {
   }
 };
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+constexpr const char kErrmsgRegexWeakSslKey[]{"ca md too weak"};
+#else
+constexpr const char kErrmsgRegexWeakSslKey[]{"key-size too small"};
+#endif
+
 /**
  * config-failures for HTTPS setups.
  *
@@ -1172,6 +1305,95 @@ class HttpServerSecureTest
         conf_dir_{},
         ssl_cert_data_dir_{SSL_TEST_DATA_DIR} {}
 
+  void testcase_ensure(const bool use_http2 = false) {
+    std::vector<std::pair<std::string, std::string>> http_section;
+    http_section.reserve(GetParam().http_section.size());
+
+    // replace the placeholder
+    for (auto const &e : GetParam().http_section) {
+      std::string value(e.second);
+
+      if (e.first == "port" && e.second == kPlaceholder) {
+        value = std::to_string(http_port_);
+      } else if (e.first == "ssl_cert" || e.first == "ssl_key" ||
+                 e.first == "ssl_dh_param") {
+        if (e.second.substr(0, kPlaceholderStddataDir.size()) ==
+            kPlaceholderStddataDir) {
+          value = ssl_cert_data_dir_
+                      .join(e.second.substr(kPlaceholderStddataDir.size()))
+                      .str();
+        } else if (e.second.substr(0, kPlaceholderDatadir.size()) ==
+                   kPlaceholderDatadir) {
+          value = get_data_dir()
+                      .join(e.second.substr(kPlaceholderDatadir.size()))
+                      .str();
+        }
+      }
+      http_section.emplace_back(e.first, value);
+    }
+
+    std::string conf_file{
+        create_config_file(conf_dir_.name(),
+                           mysql_harness::ConfigBuilder::build_section(
+                               "http_server", http_section),
+                           nullptr, "mysqlrouter.conf", "", false)};
+
+    auto &http_server =
+        router_spawner()
+            .expected_exit_code(GetParam().expected_success ? EXIT_SUCCESS
+                                                            : EXIT_FAILURE)
+            // timeout for waiting for ready notification is increased to
+            // address the case of strong dh params which takes long on
+            // overloaded CPUs
+            .wait_for_notify_ready(20s)
+            .wait_for_sync_point(GetParam().expected_success
+                                     ? Spawner::SyncPoint::READY
+                                     : Spawner::SyncPoint::NONE)
+            .spawn({"-c", conf_file});
+
+    if (GetParam().expected_success) {
+      http::base::Uri u;
+      u.set_scheme("https");
+      u.set_port(http_port_);
+      u.set_host(http_hostname_);
+      u.set_path("/");
+
+      SCOPED_TRACE("// preparing client and connection object");
+      IOContext io_ctx;
+      TlsClientContext tls_ctx;
+
+      tls_ctx.ssl_ca(ssl_cert_data_dir_.join(kServerCertCaFile).str(), "");
+
+      RestClient rest_client(io_ctx, std::move(tls_ctx), u, use_http2);
+
+      SCOPED_TRACE("// wait for port ready");
+      ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+      SCOPED_TRACE("// GETing " + u.join());
+      auto req = rest_client.request_sync(HttpMethod::Get, "/");
+      ASSERT_TRUE(req) << rest_client.error_msg();
+      ASSERT_EQ(req.get_response_code(), 404);
+    } else {
+      SCOPED_TRACE("// wait until process has finished.");
+      check_exit_code(http_server, EXIT_FAILURE, 10s);
+
+      SCOPED_TRACE("// stderr should be empty");
+      EXPECT_THAT(http_server.get_full_output(), ::testing::IsEmpty());
+
+      // if openssl 1.1.0 is used and it is compiled with
+      // "-DOPENSSL_TLS_SECURITY_LEVEL" > 1 we may also get "ee key too small"
+      // instead of kErrmsgRegexWeakSslKey.
+      const auto errmsg_regex =
+          (GetParam().errmsg_regex == kErrmsgRegexWeakSslKey &&
+           TlsClientContext().security_level() > 1)
+              ? "ee key too small"
+              : GetParam().errmsg_regex;
+
+      EXPECT_THAT(http_server.get_logfile_content(),
+                  ::testing::ContainsRegex(errmsg_regex));
+    }
+  }
+
  protected:
   uint16_t http_port_;
   std::string http_hostname_ = "127.0.0.1";
@@ -1179,94 +1401,8 @@ class HttpServerSecureTest
   mysql_harness::Path ssl_cert_data_dir_;
 };
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-constexpr const char kErrmsgRegexWeakSslKey[]{"ca md too weak"};
-#else
-constexpr const char kErrmsgRegexWeakSslKey[]{"key-size too small"};
-#endif
-
-TEST_P(HttpServerSecureTest, ensure) {
-  // const size_t placeholder_length = strlen(kPlaceholder);
-
-  std::vector<std::pair<std::string, std::string>> http_section;
-  http_section.reserve(GetParam().http_section.size());
-
-  // replace the placeholder
-  for (auto const &e : GetParam().http_section) {
-    std::string value(e.second);
-
-    if (e.first == "port" && e.second == kPlaceholder) {
-      value = std::to_string(http_port_);
-    } else if (e.first == "ssl_cert" || e.first == "ssl_key" ||
-               e.first == "ssl_dh_param") {
-      if (e.second.substr(0, kPlaceholderStddataDir.size()) ==
-          kPlaceholderStddataDir) {
-        value = ssl_cert_data_dir_
-                    .join(e.second.substr(kPlaceholderStddataDir.size()))
-                    .str();
-      } else if (e.second.substr(0, kPlaceholderDatadir.size()) ==
-                 kPlaceholderDatadir) {
-        value = get_data_dir()
-                    .join(e.second.substr(kPlaceholderDatadir.size()))
-                    .str();
-      }
-    }
-    http_section.emplace_back(e.first, value);
-  }
-
-  std::string conf_file{create_config_file(
-      conf_dir_.name(),
-      mysql_harness::ConfigBuilder::build_section("http_server", http_section),
-      nullptr, "mysqlrouter.conf", "", false)};
-
-  // timeout for waiting for ready notification is increased to address the case
-  // of strong dh params which takes long on overloaded CPUs
-  ProcessWrapper &http_server{
-      launch_router({"-c", conf_file},
-                    GetParam().expected_success ? EXIT_SUCCESS : EXIT_FAILURE,
-                    true, false, GetParam().expected_success ? 20s : -1s)};
-
-  if (GetParam().expected_success) {
-    http::base::Uri u;
-    u.set_scheme("https");
-    u.set_port(http_port_);
-    u.set_host(http_hostname_);
-    u.set_path("/");
-
-    SCOPED_TRACE("// preparing client and connection object");
-    IOContext io_ctx;
-    TlsClientContext tls_ctx;
-
-    tls_ctx.ssl_ca(ssl_cert_data_dir_.join(kServerCertCaFile).str(), "");
-
-    RestClient rest_client(io_ctx, std::move(tls_ctx));
-
-    SCOPED_TRACE("// wait for port ready");
-    ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
-
-    SCOPED_TRACE("// GETing " + u.join());
-    auto req = rest_client.request_sync(HttpMethod::Get, u);
-    ASSERT_TRUE(req) << rest_client.error_msg();
-    ASSERT_EQ(req.get_response_code(), 404);
-  } else {
-    SCOPED_TRACE("// wait until process has finished.");
-    check_exit_code(http_server, EXIT_FAILURE, 10s);
-
-    SCOPED_TRACE("// stderr should be empty");
-    EXPECT_THAT(http_server.get_full_output(), ::testing::IsEmpty());
-
-    // if openssl 1.1.0 is used and it is compiled with
-    // "-DOPENSSL_TLS_SECURITY_LEVEL" > 1 we may also get "ee key too small"
-    // instead of kErrmsgRegexWeakSslKey.
-    const auto errmsg_regex =
-        (GetParam().errmsg_regex == kErrmsgRegexWeakSslKey &&
-         TlsClientContext().security_level() > 1)
-            ? "ee key too small"
-            : GetParam().errmsg_regex;
-
-    EXPECT_THAT(http_server.get_logfile_content(),
-                ::testing::ContainsRegex(errmsg_regex));
-  }
+TEST_P(HttpServerSecureTest, ensure_http11) {
+  ASSERT_NO_FATAL_FAILURE(this->testcase_ensure());
 }
 
 constexpr const char kErrmsgRegexNoSslCertKey[]{
@@ -1627,7 +1763,7 @@ class HttpServerAuthTest
  * - make a client connect to the http-server
  */
 TEST_P(HttpServerAuthTest, ensure) {
-  launch_router({"-c", conf_file_});
+  router_spawner().spawn({"-c", conf_file_});
 
   const std::string http_uri = GetParam().url;
   SCOPED_TRACE("// connecting " + http_hostname_ + ":" +
@@ -1735,10 +1871,14 @@ TEST_P(HttpServerAuthFailTest, ensure) {
 
   std::string conf_file = create_config_file(conf_dir_.name(), config_content);
 
-  ProcessWrapper &http_server{
-      launch_router({"-c", conf_file},
-                    GetParam().check_at_runtime ? EXIT_SUCCESS : EXIT_FAILURE,
-                    true, false, -1s)};
+  auto &http_server =
+      router_spawner()
+          .expected_exit_code(GetParam().check_at_runtime ? EXIT_SUCCESS
+                                                          : EXIT_FAILURE)
+          .wait_for_sync_point(GetParam().check_at_runtime
+                                   ? Spawner::SyncPoint::READY
+                                   : Spawner::SyncPoint::NONE)
+          .spawn({"-c", conf_file});
 
   if (GetParam().check_at_runtime) {
     ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
@@ -1884,6 +2024,349 @@ INSTANTIATE_TEST_SUITE_P(
           info.param.test_name +
           (info.param.check_at_runtime ? "_works" : "_fails"));
     });
+
+class HttpServerLimitsRuntimeTest : public HttpServerTestBase {
+ public:
+  HttpServerLimitsRuntimeTest()
+      : http_port_{port_pool_.get_next_available()}, conf_dir_{} {}
+
+ protected:
+  uint16_t http_port_;
+  std::string http_hostname_ = "127.0.0.1";
+  TempDirectory conf_dir_;
+};
+
+static std::string send_raw_http_request(const std::string &http_host,
+                                         const uint16_t http_port,
+                                         const std::string &http_request) {
+  static_cast<void>(http_host);
+  net::io_context io_ctx;
+  net::ip::tcp::socket sock(io_ctx);
+
+  auto connect_res = sock.connect(
+      net::ip::tcp::endpoint(net::ip::address_v4::loopback(), http_port));
+  if (!connect_res) {
+    return {};
+  }
+
+  auto write_res = net::write(sock, net::buffer(http_request));
+  if (!write_res) {
+    return {};
+  }
+
+  std::string read_buf;
+  auto read_res = net::read(sock, net::dynamic_buffer(read_buf));
+  if (!read_res && read_res.error() != net::stream_errc::eof) {
+    return {};
+  }
+
+  return read_buf;
+}
+
+TEST_F(HttpServerLimitsRuntimeTest, MaxHttpConnectionsRejectsExcessConnection) {
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"max_http_connections", "1"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  // Avoid check_port_ready(): it opens a TCP connection and can briefly consume
+  // the single allowed connection before the test request reaches Router.
+
+  IOContext io_ctx;
+  RestClient first_client(io_ctx, http_hostname_, http_port_, {}, {});
+  first_client.set_request_connection_close(false);
+
+  auto first_req = first_client.request_sync(HttpMethod::Get, "/");
+  ASSERT_TRUE(first_req);
+  EXPECT_EQ(first_req.get_response_code(), HttpStatusCode::NotFound);
+
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto req = rest_client.request_sync(HttpMethod::Get, "/");
+  EXPECT_FALSE(req);
+  EXPECT_THAT(http_server.get_logfile_content(),
+              ::testing::ContainsRegex("rejected connection due to "
+                                       "max_http_connections"));
+}
+
+TEST_F(
+    HttpServerLimitsRuntimeTest,
+    SuppressedMaxHttpConnectionRejectionSummaryFlushesWithoutLaterRejection) {
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"max_http_connections", "1"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  // Avoid check_port_ready(): it opens a TCP connection and can briefly consume
+  // the single allowed connection before the test request reaches Router.
+
+  IOContext io_ctx;
+  RestClient first_client(io_ctx, http_hostname_, http_port_, {}, {});
+  first_client.set_request_connection_close(false);
+
+  auto first_req = first_client.request_sync(HttpMethod::Get, "/");
+  ASSERT_TRUE(first_req);
+  EXPECT_EQ(first_req.get_response_code(), HttpStatusCode::NotFound);
+
+  for (int i = 0; i < 3; ++i) {
+    RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+    auto req = rest_client.request_sync(HttpMethod::Get, "/");
+    EXPECT_FALSE(req);
+  }
+
+  EXPECT_TRUE(
+      wait_log_contains(http_server, "suppressed 2 similar messages", 7s))
+      << http_server.get_logfile_content();
+}
+
+TEST_F(HttpServerLimitsRuntimeTest,
+       MaxHttpConnectionsFromDefaultSectionRejectsExcessConnection) {
+  auto default_section = get_DEFAULT_defaults();
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)}}),
+      &default_section, "mysqlrouter.conf", "max_http_connections = 1\n")};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  // Avoid check_port_ready(): it opens a TCP connection and can briefly consume
+  // the single allowed connection before the test request reaches Router.
+
+  IOContext io_ctx;
+  RestClient first_client(io_ctx, http_hostname_, http_port_, {}, {});
+  first_client.set_request_connection_close(false);
+
+  auto first_req = first_client.request_sync(HttpMethod::Get, "/");
+  ASSERT_TRUE(first_req);
+  EXPECT_EQ(first_req.get_response_code(), HttpStatusCode::NotFound);
+
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto req = rest_client.request_sync(HttpMethod::Get, "/");
+  EXPECT_FALSE(req);
+  EXPECT_THAT(http_server.get_logfile_content(),
+              ::testing::ContainsRegex("rejected connection due to "
+                                       "max_http_connections"));
+}
+
+TEST_F(HttpServerLimitsRuntimeTest,
+       DefaultMaxConnectionsDoesNotLimitHttpServer) {
+  auto default_section = get_DEFAULT_defaults();
+  default_section["unknown_config_option"] = "warning";
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)}}),
+      &default_section, "mysqlrouter.conf", "max_connections = 1\n")};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  IOContext io_ctx;
+  RestClient first_client(io_ctx, http_hostname_, http_port_, {}, {});
+  first_client.set_request_connection_close(false);
+
+  auto first_req = first_client.request_sync(HttpMethod::Get, "/");
+  ASSERT_TRUE(first_req);
+  EXPECT_EQ(first_req.get_response_code(), HttpStatusCode::NotFound);
+
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto req = rest_client.request_sync(HttpMethod::Get, "/");
+  ASSERT_TRUE(req);
+  EXPECT_EQ(req.get_response_code(), HttpStatusCode::NotFound);
+}
+
+TEST_F(HttpServerLimitsRuntimeTest, OversizedBodyReturns413) {
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"max_request_body_size", "8"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  IOContext io_ctx;
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  rest_client.set_request_connection_close(false);
+
+  auto oversized_req = rest_client.request_sync(HttpMethod::Post, "/upload",
+                                                std::string(16, 'a'),
+                                                "application/octet-stream");
+  ASSERT_TRUE(oversized_req);
+  EXPECT_EQ(oversized_req.get_response_code(), HttpStatusCode::PayloadTooLarge);
+
+  RestClient next_request_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto get_req = next_request_client.request_sync(HttpMethod::Get, "/");
+  ASSERT_TRUE(get_req);
+  EXPECT_NE(get_req.get_response_code(), HttpStatusCode::PayloadTooLarge);
+}
+
+TEST_F(HttpServerLimitsRuntimeTest,
+       RequestWithContentLengthAndTransferEncodingReturns400) {
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"max_request_body_size", "32"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  const auto response = send_raw_http_request(
+      http_hostname_, http_port_,
+      "POST /upload HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+      "Transfer-Encoding: chunked\r\nContent-Length: 4\r\n"
+      "Connection: close\r\n\r\n4\r\nabcd\r\n"
+      "0\r\n\r\n");
+  EXPECT_THAT(response, ::testing::StartsWith("HTTP/1.1 400 Bad Request"));
+  EXPECT_THAT(http_server.get_logfile_content(),
+              ::testing::ContainsRegex(
+                  "rejected request due to invalid request body headers: both "
+                  "Content-Length and Transfer-Encoding are present"));
+}
+
+TEST_F(HttpServerLimitsRuntimeTest, RequestWithInvalidContentLengthReturns400) {
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"max_request_body_size", "32"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  const auto response =
+      send_raw_http_request(http_hostname_, http_port_,
+                            "POST /upload HTTP/1.1\r\nHost: "
+                            "127.0.0.1\r\nContent-Length: abc\r\n"
+                            "Connection: close\r\n\r\n");
+  EXPECT_THAT(response, ::testing::StartsWith("HTTP/1.1 400 Bad Request"));
+  EXPECT_THAT(http_server.get_logfile_content(),
+              ::testing::ContainsRegex(
+                  "rejected request due to invalid request body headers: "
+                  "invalid Content-Length"));
+}
+
+TEST_F(HttpServerLimitsRuntimeTest, MaxRequestBodySizeZeroRejectsBody) {
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"max_request_body_size", "0"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  IOContext io_ctx;
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto req = rest_client.request_sync(HttpMethod::Post, "/upload", "x",
+                                      "application/octet-stream");
+  ASSERT_TRUE(req);
+  EXPECT_EQ(req.get_response_code(), HttpStatusCode::PayloadTooLarge);
+}
+
+TEST_F(HttpServerLimitsRuntimeTest, OversizedResponseReturns500WithoutBody) {
+  TempDirectory static_dir;
+  const auto large_file =
+      mysql_harness::Path(static_dir.name()).join("large.txt");
+  std::ofstream ofs{large_file.str()};
+  ASSERT_TRUE(ofs.good());
+  ofs << std::string(16, 'x');
+  ofs.close();
+
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"static_folder", static_dir.name()},
+                          {"max_response_body_size", "8"}}))};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  IOContext io_ctx;
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto req = rest_client.request_sync(HttpMethod::Get, "/large.txt");
+  ASSERT_TRUE(req);
+  EXPECT_EQ(req.get_response_code(), HttpStatusCode::InternalError);
+  EXPECT_TRUE(req.get_input_body().empty());
+  EXPECT_THAT(http_server.get_logfile_content(),
+              ::testing::ContainsRegex("rejected response due to "
+                                       "max_response_body_size"));
+}
+
+TEST_F(HttpServerLimitsRuntimeTest,
+       MaxResponseBodySizeFromHttpServerOverridesDefaultSection) {
+  TempDirectory static_dir;
+  const auto large_file =
+      mysql_harness::Path(static_dir.name()).join("large.txt");
+  std::ofstream ofs{large_file.str()};
+  ASSERT_TRUE(ofs.good());
+  ofs << std::string(16, 'x');
+  ofs.close();
+
+  auto default_section = get_DEFAULT_defaults();
+  const std::string conf_file{create_config_file(
+      conf_dir_.name(),
+      mysql_harness::ConfigBuilder::build_section(
+          "http_server", {{"bind_address", "127.0.0.1"},
+                          {"port", std::to_string(http_port_)},
+                          {"static_folder", static_dir.name()},
+                          {"max_response_body_size", "32"}}),
+      &default_section, "mysqlrouter.conf", "max_response_body_size = 8\n")};
+
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::READY)
+                          .spawn({"-c", conf_file});
+
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(http_server, http_port_));
+
+  IOContext io_ctx;
+  RestClient rest_client(io_ctx, http_hostname_, http_port_, {}, {});
+  auto req = rest_client.request_sync(HttpMethod::Get, "/large.txt");
+  ASSERT_TRUE(req);
+  EXPECT_EQ(req.get_response_code(), HttpStatusCode::Ok);
+  EXPECT_EQ(req.get_input_body(), std::string(16, 'x'));
+}
 
 int main(int argc, char *argv[]) {
   TlsLibraryContext tls_lib_ctx;

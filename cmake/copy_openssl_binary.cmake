@@ -1,4 +1,4 @@
-# Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -57,7 +57,7 @@ IF(LINUX)
 
   IF(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" AND
       PATCHELF_VERSION VERSION_LESS "0.14.5")
-    SET(PATCHELF_PAGE_SIZE_ARGS --page-size ${CPU_PAGE_SIZE})
+    SET(PATCHELF_PAGE_SIZE_ARGS --page-size 65536)
   ENDIF()
 
   EXECUTE_PROCESS(

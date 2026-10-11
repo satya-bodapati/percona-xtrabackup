@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -57,8 +57,8 @@
 #include "kernel/signaldata/DumpStateOrd.hpp"
 #include "kernel/signaldata/TestOrd.hpp"
 
-//#define REPORT_TRANSPORTER
-//#define API_TRACE
+// #define REPORT_TRANSPORTER
+// #define API_TRACE
 
 static int numberToIndex(int number) { return number - MIN_API_BLOCK_NO; }
 
@@ -99,7 +99,8 @@ void TransporterFacade::reportError(NodeId nodeId, TransporterError errorCode,
         "Node %u disconnecting from node %u due to transporter error %u %s",
         ownId(), nodeId, errorCode, info ? info : "");
     if (nodeId == ownId()) {
-      g_eventLogger->info("Error on loopback transporter is fatal.");
+      g_eventLogger->info("Node %u loopback transporter: error is fatal",
+                          ownId());
       abort();
     }
     DEBUG_FPRINTF((stderr, "(%u)FAC:reportError(%u, %d, %s)\n", ownId(), nodeId,
@@ -160,7 +161,7 @@ void TransporterFacade::reportDisconnect(NodeId nodeId,
   reportDisconnected(nodeId);
 }
 
-void TransporterFacade::transporter_recv_from(NodeId nodeId) {
+void TransporterFacade::transporter_recv_from(NodeId nodeId, TrpId) {
   hb_received(nodeId);
 }
 
@@ -442,10 +443,6 @@ int TransporterFacade::start_instance(NodeId nodeId,
   theOwnId = nodeId;
   DEBUG_FPRINTF((stderr, "(%u)FAC:start_instance\n", ownId()));
 
-#if defined SIGPIPE && !defined _WIN32
-  (void)signal(SIGPIPE, SIG_IGN);
-#endif
-
   theTransporterRegistry = new TransporterRegistry(this, this);
   if (theTransporterRegistry == nullptr) {
     DBUG_RETURN(-1);
@@ -473,10 +470,6 @@ int TransporterFacade::start_instance(NodeId nodeId,
   }
 
   if (!configure(nodeId, conf)) {
-    DBUG_RETURN(-1);
-  }
-
-  if (!theTransporterRegistry->start_service(m_socket_server)) {
     DBUG_RETURN(-1);
   }
 
@@ -754,7 +747,7 @@ void TransporterFacade::calc_recv_thread_wakeup() {
   else if (m_recv_thread_wakeup < min_number)
     m_recv_thread_wakeup = min_number;
 
-//#define DEBUG_THIS_FUNCTION 1
+// #define DEBUG_THIS_FUNCTION 1
 #ifdef DEBUG_THIS_FUNCTION
   fprintf(stderr, "m_recv_thread_wakeup = %u, cpu_usage = %u, factor = %u\n",
           m_recv_thread_wakeup, m_recv_thread_cpu_usage_in_percent, factor);
@@ -979,7 +972,6 @@ void TransporterFacade::threadMainSend(void) {
     exit(0);
   }
 
-  m_socket_server.startServer();
   raise_thread_prio(theSendThread);
 
   NDB_TICKS lastActivityCheck = NdbTick_getCurrentTicks();
@@ -1044,9 +1036,6 @@ void TransporterFacade::threadMainSend(void) {
     }
   }
   theTransporterRegistry->stopSending();
-
-  m_socket_server.stopServer();
-  m_socket_server.stopSessions(true);
 
   theTransporterRegistry->stop_clients();
 }
@@ -1791,8 +1780,8 @@ int TransporterFacade::close_clnt(trp_client *clnt) {
   NdbApiSignal signal(numberToRef(clnt->m_blockNo, theOwnId));
   signal.theVerId_signalNumber = GSN_CLOSE_COMREQ;
   signal.theTrace = 0;
-  signal.theLength = 1;
-  CloseComReqConf *req = CAST_PTR(CloseComReqConf, signal.getDataPtrSend());
+  signal.theLength = CloseComReqConf::SignalLengthAPI;
+  auto *req = CAST_PTR(CloseComReqConf, signal.getDataPtrSend());
   req->xxxBlockRef = numberToRef(clnt->m_blockNo, theOwnId);
 
   if (clnt) {
@@ -2630,12 +2619,12 @@ void TransporterFacade::propose_poll_owner() {
         (recv_client && recv_client->m_poll.m_poll_queue &&
          recv_client->m_state == ReceiveThreadClient::ACTIVE)
             ? recv_client
-            // Avoid the recv_client as it is not ACTIVE
-            : (m_poll_queue_tail == recv_client &&
-               m_poll_queue_tail->m_poll.m_prev != nullptr)
-                  // 'tail' is the recv_client, prefer another
-                  ? m_poll_queue_tail->m_poll.m_prev
-                  : m_poll_queue_tail;
+        // Avoid the recv_client as it is not ACTIVE
+        : (m_poll_queue_tail == recv_client &&
+           m_poll_queue_tail->m_poll.m_prev != nullptr)
+            // 'tail' is the recv_client, prefer another
+            ? m_poll_queue_tail->m_poll.m_prev
+            : m_poll_queue_tail;
 
     /**
      * Note: we can only try lock here, to prevent potential deadlock

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -572,7 +572,7 @@ socketpair(int family, int sock_type, int protocol) {
   const auto second_res = impl::socket::accept(listener, nullptr, nullptr);
   if (!second_res) return stdx::unexpected(second_res.error());
 
-  first_fd_guard.commit();
+  first_fd_guard.release();
 
   auto second_fd = second_res.value();
 

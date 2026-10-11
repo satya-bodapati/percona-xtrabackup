@@ -1,4 +1,4 @@
-# Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -28,7 +28,10 @@ ADD_HARNESS_PLUGIN(rest_metadata_cache
   rest_metadata_cache_status.cc
   rest_clusters_list.cc
   rest_clusters_nodes.cc
-  REQUIRES router_lib;metadata_cache;http_server;rest_api
+  REQUIRES
+  metadata_cache
+  http_server_lib
+  rest_api
   DESTINATION "${ROUTER_INSTALL_PLUGINDIR}")
 
 TARGET_INCLUDE_DIRECTORIES(rest_metadata_cache

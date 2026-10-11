@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -70,6 +70,7 @@
 #include <deque>
 #include <map>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -294,7 +295,23 @@ enum enum_slave_apply_event_and_update_pos_retval {
 };
 
 static int process_io_rotate(Master_info *mi, Rotate_log_event *rev);
-static bool wait_for_relay_log_space(Relay_log_info *rli);
+
+/// @brief Checks whether relay log space will be exceeded after queueing
+/// additional 'queued_size' bytes. If yes, function will
+/// request relay log purge, rotate the relay log and wait for notification
+/// from coordinator
+/// @retval true Event may be queued by the receiver
+/// @retval false Failed to reclaim required relay log space
+static inline bool wait_for_relay_log_space(Relay_log_info *rli,
+                                            std::size_t queued_size);
+/// @brief Checks whether relay log space limit will be exceeded after queueing
+/// additional 'queued_size' bytes
+/// @param rli Pointer to connection metadata object for the considered channel
+/// @param queued_size Number of bytes we want to queue
+/// @retval true Limit exceeded
+/// @retval false Current size + 'queued_size' is within limits
+static inline bool exceeds_relay_log_limit(Relay_log_info *rli,
+                                           std::size_t queued_size);
 static inline bool io_slave_killed(THD *thd, Master_info *mi);
 static inline bool monitor_io_replica_killed(THD *thd, Master_info *mi);
 static inline bool is_autocommit_off(THD *thd);
@@ -3072,71 +3089,52 @@ slave_killed_err:
   return 2;
 }
 
-static bool wait_for_relay_log_space(Relay_log_info *rli) {
+static bool exceeds_relay_log_limit(Relay_log_info *rli,
+                                    std::size_t queued_size) {
+  return (rli->log_space_limit != 0 &&
+          rli->log_space_limit < rli->log_space_total + queued_size);
+}
+
+static bool wait_for_relay_log_space(Relay_log_info *rli,
+                                     std::size_t queued_size) {
   bool slave_killed = false;
   Master_info *mi = rli->mi;
   PSI_stage_info old_stage;
   THD *thd = mi->info_thd;
   DBUG_TRACE;
 
+  // from now on, until the time is_receiver_waiting_for_rl_space is
+  // cleared, every rotation made by coordinator and executed
+  // outside of a transaction, will purge the currently rotated log
+  rli->is_receiver_waiting_for_rl_space.store(true);
+
+  // rotate now to avoid deadlock with FLUSH RELAY LOGS, which calls
+  // rotate_relay_log with a default locking order, see rotate_relay_log
+  // Before rotation, is_receiver_waiting_for_rl_space is already set, so
+  // after exiting the rotate_relay_log, coordinator executing rotation
+  // requested here will see the correct value of the
+  // 'is_receiver_waiting_for_rl_space' and will purge applied logs
+  // with force option
+  rotate_relay_log(mi, true, true, true);
+
+  // capture the log name to which we rotated:
+  mysql_mutex_lock(rli->relay_log.get_log_lock());
+  std::string receiver_log = rli->relay_log.get_log_fname();
+  mysql_mutex_unlock(rli->relay_log.get_log_lock());
+
   mysql_mutex_lock(&rli->log_space_lock);
   thd->ENTER_COND(&rli->log_space_cond, &rli->log_space_lock,
                   &stage_waiting_for_relay_log_space, &old_stage);
-  while (rli->log_space_limit < rli->log_space_total &&
+  while (exceeds_relay_log_limit(rli, queued_size) &&
          !(slave_killed = io_slave_killed(thd, mi)) &&
-         !rli->ignore_log_space_limit)
+         rli->coordinator_log_after_purge != receiver_log) {
     mysql_cond_wait(&rli->log_space_cond, &rli->log_space_lock);
-
-  /*
-    Makes the IO thread read only one event at a time
-    until the SQL thread is able to purge the relay
-    logs, freeing some space.
-
-    Therefore, once the SQL thread processes this next
-    event, it goes to sleep (no more events in the queue),
-    sets ignore_log_space_limit=true and wakes the IO thread.
-    However, this event may have been enough already for
-    the SQL thread to purge some log files, freeing
-    rli->log_space_total .
-
-    This guarantees that the SQL and IO thread move
-    forward only one event at a time (to avoid deadlocks),
-    when the relay space limit is reached. It also
-    guarantees that when the SQL thread is prepared to
-    rotate (to be able to purge some logs), the IO thread
-    will know about it and will rotate.
-
-    NOTE: The ignore_log_space_limit is only set when the SQL
-          thread sleeps waiting for events.
-
-   */
-  if (rli->ignore_log_space_limit) {
-#ifndef NDEBUG
-    {
-      char llbuf1[22], llbuf2[22];
-      DBUG_PRINT("info", ("log_space_limit=%s "
-                          "log_space_total=%s "
-                          "ignore_log_space_limit=%d "
-                          "sql_force_rotate_relay=%d",
-                          llstr(rli->log_space_limit, llbuf1),
-                          llstr(rli->log_space_total, llbuf2),
-                          (int)rli->ignore_log_space_limit,
-                          (int)rli->sql_force_rotate_relay));
-    }
-#endif
-    if (rli->sql_force_rotate_relay) {
-      DBUG_EXECUTE_IF("rpl_before_forced_rotate", {
-        rpl_replica_debug_point(DBUG_RPL_S_BEFORE_FORCED_ROTATE);
-      });
-      rotate_relay_log(mi, true, true, false);
-      rli->sql_force_rotate_relay = false;
-    }
-
-    rli->ignore_log_space_limit = false;
   }
-
   mysql_mutex_unlock(&rli->log_space_lock);
   thd->EXIT_COND(&old_stage);
+
+  rli->is_receiver_waiting_for_rl_space.store(false);
+
   return slave_killed;
 }
 
@@ -4040,9 +4038,8 @@ int init_replica_thread(THD *thd, SLAVE_THD_TYPE thd_type) {
 #endif
   thd->system_thread = (thd_type == SLAVE_THD_WORKER)
                            ? SYSTEM_THREAD_SLAVE_WORKER
-                           : (thd_type == SLAVE_THD_SQL)
-                                 ? SYSTEM_THREAD_SLAVE_SQL
-                                 : SYSTEM_THREAD_SLAVE_IO;
+                       : (thd_type == SLAVE_THD_SQL) ? SYSTEM_THREAD_SLAVE_SQL
+                                                     : SYSTEM_THREAD_SLAVE_IO;
   thd->get_protocol_classic()->init_net(nullptr);
   thd->slave_thread = true;
   thd->enable_slow_log = opt_log_slow_replica_statements;
@@ -4155,6 +4152,10 @@ static int request_dump(THD *thd, MYSQL *mysql, MYSQL_RPL *rpl, Master_info *mi,
   binlog_flags |= USE_HEARTBEAT_EVENT_V2;
 
   *suppress_warnings = false;
+  DBUG_EXECUTE_IF("simulate_reconnect_after_failed_binlog_dump_twice", {
+    static uint failure_count = 0;
+    if (++failure_count <= 2) return 1;
+  });
   if (RUN_HOOK(binlog_relay_io, before_request_transmit,
                (thd, mi, binlog_flags)))
     return 1;
@@ -4524,8 +4525,9 @@ apply_event_and_update_pos(Log_event **ptr_ev, THD *thd, Relay_log_info *rli) {
 
     if (!exec_res && (ev->worker != rli)) {
       if (ev->worker) {
-        Slave_job_item item = {ev, rli->get_event_relay_log_number(),
-                               rli->get_event_start_pos()};
+        Slave_job_item item = {ev, rli->get_event_start_pos(), {'\0'}};
+        if (rli->get_event_relay_log_name())
+          strcpy(item.event_relay_log_name, rli->get_event_relay_log_name());
         Slave_job_item *job_item = &item;
         Slave_worker *w = (Slave_worker *)ev->worker;
         // specially marked group typically with OVER_MAX_DBS_IN_EVENT_MTS db:s
@@ -5268,7 +5270,8 @@ static int try_to_reconnect(THD *thd, MYSQL *mysql, Master_info *mi,
   thd->clear_active_vio();
   end_server(mysql);
   if ((*retry_count)++) {
-    if (*retry_count > mi->retry_count) return 1;  // Don't retry forever
+    auto is_unlimited_retries{mi->retry_count == 0};
+    if (!is_unlimited_retries && *retry_count > mi->retry_count) return 1;
     slave_sleep(thd, mi->connect_retry, io_slave_killed, mi);
   }
   if (check_io_slave_killed(thd, mi,
@@ -5611,6 +5614,45 @@ extern "C" void *handle_slave_io(void *arg) {
           };);
         }
 #endif
+        std::size_t queued_size = event_len;
+        if (Log_event_type_helper::is_any_gtid_event(
+                static_cast<Log_event_type>(event_buf[EVENT_TYPE_OFFSET]))) {
+          mysql_mutex_lock(rli->relay_log.get_log_lock());
+          Gtid_log_event gtid_ev(event_buf, mi->get_mi_description_event());
+          mysql_mutex_unlock(rli->relay_log.get_log_lock());
+          if (!gtid_ev.is_valid()) {
+            mi->report(ERROR_LEVEL, ER_REPLICA_RELAY_LOG_WRITE_FAILURE,
+                       ER_THD(thd, ER_REPLICA_RELAY_LOG_WRITE_FAILURE),
+                       "could not queue event from source");
+            goto err;
+          }
+          queued_size = gtid_ev.get_trx_length();
+        }
+
+        // If the used space exceeds the relay log limit, and the current
+        // position is on a transaction boundary, and the received event is not
+        // a FD/rotate event, wait for the applier to free space. The exception
+        // for FD/rotate events is important in case the server has just
+        // restarted with the relay log ending in a half transaction. In this
+        // case, the applier has no information indicating that the transaction
+        // is half-received, so it cannot rollback the transaction and free disk
+        // space. But when we write the FD/rotate events, the applier can deduce
+        // that the transaction is half-received, and then it can rollback and
+        // free disk space as needed.
+        if (rli->log_space_limit && exceeds_relay_log_limit(rli, queued_size) &&
+            !mi->transaction_parser.is_inside_transaction() &&
+            !(event_buf[EVENT_TYPE_OFFSET] ==
+                  mysql::binlog::event::FORMAT_DESCRIPTION_EVENT ||
+              event_buf[EVENT_TYPE_OFFSET] ==
+                  mysql::binlog::event::ROTATE_EVENT)) {
+          if (wait_for_relay_log_space(rli, queued_size)) {
+            LogErr(
+                ERROR_LEVEL,
+                ER_RPL_REPLICA_IO_THREAD_ABORTED_WAITING_FOR_RELAY_LOG_SPACE);
+            goto err;
+          }
+        }
+
         QUEUE_EVENT_RESULT queue_res = queue_event(mi, event_buf, event_len);
         if (queue_res == QUEUE_EVENT_ERROR_QUEUING) {
           mi->report(ERROR_LEVEL, ER_REPLICA_RELAY_LOG_WRITE_FAILURE,
@@ -5652,24 +5694,13 @@ extern "C" void *handle_slave_io(void *arg) {
 
         /*
           See if the relay logs take too much space.
-          We don't lock mi->rli->log_space_lock here; this dirty read saves time
-          and does not introduce any problem:
-          - if mi->rli->ignore_log_space_limit is 1 but becomes 0 just after (so
-          the clean value is 0), then we are reading only one more event as we
-          should, and we'll block only at the next event. No big deal.
-          - if mi->rli->ignore_log_space_limit is 0 but becomes 1 just after (so
-          the clean value is 1), then we are going into
-          wait_for_relay_log_space() for no reason, but this function will do a
-          clean read, notice the clean value and exit immediately.
         */
 #ifndef NDEBUG
         {
           char llbuf1[22], llbuf2[22];
-          DBUG_PRINT("info", ("log_space_limit=%s log_space_total=%s "
-                              "ignore_log_space_limit=%d",
+          DBUG_PRINT("info", ("log_space_limit=%s log_space_total=%s ",
                               llstr(rli->log_space_limit, llbuf1),
-                              llstr(rli->log_space_total, llbuf2),
-                              (int)rli->ignore_log_space_limit));
+                              llstr(rli->log_space_total, llbuf2)));
         }
 #endif
 
@@ -5678,15 +5709,6 @@ extern "C" void *handle_slave_io(void *arg) {
           rli->log_space_total = 20;
         };);
 
-        if (rli->log_space_limit &&
-            rli->log_space_limit < rli->log_space_total &&
-            !rli->ignore_log_space_limit)
-          if (wait_for_relay_log_space(rli)) {
-            LogErr(
-                ERROR_LEVEL,
-                ER_RPL_REPLICA_IO_THREAD_ABORTED_WAITING_FOR_RELAY_LOG_SPACE);
-            goto err;
-          }
         DBUG_EXECUTE_IF("flush_after_reading_user_var_event", {
           if (ev_type == mysql::binlog::event::USER_VAR_EVENT)
             rpl_replica_debug_point(DBUG_RPL_S_FLUSH_AFTER_USERV_EV);
@@ -6763,7 +6785,7 @@ static void slave_stop_workers(Relay_log_info *rli, bool *mts_inited) {
   if (!rli->workers.empty()) {
     for (int i = static_cast<int>(rli->workers.size()) - 1; i >= 0; i--) {
       Slave_worker *w = rli->workers[i];
-      struct slave_job_item item = {nullptr, 0, 0};
+      struct slave_job_item item = {nullptr, 0, {'\0'}};
       struct slave_job_item *job_item = &item;
       mysql_mutex_lock(&w->jobs_lock);
 
@@ -7155,11 +7177,6 @@ extern "C" void *handle_slave_sql(void *arg) {
 
     DEBUG_SYNC(thd, "after_start_replica");
 
-    // tell the I/O thread to take relay_log_space_limit into account from now
-    // on
-    mysql_mutex_lock(&rli->log_space_lock);
-    rli->ignore_log_space_limit = false;
-    mysql_mutex_unlock(&rli->log_space_lock);
     rli->trans_retries = 0;  // start from "no error"
     DBUG_PRINT("info", ("rli->trans_retries: %lu", rli->trans_retries));
 
@@ -7275,7 +7292,15 @@ extern "C" void *handle_slave_sql(void *arg) {
       if (ev != nullptr && rli->is_parallel_exec() &&
           rli->current_mts_submode != nullptr) {
         if (rli->current_mts_submode->set_multi_threaded_applier_context(*rli,
-                                                                         *ev)) {
+                                                                         *ev) ||
+            DBUG_EVALUATE_IF("error_on_set_mta_context_main", true, false)) {
+          rli->report(ERROR_LEVEL, ER_REPLICA_FATAL_ERROR,
+                      ER_THD(thd, ER_REPLICA_FATAL_ERROR),
+                      "Replication encountered an internal error and could not "
+                      "complete. "
+                      "Try stopping and starting replication.");
+          delete ev;
+          ev = nullptr;
           goto err;
         }
       }
@@ -7379,8 +7404,6 @@ extern "C" void *handle_slave_sql(void *arg) {
                ("Signaling possibly waiting source_pos_wait() functions"));
     mysql_cond_broadcast(&rli->data_cond);
     mysql_mutex_unlock(&rli->data_lock);
-    rli->ignore_log_space_limit = false; /* don't need any lock */
-    rli->sql_force_rotate_relay = false;
     /* we die so won't remember charset - re-update them on next thread start */
     rli->cached_charset_invalidate();
     rli->save_temporary_tables = thd->temporary_tables;
@@ -7567,6 +7590,94 @@ int heartbeat_queue_event(bool is_valid, Master_info *&mi,
   return 0;
 }
 
+/// Check whether queue_event() constructs this event type directly instead of
+/// using the general deserialization path.
+///
+/// @param event_type The incoming event type.
+///
+/// @retval true if queue_event() uses direct construction for this event type.
+/// @retval false otherwise.
+static bool queue_event_uses_direct_construction(Log_event_type event_type) {
+  return event_type == mysql::binlog::event::ROTATE_EVENT ||
+         event_type == mysql::binlog::event::HEARTBEAT_LOG_EVENT ||
+         event_type == mysql::binlog::event::HEARTBEAT_LOG_EVENT_V2 ||
+         event_type == mysql::binlog::event::TRANSACTION_PAYLOAD_EVENT ||
+         event_type == mysql::binlog::event::GTID_LOG_EVENT ||
+         event_type == mysql::binlog::event::GTID_TAGGED_LOG_EVENT ||
+         event_type == mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT;
+}
+
+/**
+  This function checks if a format description event has been processed and
+  stored in the receiver thread context.
+
+  @note In case the format description event is missing, this function writes
+  an error to the error log, but does not add it to the diagnostics area of the
+  receiver thread. The error code is:
+  ER_RPL_REPLICA_QUEUE_EVENT_FAILED_INVALID_CONFIGURATION
+
+  @param mi the receiver thread context.
+  @return true if the fd event has not been processed and saved, false
+  otherwise.
+*/
+static bool is_fd_event_saved_in_context(Master_info &mi) {
+  DBUG_TRACE;
+  if (mi.get_mi_description_event() == nullptr) {
+    LogErr(ERROR_LEVEL, ER_RPL_REPLICA_QUEUE_EVENT_FAILED_INVALID_CONFIGURATION,
+           mi.get_channel());
+    return false;
+  }
+
+  return true;
+}
+
+/**
+  This function checks if the format description event exists
+  and whether it is able to be used with the event types.
+
+  @note this function, in case it finds the format description event unusable,
+  writes an error to the error log and pushes that error to the diagnostics
+  area of the receiver thread. The error code is: ER_REPLICA_CORRUPT_EVENT .
+
+  @param mi the io thread context, containing the current format description
+            event
+  @param event_type the event type to handle together with the format
+                    description event
+  @return false if the event is not usable, true otherwise.
+*/
+static bool is_fd_event_saved_in_context_usable_with_event_type(
+    Master_info &mi, Log_event_type event_type) {
+  DBUG_TRACE;
+  auto fde{mi.get_mi_description_event()};
+
+  /* on debug builds assert, on production builds, return false */
+  assert(fde != nullptr);
+  if (fde == nullptr) return false;
+
+  /* make the fde have fewer event types than those that come down the pipe. */
+  DBUG_EXECUTE_IF("queue_event_unknown_event_type_by_fd_event", {
+    auto new_post_header_len_size{mysql::binlog::event::START_EVENT_V3};
+    fde->post_header_len.resize(new_post_header_len_size);
+    fde->number_of_event_types = new_post_header_len_size;
+  });
+
+  DBUG_PRINT(
+      "info",
+      ("number of event types: %d, post_header_len size: %lu, event_type: %d",
+       fde->number_of_event_types, fde->post_header_len.size(), event_type));
+
+  if (event_type > fde->number_of_event_types) {
+    mi.report(ERROR_LEVEL, ER_REPLICA_CORRUPT_EVENT,
+              "Event type '%s' is not recognized by the format description "
+              "event currently in use. Please, restart the receiver thread. "
+              "If the problem persists, inspecting the relay logs may help "
+              "diagnosing the issue.",
+              Log_event::get_type_str(event_type));
+    return false;
+  }
+  return true;
+}
+
 /**
   Store an event received from the master connection into the relay
   log.
@@ -7681,6 +7792,22 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
     goto err;
   }
 
+  if (queue_event_uses_direct_construction(event_type) &&
+      (event_len < LOG_EVENT_MINIMAL_HEADER_LEN ||
+       event_len != uint4korr(buf + EVENT_LEN_OFFSET))) {
+    std::stringstream ss;
+    const uint32 header_event_len = event_len < LOG_EVENT_MINIMAL_HEADER_LEN
+                                        ? 0
+                                        : uint4korr(buf + EVENT_LEN_OFFSET);
+    ss << "Rejected malformed " << Log_event::get_type_str(event_type)
+       << " event from source: received packet length " << event_len
+       << " does not match event header length " << header_event_len
+       << ". Verify the source and binary log stream integrity.";
+    mi->report(ERROR_LEVEL, ER_REPLICA_CREATE_EVENT_FAILURE, "%s",
+               ss.str().c_str());
+    goto err;
+  }
+
   /*
     From now, and up to finishing queuing the event, no other thread is allowed
     to write to the relay log, or to rotate it.
@@ -7689,11 +7816,10 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
   assert(lock_count == 0);
   lock_count = 1;
 
-  if (mi->get_mi_description_event() == nullptr) {
-    LogErr(ERROR_LEVEL, ER_RPL_REPLICA_QUEUE_EVENT_FAILED_INVALID_CONFIGURATION,
-           mi->get_channel());
+  /* format description event checks */
+  if (!is_fd_event_saved_in_context(*mi)) goto err;
+  if (!is_fd_event_saved_in_context_usable_with_event_type(*mi, event_type))
     goto err;
-  }
 
   /*
     Simulate an unknown ignorable log event by rewriting a Xid
@@ -7777,10 +7903,35 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
     case mysql::binlog::event::ROTATE_EVENT: {
       Format_description_log_event *fde = mi->get_mi_description_event();
       enum_binlog_checksum_alg fde_checksum_alg = fde->footer()->checksum_alg;
+      const bool is_fake_rotate = uint4korr(&buf[0]) == 0;
+      const bool add_checksum_to_fake_rotate =
+          is_fake_rotate &&
+          checksum_alg == mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF &&
+          mi->rli->relay_log.relay_log_checksum_alg !=
+              mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF;
+      const bool strip_checksum_from_fake_rotate =
+          is_fake_rotate &&
+          checksum_alg != mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF &&
+          mi->rli->relay_log.relay_log_checksum_alg ==
+              mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF;
+
       if (fde_checksum_alg != checksum_alg)
         fde->footer()->checksum_alg = checksum_alg;
       Rotate_log_event rev(buf, fde);
       fde->footer()->checksum_alg = fde_checksum_alg;
+
+      if ((add_checksum_to_fake_rotate &&
+           event_len > sizeof(rot_buf) - BINLOG_CHECKSUM_LEN) ||
+          (strip_checksum_from_fake_rotate &&
+           (event_len < BINLOG_CHECKSUM_LEN ||
+            event_len - BINLOG_CHECKSUM_LEN > sizeof(rot_buf)))) {
+        mi->report(ERROR_LEVEL, ER_REPLICA_RELAY_LOG_WRITE_FAILURE,
+                   "Received oversized rotate event. Please retry the "
+                   "connection. If the problem persists, investigate the "
+                   "source of the invalid event and verify the "
+                   "source-replica connection.");
+        goto err;
+      }
 
       if (unlikely(process_io_rotate(mi, &rev))) {
         // This error will be reported later at handle_slave_io().
@@ -7799,11 +7950,9 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
                 to compute checksum for its first FD event for RL
                 the fake Rotate gets checksummed here.
       */
-      if (uint4korr(&buf[0]) == 0 &&
-          checksum_alg == mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF &&
-          mi->rli->relay_log.relay_log_checksum_alg !=
-              mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF) {
+      if (add_checksum_to_fake_rotate) {
         ha_checksum rot_crc = checksum_crc32(0L, nullptr, 0);
+        assert(event_len <= sizeof(rot_buf) - BINLOG_CHECKSUM_LEN);
         event_len += BINLOG_CHECKSUM_LEN;
         memcpy(rot_buf, buf, event_len - BINLOG_CHECKSUM_LEN);
         int4store(&rot_buf[EVENT_LEN_OFFSET],
@@ -7820,27 +7969,27 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
         save_buf = buf;
         buf = rot_buf;
       } else
-          /*
-            RSC_2: If NM \and fake Rotate \and slave does not compute checksum
-            the fake Rotate's checksum is stripped off before relay-logging.
-          */
-          if (uint4korr(&buf[0]) == 0 &&
-              checksum_alg != mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF &&
-              mi->rli->relay_log.relay_log_checksum_alg ==
-                  mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF) {
-        event_len -= BINLOG_CHECKSUM_LEN;
-        memcpy(rot_buf, buf, event_len);
-        int4store(&rot_buf[EVENT_LEN_OFFSET],
-                  uint4korr(rot_buf + EVENT_LEN_OFFSET) - BINLOG_CHECKSUM_LEN);
-        assert(event_len == uint4korr(&rot_buf[EVENT_LEN_OFFSET]));
-        assert(mi->get_mi_description_event()->common_footer->checksum_alg ==
-               mi->rli->relay_log.relay_log_checksum_alg);
-        /* the first one */
-        assert(mi->checksum_alg_before_fd !=
-               mysql::binlog::event::BINLOG_CHECKSUM_ALG_UNDEF);
-        save_buf = buf;
-        buf = rot_buf;
-      }
+        /*
+          RSC_2: If NM \and fake Rotate \and slave does not compute checksum
+          the fake Rotate's checksum is stripped off before relay-logging.
+        */
+        if (strip_checksum_from_fake_rotate) {
+          assert(event_len >= BINLOG_CHECKSUM_LEN);
+          assert(event_len - BINLOG_CHECKSUM_LEN <= sizeof(rot_buf));
+          event_len -= BINLOG_CHECKSUM_LEN;
+          memcpy(rot_buf, buf, event_len);
+          int4store(
+              &rot_buf[EVENT_LEN_OFFSET],
+              uint4korr(rot_buf + EVENT_LEN_OFFSET) - BINLOG_CHECKSUM_LEN);
+          assert(event_len == uint4korr(&rot_buf[EVENT_LEN_OFFSET]));
+          assert(mi->get_mi_description_event()->common_footer->checksum_alg ==
+                 mi->rli->relay_log.relay_log_checksum_alg);
+          /* the first one */
+          assert(mi->checksum_alg_before_fd !=
+                 mysql::binlog::event::BINLOG_CHECKSUM_ALG_UNDEF);
+          save_buf = buf;
+          buf = rot_buf;
+        }
       /*
         Now the I/O thread has just changed its mi->get_master_log_name(), so
         incrementing mi->get_master_log_pos() is nonsense.
@@ -7902,10 +8051,10 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
         HB (heartbeat) cannot come before RL (Relay)
       */
       Heartbeat_log_event hb(buf, mi->get_mi_description_event());
-      std::string mi_log_filename{mi->get_master_log_name() != nullptr
-                                      ? mi->get_master_log_name()
-                                      : ""};
-      if (heartbeat_queue_event(hb.is_valid(), mi, hb.get_log_ident(),
+      const char *hb_log_ident = hb.is_valid() && hb.get_log_ident() != nullptr
+                                     ? hb.get_log_ident()
+                                     : "";
+      if (heartbeat_queue_event(hb.is_valid(), mi, hb_log_ident,
                                 hb.header()->log_pos, inc_pos, do_flush_mi))
         goto err;
       else
@@ -7920,9 +8069,6 @@ QUEUE_EVENT_RESULT queue_event(Master_info *mi, const char *buf,
       auto hb_log_filename = hb.get_log_filename();
       auto hb_log_position = hb.get_log_position() == 0 ? hb.header()->log_pos
                                                         : hb.get_log_position();
-      std::string mi_log_filename{mi->get_master_log_name() != nullptr
-                                      ? mi->get_master_log_name()
-                                      : ""};
       if (heartbeat_queue_event(hb.is_valid(), mi, hb_log_filename,
                                 hb_log_position, inc_pos, do_flush_mi))
         goto err;
@@ -8566,14 +8712,6 @@ static int safe_reconnect(THD *thd, MYSQL *mysql, Master_info *mi,
                                          host, port);
 }
 
-/*
-  Rotate a relay log (this is used only by FLUSH LOGS; the automatic rotation
-  because of size is simpler because when we do it we already have all relevant
-  locks; here we don't, so this function is mainly taking locks).
-  Returns nothing as we cannot catch any error (MYSQL_BIN_LOG::new_file()
-  is void).
-*/
-
 int rotate_relay_log(Master_info *mi, bool log_master_fd, bool need_lock,
                      bool need_log_space_lock) {
   DBUG_TRACE;
@@ -8597,7 +8735,6 @@ int rotate_relay_log(Master_info *mi, bool log_master_fd, bool need_lock,
     goto end;
   }
 
-  /* If the relay log is closed, new_file() will do nothing. */
   if (log_master_fd)
     error =
         rli->relay_log.new_file_without_locking(mi->get_mi_description_event());

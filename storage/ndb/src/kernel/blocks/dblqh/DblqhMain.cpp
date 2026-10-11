@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -98,6 +98,7 @@
 #include "../suma/Suma.hpp"
 #include "DblqhCommon.hpp"
 #include "portlib/mt-asm.h"
+#include "portlib/ndb_file.h"
 
 #include "../backup/Backup.hpp"
 #include "../dbtux/Dbtux.hpp"
@@ -111,32 +112,32 @@
 #include <EventLogger.hpp>
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_COPY_ACTIVE 1
-//#define DEBUG_LOCAL_LCP 1
-//#define DEBUG_EMPTY_LCP 1
-//#define DEBUG_LAST_LCP 1
-//#define DEBUG_NEWEST_GCI 1
-//#define ABORT_TRACE 1
-//#define DO_TRANSIENT_POOL_STAT 1
-//#define DEBUG_EXTRA_LCP 1
-//#define DEBUG_LCP 1
-//#define DEBUG_LCP_RESTORE
-//#define DEBUG_COPY 1
-//#define DEBUG_GCP 1
-//#define DEBUG_CUT_REDO 1
-//#define DEBUG_LOCAL_LCP_EXTRA 1
-//#define DEBUG_REDO_FLAG 1
-//#define DEBUG_TRANSACTION_TIMEOUT 1
-//#define DEBUG_SCHEMA_VERSION 1
-//#define DEBUG_EARLY_LCP 1
-//#define DEBUG_NODE_STATUS 1
-//#define DEBUG_INDEX_BUILD 1
-//#define DEBUG_RESTART_SYNCH 1
-//#define DEBUG_START_PHASE9 1
-//#define DEBUG_COMMITTED_WORDS 1
-//#define DEBUG_RESTORE 1
-//#define NDB_DEBUG_REDO_EXEC 1
-//#define NDB_DEBUG_REDO_REC 1
+// #define DEBUG_COPY_ACTIVE 1
+// #define DEBUG_LOCAL_LCP 1
+// #define DEBUG_EMPTY_LCP 1
+// #define DEBUG_LAST_LCP 1
+// #define DEBUG_NEWEST_GCI 1
+// #define ABORT_TRACE 1
+// #define DO_TRANSIENT_POOL_STAT 1
+// #define DEBUG_EXTRA_LCP 1
+// #define DEBUG_LCP 1
+// #define DEBUG_LCP_RESTORE
+// #define DEBUG_COPY 1
+// #define DEBUG_GCP 1
+// #define DEBUG_CUT_REDO 1
+// #define DEBUG_LOCAL_LCP_EXTRA 1
+// #define DEBUG_REDO_FLAG 1
+// #define DEBUG_TRANSACTION_TIMEOUT 1
+// #define DEBUG_SCHEMA_VERSION 1
+// #define DEBUG_EARLY_LCP 1
+// #define DEBUG_NODE_STATUS 1
+// #define DEBUG_INDEX_BUILD 1
+// #define DEBUG_RESTART_SYNCH 1
+// #define DEBUG_START_PHASE9 1
+// #define DEBUG_COMMITTED_WORDS 1
+// #define DEBUG_RESTORE 1
+// #define NDB_DEBUG_REDO_EXEC 1
+// #define NDB_DEBUG_REDO_REC 1
 #endif
 
 #ifdef DEBUG_NEWEST_GCI
@@ -372,7 +373,7 @@
 
 // Use LQH_DEBUG to print messages that should be
 // seen only when we debug the product
-//#define USE_LQH_DEBUG
+// #define USE_LQH_DEBUG
 #ifdef USE_LQH_DEBUG
 #define LQH_DEBUG(x) ndbout << "DBLQH: " << x << endl;
 static NdbOut &operator<<(NdbOut &out,
@@ -444,8 +445,8 @@ static NdbOut &operator<<(NdbOut &out, Operation_t op) {
 #define LQH_DEBUG(x)
 #endif
 
-//#define MARKER_TRACE 0
-//#define TRACE_SCAN_TAKEOVER 1
+// #define MARKER_TRACE 0
+// #define TRACE_SCAN_TAKEOVER 1
 
 #ifdef NDB_DEBUG_REDO_REC
 static int DEBUG_REDO_REC = 1;
@@ -722,14 +723,33 @@ Uint32 Dblqh::count_free_log_pages(LogPartRecord *logPartPtrP) {
   Uint64 space_per_page =
       ZPAGE_SIZE - (ZPAGE_HEADER_SIZE + (ZPAGE_SIZE / ZPAGES_IN_MBYTE));
   Uint64 booked_log_pages = booked_log_words / space_per_page + 1;
+  Uint32 freeCount = 0;
   if (noOfFreeLogPages <= booked_log_pages) {
     jam();
-    return 0;
+    freeCount = 0;
   } else {
     jam();
     Uint64 free_pages = noOfFreeLogPages - booked_log_pages;
-    return Uint32(free_pages);
+    freeCount = Uint32(free_pages);
   }
+
+  if (unlikely(freeCount < ZMIN_LOG_PAGES_OPERATION)) {
+    if (unlikely(logPartPtrP->m_logged_buffer_full == 0)) {
+      jam();
+      g_eventLogger->info("LQH %u : Redo log part %u : Redo buffer full",
+                          instance(), logPartPtrP->logPartNo);
+      logPartPtrP->m_logged_buffer_full = 1;
+    }
+  } else if (unlikely(logPartPtrP->m_logged_buffer_full == 1)) {
+    if (freeCount > ((2 * logPartPtrP->logPageCount) / 10)) {
+      jam();
+      /* At least 20% free, log */
+      g_eventLogger->info("LQH %u : Redo log part %u : Redo buffer not full",
+                          instance(), logPartPtrP->logPartNo);
+      logPartPtrP->m_logged_buffer_full = 0;
+    }
+  }
+  return freeCount;
 }
 
 void Dblqh::queued_log_write(Signal *signal, LogPartRecord *logPartPtrP) {
@@ -2107,6 +2127,8 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
   ndbrequire(!ndb_mgm_get_int_parameter(p, CFG_DB_DISCLESS, &c_diskless));
   c_o_direct = true;
   ndb_mgm_get_int_parameter(p, CFG_DB_O_DIRECT, &c_o_direct);
+  if (!ndb_file::have_direct_io_support())
+    c_o_direct = 0;  // Message in NDBFS::execREAD_CONFIG
 
   Uint32 encrypted_filesystem = 0;
   ndb_mgm_get_int_parameter(p, CFG_DB_ENCRYPTED_FILE_SYSTEM,
@@ -2646,7 +2668,7 @@ void Dblqh::execTUP_ADD_ATTRREF(Signal *signal) {
   jamEntry();
   addfragptr.i = signal->theData[0];
   ptrCheckGuard(addfragptr, caddfragrecFileSize, addFragRecord);
-  const Uint32 errorCode = terrorCode = signal->theData[1];
+  const Uint32 errorCode = signal->theData[1];
 
   abortAddFragOps(signal);
 
@@ -2866,14 +2888,17 @@ void Dblqh::execLQHFRAGREQ(Signal *signal) {
 
   if (getFragmentrec(req->fragId)) {
     jam();
-    fragrefLab(signal, terrorCode, req);
+    fragrefLab(signal, ZNO_ADD_FRAGREC, req);
     return;
   }  // if
 
-  if (!insertFragrec(signal, req->fragId)) {
-    jam();
-    fragrefLab(signal, terrorCode, req);
-    return;
+  {
+    const Uint32 insertFragErr = insertFragrec(signal, req->fragId);
+    if (unlikely(insertFragErr != ZOK)) {
+      jam();
+      fragrefLab(signal, insertFragErr, req);
+      return;
+    }
   }  // if
 
   Uint32 copyType = req->requestInfo & 3;
@@ -3349,30 +3374,28 @@ void Dblqh::insert_new_fragments_into_lcp(Signal *signal) {
 
 void Dblqh::execTAB_COMMITREQ(Signal *signal) {
   jamEntry();
-  Uint32 dihPtr = signal->theData[0];
-  BlockReference dihBlockref = signal->theData[1];
+  const Uint32 senderData = signal->theData[0];
+  const BlockReference senderRef = signal->theData[1];
   tabptr.i = signal->theData[2];
 
   if (tabptr.i >= ctabrecFileSize) {
     jam();
-    terrorCode = ZTAB_FILE_SIZE;
-    signal->theData[0] = dihPtr;
+    signal->theData[0] = senderData;
     signal->theData[1] = cownNodeid;
     signal->theData[2] = tabptr.i;
-    signal->theData[3] = terrorCode;
-    sendSignal(dihBlockref, GSN_TAB_COMMITREF, signal, 4, JBB);
+    signal->theData[3] = ZTAB_FILE_SIZE;
+    sendSignal(senderRef, GSN_TAB_COMMITREF, signal, 4, JBB);
     return;
   }  // if
   ptrAss(tabptr, tablerec);
   if (tabptr.p->tableStatus != Tablerec::ADD_TABLE_ONGOING) {
     jam();
-    terrorCode = ZTAB_STATE_ERROR;
-    signal->theData[0] = dihPtr;
+    signal->theData[0] = senderData;
     signal->theData[1] = cownNodeid;
     signal->theData[2] = tabptr.i;
-    signal->theData[3] = terrorCode;
+    signal->theData[3] = ZTAB_STATE_ERROR;
     signal->theData[4] = tabptr.p->tableStatus;
-    sendSignal(dihBlockref, GSN_TAB_COMMITREF, signal, 5, JBB);
+    sendSignal(senderRef, GSN_TAB_COMMITREF, signal, 5, JBB);
     ndbabort();
     return;
   }  // if
@@ -3387,10 +3410,10 @@ void Dblqh::execTAB_COMMITREQ(Signal *signal) {
   DEB_SCHEMA_VERSION(
       ("(%u)tab: %u tableStatus = TABLE_DEFINED", instance(), tabptr.i));
   c_pgman->set_table_ready_for_prep_lcp_writes(tabptr.i, true);
-  signal->theData[0] = dihPtr;
+  signal->theData[0] = senderData;
   signal->theData[1] = cownNodeid;
   signal->theData[2] = tabptr.i;
-  sendSignal(dihBlockref, GSN_TAB_COMMITCONF, signal, 3, JBB);
+  sendSignal(senderRef, GSN_TAB_COMMITCONF, signal, 3, JBB);
 
   return;
 }  // Dblqh::execTAB_COMMITREQ()
@@ -3438,7 +3461,7 @@ void Dblqh::execACCFRAGREF(Signal *signal) {
   jamEntry();
   addfragptr.i = signal->theData[0];
   ptrCheckGuard(addfragptr, caddfragrecFileSize, addFragRecord);
-  Uint32 errorCode = terrorCode = signal->theData[1];
+  const Uint32 errorCode = signal->theData[1];
   ndbrequire(addfragptr.p->addfragStatus == AddFragRecord::ACC_ADDFRAG);
 
   fragrefLab(signal, errorCode, &addfragptr.p->m_lqhFragReq);
@@ -3454,7 +3477,7 @@ void Dblqh::execTUPFRAGREF(Signal *signal) {
   jamEntry();
   addfragptr.i = signal->theData[0];
   ptrCheckGuard(addfragptr, caddfragrecFileSize, addFragRecord);
-  Uint32 errorCode = terrorCode = signal->theData[1];
+  const Uint32 errorCode = signal->theData[1];
   fragptr.i = addfragptr.p->fragmentPtr;
   c_fragment_pool.getPtr(fragptr);
 
@@ -4465,8 +4488,9 @@ void Dblqh::timer_handling(Signal *signal) {
   for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
     jam();
     ptrCheckGuard(logPartPtr, clogPartFileSize, logPartRecord);
-    int ret = logPartPtr.p->m_io_tracker.tick(
-        10 * cLqhTimeOutCount, c_max_redo_lag, c_max_redo_lag_counter);
+    int ret =
+        logPartPtr.p->m_io_tracker.tick(instance(), 10 * cLqhTimeOutCount,
+                                        c_max_redo_lag, c_max_redo_lag_counter);
     if (ret < 0) {
       /**
        * set problem
@@ -4688,35 +4712,37 @@ Uint32 Dblqh::get_table_state_error(Ptr<Tablerec> tabPtr) const {
 
 int Dblqh::check_tabstate(Signal *signal, const Tablerec *tablePtrP, Uint32 op,
                           const TcConnectionrecPtr tcConnectptr) {
+  Uint32 errorCode = 0;
   if (tabptr.p->tableStatus == Tablerec::TABLE_READ_ONLY) {
     jam();
     if (op == ZREAD || op == ZREAD_EX || op == ZUNLOCK) {
       jam();
       return 0;
     }
-    terrorCode = ZTABLE_READ_ONLY;
+    errorCode = ZTABLE_READ_ONLY;
   } else {
     jam();
-    terrorCode = get_table_state_error(tabptr);
+    errorCode = get_table_state_error(tabptr);
   }
-  abortErrorLab(signal, tcConnectptr);
+  abortErrorLab(signal, tcConnectptr, errorCode);
   return 1;
 }
 
 void Dblqh::LQHKEY_abort(Signal *signal, int errortype,
                          const TcConnectionrecPtr tcConnectptr) {
+  Uint32 errorCode = 0;
   switch (errortype) {
     case 0:
       jam();
-      terrorCode = ZCOPY_NODE_ERROR;
+      errorCode = ZCOPY_NODE_ERROR;
       break;
     case 1:
       jam();
-      terrorCode = ZNO_FREE_LQH_CONNECTION;
+      errorCode = ZNO_FREE_LQH_CONNECTION;
       break;
     case 2:
       jam();
-      terrorCode = signal->theData[1];
+      errorCode = signal->theData[1];
       break;
     case 3:
       jam();
@@ -4725,20 +4751,20 @@ void Dblqh::LQHKEY_abort(Signal *signal, int errortype,
       return;
     case 4:
       jam();
-      terrorCode = get_table_state_error(tabptr);
+      errorCode = get_table_state_error(tabptr);
       break;
     case 5:
       jam();
-      terrorCode = ZINVALID_SCHEMA_VERSION;
+      errorCode = ZINVALID_SCHEMA_VERSION;
       break;
     case 6:
       jam();
-      terrorCode = ZNO_SUCH_FRAGMENT_ID;
+      errorCode = ZNO_SUCH_FRAGMENT_ID;
       break;
     default:
       ndbabort();
   }  // switch
-  abortErrorLab(signal, tcConnectptr);
+  abortErrorLab(signal, tcConnectptr, errorCode);
 }  // Dblqh::LQHKEY_abort()
 
 void Dblqh::LQHKEY_error(Signal *signal, int errortype,
@@ -4771,8 +4797,7 @@ void Dblqh::LQHKEY_error(Signal *signal, int errortype,
   }  // switch
   g_eventLogger->info("(%u)Protocol error in LQHKEYREQ: %u", instance(),
                       errortype);
-  terrorCode = ZLQHKEY_PROTOCOL_ERROR;
-  abortErrorLab(signal, tcConnectptr);
+  abortErrorLab(signal, tcConnectptr, ZLQHKEY_PROTOCOL_ERROR);
 }  // Dblqh::LQHKEY_error()
 
 void Dblqh::execLQHKEYREF(Signal *signal) {
@@ -4780,7 +4805,7 @@ void Dblqh::execLQHKEYREF(Signal *signal) {
   TcConnectionrecPtr tcConnectptr;
   tcConnectptr.i = signal->theData[0];
   Uint32 tcOprec = signal->theData[1];
-  terrorCode = signal->theData[2];
+  const Uint32 errorCode = signal->theData[2];
   Uint32 transid1 = signal->theData[3];
   Uint32 transid2 = signal->theData[4];
   if (!tcConnect_pool.getValidPtr(tcConnectptr)) {
@@ -4844,17 +4869,17 @@ void Dblqh::execLQHKEYREF(Signal *signal) {
       }  // if
       /* Mark abort due to replica issue */
       regTcPtr->abortState = TcConnectionrec::ABORT_FROM_LQH_REPLICA;
-      regTcPtr->errorCode = terrorCode;
+      regTcPtr->errorCode = errorCode;
       abortCommonLab(signal, tcConnectptr);
       return;
     case TcConnectionrec::LOG_CONNECTED:
       jam();
-      logLqhkeyrefLab(signal, tcConnectptr);
+      logLqhkeyrefLab(signal, tcConnectptr, errorCode);
       return;
     case TcConnectionrec::COPY_CONNECTED:
       jam();
       setup_scan_pointers_from_tc_con(tcConnectptr, __LINE__);
-      copyLqhKeyRefLab(signal, tcConnectptr);
+      copyLqhKeyRefLab(signal, tcConnectptr, errorCode);
       release_frag_access(prim_tab_fragptr.p);
       return;
     default:
@@ -5281,7 +5306,7 @@ void Dblqh::execTUPKEYREF(Signal *signal) {
   const TupKeyRef *const tupKeyRef = (TupKeyRef *)signal->getDataPtr();
   jamEntryDebug();
   TcConnectionrecPtr tcConnectptr = m_tc_connect_ptr;
-  terrorCode = tupKeyRef->errorCode;
+  const Uint32 errorCode = tupKeyRef->errorCode;
   TRACE_OP(tcConnectptr.p, "TUPKEYREF");
 
 #ifdef VM_TRACE
@@ -5294,7 +5319,7 @@ void Dblqh::execTUPKEYREF(Signal *signal) {
   switch (tcConnectptr.p->transactionState) {
     case TcConnectionrec::SCAN_TUPKEY: {
       jamDebug();
-      scanTupkeyRefLab(signal, tcConnectptr);
+      scanTupkeyRefLab(signal, tcConnectptr, errorCode);
       return;
     }
     case TcConnectionrec::WAIT_TUP: {
@@ -5310,11 +5335,11 @@ void Dblqh::execTUPKEYREF(Signal *signal) {
         useStat.m_keyRefCount++;
         useStat.m_keyInstructionCount += tupKeyRef->noExecInstructions;
       }
-      abortErrorLab(signal, tcConnectptr);
+      abortErrorLab(signal, tcConnectptr, errorCode);
       return;
     }
     case TcConnectionrec::COPY_TUPKEY: {
-      copyTupkeyRefLab(signal, tcConnectptr);
+      copyTupkeyRefLab(signal, tcConnectptr, errorCode);
       return;
     }
     case TcConnectionrec::WAIT_TUP_TO_ABORT: {
@@ -6510,7 +6535,7 @@ static inline Uint32 getProgramWordCount(SegmentedSectionPtr attrInfo) {
  * DEBUG_MUTEX_STATS do we print it unconditionally, otherwise it is
  * printed only if activating debug printouts from command line.
  */
-//#define DEBUG_MUTEX_STATS 1
+// #define DEBUG_MUTEX_STATS 1
 #ifdef DEBUG_MUTEX_STATS
 #define DEB_PRINT_MUTEX_STATS(arglist) \
   do {                                 \
@@ -7777,17 +7802,13 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
   regTcPtr->m_dealloc_data.m_dealloc_ref_count = RNIL;
   {
     regTcPtr->operation = (Operation_t)op == ZREAD_EX ? ZREAD : (Operation_t)op;
-    regTcPtr->lockType =
-        op == ZREAD_EX
-            ? ZUPDATE
-            : (Operation_t)op == ZWRITE
-                  ? ZINSERT
-                  : (Operation_t)op == ZREFRESH
-                        ? ZINSERT
-                        : (Operation_t)op == ZUNLOCK
-                              ? ZREAD
-                              :  // lockType not relevant for unlock req
-                              (Operation_t)op;
+    regTcPtr->lockType = op == ZREAD_EX                ? ZUPDATE
+                         : (Operation_t)op == ZWRITE   ? ZINSERT
+                         : (Operation_t)op == ZREFRESH ? ZINSERT
+                         : (Operation_t)op == ZUNLOCK
+                             ? ZREAD
+                             :  // lockType not relevant for unlock req
+                             (Operation_t)op;
   }
   if (LqhKeyReq::getNoWaitFlag(Treqinfo)) {
     /* Check sender version before processing - older versions sent junk */
@@ -8063,8 +8084,8 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
     ndbassert(refToMain(senderRef) == getDBLQH());
     ndbassert(LqhKeyReq::getRowidFlag(Treqinfo));
     if (!(fragptr.p->fragStatus == Fragrecord::ACTIVE_CREATION)) {
+      /* Unexpected fragment state */
       g_eventLogger->info("fragptr.p->fragStatus: %d", fragptr.p->fragStatus);
-      CRASH_INSERTION(5046);
     }
     /**
      * We discover start of Node recovery phase in starting node
@@ -8485,8 +8506,8 @@ void Dblqh::exec_acckeyreq(Signal *signal, TcConnectionrecPtr regTcPtr) {
       ndbassert(!m_is_query_block);
       execACC_TO_REF(signal, regTcPtr);
     } else {
-      terrorCode = signal->theData[1];
-      continueACCKEYREF(signal, regTcPtr);
+      const Uint32 errorCode = signal->theData[1];
+      continueACCKEYREF(signal, regTcPtr, errorCode);
     }
   }  // if
 }  // Dblqh::prepareContinueAfterBlockedLab()
@@ -9017,8 +9038,7 @@ Uint32 Dblqh::getKeyInfoWordOrZero(const TcConnectionrec *regTcPtr,
 
 void Dblqh::unlockError(Signal *signal, Uint32 error,
                         const TcConnectionrecPtr tcConnectptr) {
-  terrorCode = error;
-  abortErrorLab(signal, tcConnectptr);
+  abortErrorLab(signal, tcConnectptr, error);
 }
 
 /**
@@ -9989,13 +10009,11 @@ void Dblqh::writePrepareLog(Signal *signal,
         ERROR_INSERTED(5032)) {
       jam();
       if (ERROR_INSERTED_CLEAR(5032)) {
-        const Uint32 saved_noOfFreeLogPages = regLogPartPtr->noOfFreeLogPages;
         // simulate abort on temporary out-of-redo error
-        regLogPartPtr->noOfFreeLogPages = ZMIN_LOG_PAGES_OPERATION - 1;
-        writePrepareLog_problems(signal, tcConnectptr, regLogPartPtr);
-        regLogPartPtr->noOfFreeLogPages = saved_noOfFreeLogPages;
+        writePrepareLog_problems(signal, tcConnectptr, regLogPartPtr, true);
       } else {
-        writePrepareLog_problems(signal, tcConnectptr, regLogPartPtr);
+        writePrepareLog_problems(signal, tcConnectptr, regLogPartPtr,
+                                 out_of_log_buffer);
       }
     } else {
       jam();
@@ -10156,28 +10174,69 @@ void Dblqh::doWritePrepareLog(Signal *signal,
 
 void Dblqh::writePrepareLog_problems(Signal *signal,
                                      const TcConnectionrecPtr tcConnectptr,
-                                     LogPartRecord *logPartPtrP) {
+                                     LogPartRecord *logPartPtrP,
+                                     bool out_of_log_buffer) {
   jam();
+  Uint32 errorCode = 0;
   Uint32 problems = logPartPtrP->m_log_problems;
 
-  if (logPartPtrP->noOfFreeLogPages < ZMIN_LOG_PAGES_OPERATION) {
+  if (out_of_log_buffer) {
     jam();
-    terrorCode = ZTEMPORARY_REDO_LOG_FAILURE;
+    errorCode = ZTEMPORARY_REDO_LOG_FAILURE;
   } else if ((problems & LogPartRecord::P_TAIL_PROBLEM) != 0) {
     jam();
-    terrorCode = ZTAIL_PROBLEM_IN_LOG_ERROR;
+    errorCode = ZTAIL_PROBLEM_IN_LOG_ERROR;
   } else if ((problems & LogPartRecord::P_REDO_IO_PROBLEM) != 0) {
     jam();
-    terrorCode = ZREDO_IO_PROBLEM;
+    errorCode = ZREDO_IO_PROBLEM;
   } else if ((problems & LogPartRecord::P_FILE_CHANGE_PROBLEM) != 0) {
     jam();
-    terrorCode = ZFILE_CHANGE_PROBLEM_IN_LOG_ERROR;
+    errorCode = ZFILE_CHANGE_PROBLEM_IN_LOG_ERROR;
   } else {
     if (ERROR_INSERTED(5083)) {
-      terrorCode = 266;
+      errorCode = 266;
+    } else {
+      /* Hit a problem, must set an error */
+      ndbabort();
     }
   }
-  abortErrorLab(signal, tcConnectptr);
+  abortErrorLab(signal, tcConnectptr, errorCode);
+}
+
+static const char *logProblemName(Uint32 logProblem) {
+  switch (logProblem) {
+    case Dblqh::LogPartRecord::P_TAIL_PROBLEM:
+      return "Low space";
+    case Dblqh::LogPartRecord::P_REDO_IO_PROBLEM:
+      return "Generation rate exceeds write rate";
+    case Dblqh::LogPartRecord::P_FILE_CHANGE_PROBLEM:
+      return "Next file not open on time";
+    default:
+      assert(false);
+      return "Unknown";
+  }
+}
+
+static constexpr size_t MaxProblemSetLen = 100;
+
+static const char *logProblemSet(cstrbuf<MaxProblemSetLen> &buff,
+                                 Uint32 logProblems) {
+  bool first = true;
+  if (logProblems & Dblqh::LogPartRecord::P_TAIL_PROBLEM) {
+    buff.append(logProblemName(Dblqh::LogPartRecord::P_TAIL_PROBLEM));
+    first = false;
+  }
+  if (logProblems & Dblqh::LogPartRecord::P_REDO_IO_PROBLEM) {
+    buff.appendf("%s%s", (first ? "" : ", "),
+                 logProblemName(Dblqh::LogPartRecord::P_REDO_IO_PROBLEM));
+    first = false;
+  }
+  if (logProblems & Dblqh::LogPartRecord::P_FILE_CHANGE_PROBLEM) {
+    buff.appendf("%s%s", (first ? "" : ", "),
+                 logProblemName(Dblqh::LogPartRecord::P_FILE_CHANGE_PROBLEM));
+    first = false;
+  }
+  return buff.c_str();
 }
 
 void Dblqh::update_log_problem(Signal *signal, LogPartRecord *partPtrP,
@@ -10191,6 +10250,12 @@ void Dblqh::update_log_problem(Signal *signal, LogPartRecord *partPtrP,
     if ((problems & problem) == 0) {
       jam();
       problems |= problem;
+
+      cstrbuf<MaxProblemSetLen> buff;
+      logProblemSet(buff, problems);
+      g_eventLogger->info(
+          "LQH %u : Redo log part %u problem started : %s.  (%s)", instance(),
+          partPtrP->logPartNo, logProblemName(problem), buff.c_str());
     }
   } else {
     /**
@@ -10200,6 +10265,12 @@ void Dblqh::update_log_problem(Signal *signal, LogPartRecord *partPtrP,
     if ((problems & problem) != 0) {
       jam();
       problems &= ~(Uint32)problem;
+
+      cstrbuf<MaxProblemSetLen> buff;
+      logProblemSet(buff, problems);
+      g_eventLogger->info(
+          "LQH %u : Redo log part %u problem cleared : %s.  (%s)", instance(),
+          partPtrP->logPartNo, logProblemName(problem), buff.c_str());
 
       if (partPtrP->LogLqhKeyReqSent == ZFALSE &&
           (!partPtrP->m_log_prepare_queue.isEmpty() ||
@@ -12220,8 +12291,8 @@ void Dblqh::execABORTREQ(Signal *signal) {
 void Dblqh::execACC_TO_REF(Signal *signal,
                            const TcConnectionrecPtr tcConnectptr) {
   jamEntry();
-  terrorCode = signal->theData[1];
-  abortErrorLab(signal, tcConnectptr);
+  const Uint32 errorCode = signal->theData[1];
+  abortErrorLab(signal, tcConnectptr, errorCode);
 }  // Dblqh::execACC_TO_REF()
 
 /* ************> */
@@ -12229,12 +12300,13 @@ void Dblqh::execACC_TO_REF(Signal *signal,
 /* ************> */
 void Dblqh::execACCKEYREF(Signal *signal) {
   jamEntry();
-  terrorCode = signal->theData[1];
+  const Uint32 errorCode = signal->theData[1];
   setup_key_pointers(signal->theData[0], false);
-  continueACCKEYREF(signal, m_tc_connect_ptr);
+  continueACCKEYREF(signal, m_tc_connect_ptr, errorCode);
 }
 
-void Dblqh::continueACCKEYREF(Signal *signal, TcConnectionrecPtr tcConnectptr) {
+void Dblqh::continueACCKEYREF(Signal *signal, TcConnectionrecPtr tcConnectptr,
+                              Uint32 errorCode) {
   TcConnectionrec *const tcPtr = tcConnectptr.p;
   switch (tcPtr->transactionState) {
     case TcConnectionrec::WAIT_ACC:
@@ -12255,11 +12327,10 @@ void Dblqh::continueACCKEYREF(Signal *signal, TcConnectionrecPtr tcConnectptr) {
     default:
       ndbabort();
   }  // switch
-  const Uint32 errCode = terrorCode;
-  tcPtr->errorCode = errCode;
+  tcPtr->errorCode = errorCode;
 
   if (TRACENR_FLAG) {
-    TRACENR("ACCKEYREF: " << errCode << " ");
+    TRACENR("ACCKEYREF: " << errorCode << " ");
     switch (tcPtr->operation) {
       case ZREAD:
         TRACENR("READ");
@@ -12316,19 +12387,6 @@ void Dblqh::continueACCKEYREF(Signal *signal, TcConnectionrecPtr tcConnectptr) {
   tcPtr->abortState = TcConnectionrec::ABORT_FROM_LQH;
   abortCommonLab(signal, tcConnectptr);
 }  // Dblqh::execACCKEYREF()
-
-void Dblqh::localAbortStateHandlerLab(Signal *signal,
-                                      const TcConnectionrecPtr tcConnectptr) {
-  TcConnectionrec *const regTcPtr = tcConnectptr.p;
-  if (regTcPtr->abortState != TcConnectionrec::ABORT_IDLE) {
-    jam();
-    return;
-  }  // if
-  regTcPtr->abortState = TcConnectionrec::ABORT_FROM_LQH;
-  regTcPtr->errorCode = terrorCode;
-  abortStateHandlerLab(signal, tcConnectptr);
-  return;
-}  // Dblqh::localAbortStateHandlerLab()
 
 void Dblqh::abortStateHandlerLab(Signal *signal,
                                  const TcConnectionrecPtr tcConnectptr) {
@@ -12499,13 +12557,15 @@ void Dblqh::abortStateHandlerLab(Signal *signal,
   abortCommonLab(signal, tcConnectptr);
 }  // Dblqh::abortStateHandlerLab()
 
-void Dblqh::abortErrorLab(Signal *signal, TcConnectionrecPtr tcConnectptr) {
+void Dblqh::abortErrorLab(Signal *signal, TcConnectionrecPtr tcConnectptr,
+                          Uint32 errorCode) {
   ndbrequire(tcConnect_pool.getValidPtr(tcConnectptr));
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
   if (regTcPtr->abortState == TcConnectionrec::ABORT_IDLE) {
     jam();
+    ndbrequire(errorCode != 0);
     regTcPtr->abortState = TcConnectionrec::ABORT_FROM_LQH;
-    regTcPtr->errorCode = terrorCode;
+    regTcPtr->errorCode = errorCode;
   }  // if
   abortCommonLab(signal, tcConnectptr);
   return;
@@ -12725,6 +12785,7 @@ void Dblqh::continueAfterLogAbortWriteLab(
     jam();
     TcKeyRef *const tcKeyRef = (TcKeyRef *)signal->getDataPtrSend();
 
+    ndbrequire(regTcPtr->errorCode != 0);
     tcKeyRef->connectPtr = regTcPtr->applOprec;
     tcKeyRef->transId[0] = regTcPtr->transid[0];
     tcKeyRef->transId[1] = regTcPtr->transid[1];
@@ -12738,6 +12799,7 @@ void Dblqh::continueAfterLogAbortWriteLab(
     LqhKeyRef *const lqhKeyRef = (LqhKeyRef *)signal->getDataPtrSend();
 
     jam();
+    ndbrequire(regTcPtr->errorCode != 0);
     lqhKeyRef->userRef = regTcPtr->clientConnectrec;
     lqhKeyRef->connectPtr = regTcPtr->tcOprec;
     lqhKeyRef->errorCode = regTcPtr->errorCode;
@@ -12907,8 +12969,9 @@ void Dblqh::ndbdFailBlockCleanupCallback(Signal *signal, Uint32 failedNodeId,
   nfCompRep->blockNo = m_is_query_block ? DBQLQH : DBLQH;
   nfCompRep->nodeId = cownNodeid;
   nfCompRep->failedNodeId = failedNodeId;
-  BlockReference dihRef =
-      !isNdbMtLqh() ? DBDIH_REF : m_is_query_block ? DBQLQH_REF : DBLQH_REF;
+  BlockReference dihRef = !isNdbMtLqh()      ? DBDIH_REF
+                          : m_is_query_block ? DBQLQH_REF
+                                             : DBLQH_REF;
   sendSignal(dihRef, GSN_NF_COMPLETEREP, signal, NFCompleteRep::SignalLength,
              JBB);
 }
@@ -13024,62 +13087,62 @@ void Dblqh::lqhTransNextLab(Signal *signal, TcNodeFailRecordPtr tcNodeFailPtr) {
   TcConnectionrecPtr tcConnectptr;
   tcConnectptr.i = tcNodeFailPtr.p->tcRecNow;
   for (Uint32 i = 0; i < 100; i++) {
-    bool found = getNextTcConRec(tcNodeFailPtr.p->tcRecNow, tcConnectptr, 10);
-    if (tcNodeFailPtr.p->tcRecNow != RNIL && !found) {
-      /**
-       * We scanned without finding any records for a long
-       * time, thus we will treat this as looping 10 times
-       * in this loop.
-       */
-      jam();
-      i += 10;
-      continue;
-    } else if (tcNodeFailPtr.p->tcRecNow == RNIL) {
-      jam();
-      /**
-       * Finished with scanning operation record
-       *
-       * now scan markers
-       */
+    if (!getNextTcConRec(tcNodeFailPtr.p->tcRecNow, tcConnectptr, 10)) {
+      if (tcNodeFailPtr.p->tcRecNow != RNIL) {
+        /**
+         * We scanned without finding any records for a long
+         * time, thus we will treat this as looping 10 times
+         * in this loop.
+         */
+        jam();
+        i += 10;
+        continue;
+      } else {
+        jam();
+        /**
+         * Finished with scanning operation record
+         *
+         * now scan markers
+         */
 #ifdef ERROR_INSERT
-      if (ERROR_INSERTED(5061)) {
-        CLEAR_ERROR_INSERT_VALUE;
-        for (Uint32 i = 0; i < cnoOfNodes; i++) {
-          Uint32 node = cnodeData[i];
-          if (node != getOwnNodeId() && cnodeStatus[i] == ZNODE_UP) {
-            g_eventLogger->info("clearing ERROR_INSERT in LQH:%u", node);
-            signal->theData[0] = 0;
-            sendSignal(numberToRef(getDBLQH(), node), GSN_NDB_TAMPER, signal, 1,
-                       JBB);
+        if (ERROR_INSERTED(5061)) {
+          for (Uint32 i = 0; i < cnoOfNodes; i++) {
+            Uint32 node = cnodeData[i];
+            if (cnodeStatus[i] == ZNODE_UP) {
+              g_eventLogger->info("clearing ERROR_INSERT in LQH:%u", node);
+              CLEAR_ERROR_INSERT_VALUE3(signal, node, getDBLQH());
+            }
           }
+
+          signal->theData[0] = ZSCAN_MARKERS;
+          signal->theData[1] = tcNodeFailPtr.i;
+          signal->theData[2] = 0;
+          sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 5000, 3);
+          return;
         }
 
-        signal->theData[0] = ZSCAN_MARKERS;
-        signal->theData[1] = tcNodeFailPtr.i;
-        signal->theData[2] = 0;
-        sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 5000, 3);
-        return;
-      }
+        if (ERROR_INSERTED(5050)) {
+          g_eventLogger->info(
+              "send ZSCAN_MARKERS with 5s delay and killing master: %u",
+              c_master_node_id);
+          CLEAR_ERROR_INSERT_VALUE;
+          signal->theData[0] = ZSCAN_MARKERS;
+          signal->theData[1] = tcNodeFailPtr.i;
+          signal->theData[2] = 0;
+          sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 5000, 3);
 
-      if (ERROR_INSERTED(5050)) {
-        g_eventLogger->info(
-            "send ZSCAN_MARKERS with 5s delay and killing master: %u",
-            c_master_node_id);
-        CLEAR_ERROR_INSERT_VALUE;
-        signal->theData[0] = ZSCAN_MARKERS;
-        signal->theData[1] = tcNodeFailPtr.i;
-        signal->theData[2] = 0;
-        sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 5000, 3);
-
-        signal->theData[0] = 9999;
-        sendSignal(numberToRef(CMVMI, c_error_insert_extra), GSN_NDB_TAMPER,
-                   signal, 1, JBB);
-        return;
-      }
+          signal->theData[0] = 9999;
+          sendSignal(numberToRef(CMVMI, c_error_insert_extra), GSN_NDB_TAMPER,
+                     signal, 1, JBB);
+          return;
+        }
 #endif
-      scanMarkers(signal, tcNodeFailPtr.i, 0);
-      return;
-    }  // if
+        scanMarkers(signal, tcNodeFailPtr.i, 0);
+        return;
+      }  // if
+    }    // if (!getNextTcConRec())
+
+    /* Found an operation record */
     if (tcConnectptr.p->transactionState != TcConnectionrec::IDLE) {
       if (tcConnectptr.p->transactionState !=
           TcConnectionrec::TC_NOT_CONNECTED) {
@@ -13230,8 +13293,8 @@ void Dblqh::scanMarkers(Signal *signal, Uint32 tcNodeFail,
         lqhTransConf->transId2 = commitAckMarkerPtr.p->transid2;
         lqhTransConf->apiRef = commitAckMarkerPtr.p->apiRef;
         lqhTransConf->apiOpRec = commitAckMarkerPtr.p->apiOprec;
-        sendSignal(tcNodeFailPtr.p->newTcBlockref, GSN_LQH_TRANSCONF, signal, 7,
-                   JBB);
+        sendSignal(tcNodeFailPtr.p->newTcBlockref, GSN_LQH_TRANSCONF, signal,
+                   LqhTransConf::MarkerSignalLength, JBB);
 
         signal->theData[0] = ZSCAN_MARKERS;
         signal->theData[1] = tcNodeFailPtr.i;
@@ -15428,6 +15491,14 @@ Uint32 Dblqh::copyNextRange(Uint32 *dst, TcConnectionrec *tcPtrP) {
 
     tcPtrP->primKeyLen -= rangeLen;
 
+    if (ERROR_INSERTED(5112)) {
+      jam();
+      /* Scan with infinite results */
+      g_eventLogger->info("LQH %u : Repeating range scan", instance());
+      tcPtrP->primKeyLen += rangeLen;
+      return rangeLen;
+    }
+
     if (rangeLen == totalLen) {
       /* All range information has been copied, free the section */
       releaseSection(tcPtrP->keyInfoIVal);
@@ -16006,7 +16077,8 @@ void Dblqh::scanTupkeyConfLab(Signal *signal, TcConnectionrec *regTcPtr) {
  *       PRECONDITION:   TRANSACTION_STATE = SCAN_TUPKEY
  * ------------------------------------------------------------------------- */
 void Dblqh::scanTupkeyRefLab(Signal *signal,
-                             const TcConnectionrecPtr tcConnectptr) {
+                             const TcConnectionrecPtr tcConnectptr,
+                             Uint32 errorCode) {
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
   ScanRecord *const scanPtr = scanptr.p;
   regTcPtr->transactionState = TcConnectionrec::SCAN_STATE_USED;
@@ -16045,15 +16117,15 @@ void Dblqh::scanTupkeyRefLab(Signal *signal,
     closeScanLab(signal, tcConnectptr.p);
     return;
   }  // if
-  if (unlikely((terrorCode != ZUSER_SEARCH_CONDITION_FALSE_CODE) &&
-               (terrorCode != ZNO_TUPLE_FOUND))) {
+  if (unlikely((errorCode != ZUSER_SEARCH_CONDITION_FALSE_CODE) &&
+               (errorCode != ZNO_TUPLE_FOUND))) {
 #ifdef VM_TRACE
-    ndbout << "Dblqh::scanTupkeyRefLab() aborting scan terrorCode="
-           << terrorCode << endl;
+    ndbout << "Dblqh::scanTupkeyRefLab() aborting scan errorCode=" << errorCode
+           << endl;
 #endif
     jamDebug();
     scanPtr->scanErrorCounter++;
-    tcConnectptr.p->errorCode = terrorCode;
+    tcConnectptr.p->errorCode = errorCode;
 
     if (scanPtr->scanLockHold == ZTRUE && rows > 0) {
       jam();
@@ -16133,7 +16205,6 @@ void Dblqh::accScanCloseConfLab(Signal *signal,
     /* Start next range scan...*/
     m_scan_direct_count++;
     continueAfterReceivingAllAiLab(signal, tcConnectptr);
-    release_frag_access(prim_tab_fragptr.p);
     return;
   }
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
@@ -16482,11 +16553,10 @@ Uint32 Dblqh::initScanrec(const ScanFragReq *scanFragReq, Uint32 aiLen,
        * Put on queue
        */
       scanPtr->scanState = ScanRecord::IN_QUEUE;
-      Local_ScanRecord_fifo queue(
-          c_scanRecordPool, rangeScan != 0
-                                ? fragptr.p->m_queuedScans
-                                : tupScan != 0 ? fragptr.p->m_queuedTupScans
-                                               : fragptr.p->m_queuedAccScans);
+      Local_ScanRecord_fifo queue(c_scanRecordPool,
+                                  rangeScan != 0 ? fragptr.p->m_queuedScans
+                                  : tupScan != 0 ? fragptr.p->m_queuedTupScans
+                                                 : fragptr.p->m_queuedAccScans);
       queue.addLast(scanptr);
       fragptr.p->m_useStat.m_queuedScanCount++;
       return ZOK;
@@ -16595,11 +16665,10 @@ bool Dblqh::finishScanrec(Signal *signal, ScanRecordPtr &restart_scan,
 
   if (scanPtr->scanState == ScanRecord::IN_QUEUE) {
     ndbassert(!m_is_query_block);
-    Local_ScanRecord_fifo queue(
-        c_scanRecordPool, rangeScan != 0
-                              ? fragptr.p->m_queuedScans
-                              : tupScan != 0 ? fragptr.p->m_queuedTupScans
-                                             : fragptr.p->m_queuedAccScans);
+    Local_ScanRecord_fifo queue(c_scanRecordPool,
+                                rangeScan != 0 ? fragptr.p->m_queuedScans
+                                : tupScan != 0 ? fragptr.p->m_queuedTupScans
+                                               : fragptr.p->m_queuedAccScans);
     jam();
     ndbrequire(reserved == 0);
     queue.remove(scanptr);
@@ -16655,11 +16724,10 @@ bool Dblqh::finishScanrec(Signal *signal, ScanRecordPtr &restart_scan,
   ScanRecordPtr restart;
 
   {
-    Local_ScanRecord_fifo queue(
-        c_scanRecordPool, rangeScan != 0
-                              ? fragptr.p->m_queuedScans
-                              : tupScan != 0 ? fragptr.p->m_queuedTupScans
-                                             : fragptr.p->m_queuedAccScans);
+    Local_ScanRecord_fifo queue(c_scanRecordPool,
+                                rangeScan != 0 ? fragptr.p->m_queuedScans
+                                : tupScan != 0 ? fragptr.p->m_queuedTupScans
+                                               : fragptr.p->m_queuedAccScans);
     /**
      * Start of queued scans
      */
@@ -17091,8 +17159,10 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal *signal, SimulatedBlock *block,
       return;
     }
     jamDebug();
+    /* Request to call again */
     ndbassert(m_in_send_next_scan == 2);
     m_in_send_next_scan = 0;
+    ndbrequire(have_frag_scan_access());
   } while (1);
 }
 
@@ -17516,6 +17586,8 @@ void Dblqh::execCOPY_FRAGREQ(Signal *signal) {
     regTcPtr->transactionState = TcConnectionrec::SCAN_STATE_USED;
   }
 
+  acquire_frag_scan_access_new(prim_tab_fragptr.p, tcConnectptr.p);
+
   {
     AccScanReq *req = (AccScanReq *)&signal->theData[0];
     Uint32 sig_request_info = 0;
@@ -17571,6 +17643,9 @@ void Dblqh::execCOPY_FRAGREQ(Signal *signal) {
       /* ACC_SCANCONF */
       jamEntry();
   accScanConfCopyLab(signal);
+
+  /* release_frag_access if not already released */
+  release_frag_access(prim_tab_fragptr.p);
   return;
 }  // Dblqh::execCOPY_FRAGREQ()
 
@@ -17880,7 +17955,8 @@ void Dblqh::execTRANSID_AI(Signal *signal) {
 /*  PRECONDITION:   TRANSACTION_STATE = COPY_TUPKEY                         */
 /*--------------------------------------------------------------------------*/
 void Dblqh::copyTupkeyRefLab(Signal *signal,
-                             const TcConnectionrecPtr tcConnectptr) {
+                             const TcConnectionrecPtr tcConnectptr,
+                             Uint32 errorCode) {
   // const TupKeyRef * tupKeyRef = (TupKeyRef *)signal->getDataPtr();
   ScanRecord *scanP = scanptr.p;
   if (scanP->readCommitted == 0) {
@@ -17894,7 +17970,7 @@ void Dblqh::copyTupkeyRefLab(Signal *signal,
      *   if scanning with locks (shared/exclusive) this is not visible
      *   to LQH as lock is taken earlier
      */
-    ndbrequire(terrorCode == 626);
+    ndbrequire(errorCode == 626);
   }
 
   ndbrequire(scanptr.p->scanState == ScanRecord::WAIT_TUPKEY_COPY);
@@ -18180,11 +18256,12 @@ void Dblqh::nextRecordCopy(Signal *signal,
 }  // Dblqh::nextRecordCopy()
 
 void Dblqh::copyLqhKeyRefLab(Signal *signal,
-                             const TcConnectionrecPtr tcConnectptr) {
+                             const TcConnectionrecPtr tcConnectptr,
+                             Uint32 errorCode) {
   jamDebug();
   Uint32 copyWords = signal->theData[3];
   scanptr.p->scanErrorCounter++;
-  tcConnectptr.p->errorCode = terrorCode;
+  tcConnectptr.p->errorCode = errorCode;
 
   LqhKeyConf *conf = (LqhKeyConf *)signal->getDataPtrSend();
   conf->transId1 = copyWords;
@@ -19197,15 +19274,18 @@ void Dblqh::scanTcConnectLab(Signal *signal, Uint32 tstartTcConnect,
   TcConnectionrecPtr tcConnectptr;
   Uint32 next = tstartTcConnect;
   for (Uint32 i = 0; i < 200; i++) {
-    bool found = getNextTcConRec(next, tcConnectptr, 10);
-    if (next != RNIL && !found) {
-      jam();
-      i += 10;
-      continue;
-    } else if (next == RNIL) {
-      jam();
-      break;
+    if (!getNextTcConRec(next, tcConnectptr, 10)) {
+      if (next != RNIL) {
+        jam();
+        i += 10;
+        continue;
+      } else {
+        /* Scan done */
+        jam();
+        break;
+      }
     }
+    /* Examine next record */
     if (tcConnectptr.p->transactionState != TcConnectionrec::IDLE) {
       switch (tcConnectptr.p->logWriteState) {
         case TcConnectionrec::NOT_WRITTEN:
@@ -22376,7 +22456,6 @@ void Dblqh::execFSWRITEREF(Signal *signal) {
   LogFileOperationRecordPtr lfoPtr;
   lfoPtr.i = signal->theData[0];
   ptrCheckGuard(lfoPtr, clfoFileSize, logFileOperationRecord);
-  terrorCode = signal->theData[1];
   switch (lfoPtr.p->lfoState) {
     case LogFileOperationRecord::WRITE_PAGE_ZERO:
       jam();
@@ -23124,7 +23203,7 @@ void Dblqh::initLogfile(LogFileRecordPtr logFilePtr, Uint32 partNo,
   logFilePtr.p->fileName[0] = (UintR)-1;
   logFilePtr.p->fileName[1] = (UintR)-1; /* = H'FFFFFFFF = -1 */
   logFilePtr.p->fileName[2] = fileNo;    /* Sfile_no */
-  tilTmp = 1;                            /* VERSION 1 OF FILE NAME */
+  tilTmp = FsOpenReq::V_BLOCK;           /* VERSION 1 OF FILE NAME */
   tilTmp = (tilTmp << 8) + 1; /* FRAGMENT LOG => .FRAGLOG AS EXTENSION */
   tilTmp = (tilTmp << 8) + (8 + partNo); /* DIRECTORY = D(8+Part)/DBLQH */
   tilTmp = (tilTmp << 8) + 255;          /* IGNORE Pxx PART OF FILE NAME */
@@ -23230,7 +23309,7 @@ void Dblqh::openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
     LinearSectionPtr lsptr[3];
 
     // Use a dummy file name
-    ndbrequire(FsOpenReq::getVersion(req->fileNumber) != 4);
+    ndbrequire(FsOpenReq::getVersion(req->fileNumber) != FsOpenReq::V_FILENAME);
     lsptr[FsOpenReq::FILENAME].p = nullptr;
     lsptr[FsOpenReq::FILENAME].sz = 0;
 
@@ -23295,7 +23374,7 @@ void Dblqh::openLogfileInit(Signal *signal, LogFileRecordPtr logFilePtr) {
     LinearSectionPtr lsptr[3];
 
     // Use a dummy file name
-    ndbrequire(FsOpenReq::getVersion(req->fileNumber) != 4);
+    ndbrequire(FsOpenReq::getVersion(req->fileNumber) != FsOpenReq::V_FILENAME);
     lsptr[FsOpenReq::FILENAME].p = nullptr;
     lsptr[FsOpenReq::FILENAME].sz = 0;
 
@@ -23442,7 +23521,8 @@ void Dblqh::openNextLogfile(Signal *signal, LogFileRecord *logFilePtrP,
       LinearSectionPtr lsptr[3];
 
       // Use a dummy file name
-      ndbrequire(FsOpenReq::getVersion(req->fileNumber) != 4);
+      ndbrequire(FsOpenReq::getVersion(req->fileNumber) !=
+                 FsOpenReq::V_FILENAME);
       lsptr[FsOpenReq::FILENAME].p = nullptr;
       lsptr[FsOpenReq::FILENAME].sz = 0;
 
@@ -24210,7 +24290,7 @@ void Dblqh::execSTART_FRAGREQ(Signal *signal) {
 
   ptrCheckGuard(tabptr, ctabrecFileSize, tablerec);
   if (!getFragmentrec(fragId)) {
-    startFragRefLab(signal);
+    startFragRefLab(signal, ZNO_SUCH_FRAGMENT_ID);
     return;
   }  // if
   tabptr.p->tableStatus = Tablerec::TABLE_DEFINED;
@@ -24667,12 +24747,12 @@ void Dblqh::execCOPY_FRAGCONF(Signal *signal) {
   }
 }
 
-void Dblqh::startFragRefLab(Signal *signal) {
+void Dblqh::startFragRefLab(Signal *signal, Uint32 errorCode) {
   const StartFragReq *const startFragReq = (StartFragReq *)&signal->theData[0];
   BlockReference userRef = startFragReq->userRef;
   Uint32 userPtr = startFragReq->userPtr;
   signal->theData[0] = userPtr;
-  signal->theData[1] = terrorCode;
+  signal->theData[1] = errorCode;
   signal->theData[2] = cownNodeid;
   sendSignal(userRef, GSN_START_FRAGREF, signal, 3, JBB);
   return;
@@ -25549,17 +25629,6 @@ void Dblqh::execEXEC_FRAGREQ(Signal *signal) {
   unlock_log_part(logPartPtrP);
 }  // Dblqh::execEXEC_FRAGREQ()
 
-void Dblqh::sendExecFragRefLab(Signal *signal) {
-  ExecFragReq *const execFragReq = (ExecFragReq *)&signal->theData[0];
-  BlockReference retRef = execFragReq->userRef;
-  Uint32 retPtr = execFragReq->userPtr;
-
-  signal->theData[0] = retPtr;
-  signal->theData[1] = terrorCode;
-  sendSignal(retRef, GSN_EXEC_FRAGREF, signal, 2, JBB);
-  return;
-}  // Dblqh::sendExecFragRefLab()
-
 void Dblqh::sendSTART_FRAGCONF(Signal *signal) {
   /**
    * This signal is ignored in DIH currently, but we still send it to enable
@@ -25592,16 +25661,6 @@ void Dblqh::execEXEC_FRAGCONF(Signal *signal) {
     sendSTART_FRAGCONF(signal);
   }
 }  // Dblqh::execEXEC_FRAGCONF()
-
-/* ***************> */
-/*  EXEC_FRAGREF  > */
-/* ***************> */
-void Dblqh::execEXEC_FRAGREF(Signal *signal) {
-  jamEntry();
-  terrorCode = signal->theData[1];
-  systemErrorLab(signal, __LINE__);
-  return;
-}  // Dblqh::execEXEC_FRAGREF()
 
 /* *************** */
 /*  EXEC_SRCONF  > */
@@ -27499,7 +27558,8 @@ void Dblqh::completedLab(Signal *signal,
 /* THEN EXECUTE THE NEXT LOG RECORD.                                         */
 /*---------------------------------------------------------------------------*/
 void Dblqh::logLqhkeyrefLab(Signal *signal,
-                            const TcConnectionrecPtr tcConnectptr) {
+                            const TcConnectionrecPtr tcConnectptr,
+                            Uint32 errorCode) {
   LogPageRecordPtr logPagePtr;
   LogFileRecordPtr logFilePtr;
   LogPartRecordPtr logPartPtr;
@@ -27509,11 +27569,11 @@ void Dblqh::logLqhkeyrefLab(Signal *signal,
     case ZUPDATE:
     case ZDELETE:
       jam();
-      if (unlikely(terrorCode != ZNO_TUPLE_FOUND)) goto error;
+      if (unlikely(errorCode != ZNO_TUPLE_FOUND)) goto error;
       break;
     case ZINSERT:
       jam();
-      if (unlikely(terrorCode != ZTUPLE_ALREADY_EXIST && terrorCode != 899))
+      if (unlikely(errorCode != ZTUPLE_ALREADY_EXIST && errorCode != 899))
         goto error;
 
       break;
@@ -27543,15 +27603,12 @@ error:
   tmp.appfmt(
       "You have found a bug!"
       " Failed op (%s) during REDO table: %d fragment: %d err: %d",
-      tcConnectptr.p->operation == ZINSERT
-          ? "INSERT"
-          : tcConnectptr.p->operation == ZUPDATE
-                ? "UPDATE"
-                : tcConnectptr.p->operation == ZDELETE
-                      ? "DELETE"
-                      : tcConnectptr.p->operation == ZWRITE ? "WRITE"
-                                                            : "<unknown>",
-      tcConnectptr.p->tableref, tcConnectptr.p->fragmentid, terrorCode);
+      tcConnectptr.p->operation == ZINSERT   ? "INSERT"
+      : tcConnectptr.p->operation == ZUPDATE ? "UPDATE"
+      : tcConnectptr.p->operation == ZDELETE ? "DELETE"
+      : tcConnectptr.p->operation == ZWRITE  ? "WRITE"
+                                             : "<unknown>",
+      tcConnectptr.p->tableref, tcConnectptr.p->fragmentid, errorCode);
   progError(__LINE__, NDBD_EXIT_SYSTEM_ERROR, tmp.c_str());
 }  // Dblqh::logLqhkeyrefLab()
 
@@ -28046,8 +28103,7 @@ void Dblqh::systemErrorLab(Signal *signal, int line) {
 
 void Dblqh::takeOverErrorLab(Signal *signal,
                              const TcConnectionrecPtr tcConnectptr) {
-  terrorCode = ZTAKE_OVER_ERROR;
-  abortErrorLab(signal, tcConnectptr);
+  abortErrorLab(signal, tcConnectptr, ZTAKE_OVER_ERROR);
   return;
 }  // Dblqh::takeOverErrorLab()
 
@@ -29283,6 +29339,7 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->endInvalidMByteSearch = ZNIL;
   logPartPtr.p->firstInvalidatePageFound = false;
   logPartPtr.p->m_log_problems = 0;
+  logPartPtr.p->m_logged_buffer_full = 0;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];
@@ -29380,11 +29437,10 @@ void Dblqh::initReqinfoExecSr(Signal *signal,
  * -------               INSERT FRAGMENT                              -------
  *
  * ------------------------------------------------------------------------- */
-bool Dblqh::insertFragrec(Signal *signal, Uint32 fragId) {
-  terrorCode = ZOK;
+Uint32 Dblqh::insertFragrec(Signal *signal, Uint32 fragId) {
+  // Return error
   if (c_fragment_pool.seize(fragptr) == false) {
-    terrorCode = ZNO_FREE_FRAGMENTREC;
-    return false;
+    return ZNO_FREE_FRAGMENTREC;
   }
   ndbrequire(fragptr.p->fragStatus == Fragrecord::FREE);
   for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragid); i++) {
@@ -29393,12 +29449,11 @@ bool Dblqh::insertFragrec(Signal *signal, Uint32 fragId) {
       jam();
       tabptr.p->fragid[i] = fragId;
       tabptr.p->fragrec[i] = fragptr.i;
-      return true;
+      return ZOK;
     }  // if
   }    // for
   c_fragment_pool.release(fragptr);
-  terrorCode = ZTOO_MANY_FRAGMENTS;
-  return false;
+  return ZTOO_MANY_FRAGMENTS;
 }  // Dblqh::insertFragrec()
 
 /* -------------------------------------------------------------------------
@@ -32276,7 +32331,8 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
         TablerecPtr tabPtr;
         tabPtr.i = tableid;
         ptrAss(tabPtr, tablerec);
-        if (tabPtr.p->tableStatus != Tablerec::NOT_DEFINED) {
+        if (tabPtr.p->tableStatus == Tablerec::TABLE_DEFINED ||
+            tabPtr.p->tableStatus == Tablerec::TABLE_READ_ONLY) {
           jam();
           // Loop over all fragments for this table.
           for (Uint32 f = 0; f < NDB_ARRAY_SIZE(tabPtr.p->fragrec); f++) {
@@ -32361,7 +32417,8 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
         TablerecPtr tabPtr;
         tabPtr.i = tableid;
         ptrAss(tabPtr, tablerec);
-        if (tabPtr.p->tableStatus != Tablerec::NOT_DEFINED) {
+        if (tabPtr.p->tableStatus == Tablerec::TABLE_DEFINED ||
+            tabPtr.p->tableStatus == Tablerec::TABLE_READ_ONLY) {
           jam();
           // Loop over the fragments of this table.
           for (Uint32 fragNo = 0; fragNo < NDB_ARRAY_SIZE(tabPtr.p->fragrec);
@@ -32370,7 +32427,6 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
             if ((myFragPtr.i = tabPtr.p->fragrec[fragNo]) != RNIL) {
               jam();
               c_fragment_pool.getPtr(myFragPtr);
-
               /* Get fragment's stats from TUP */
               const Dbtup::FragStats fs =
                   c_tup->get_frag_stats(myFragPtr.p->tupFragptr);
@@ -32830,12 +32886,10 @@ void Dblqh::checkLcpFragWatchdog(Signal *signal) {
       warningEvent("%s %s", buf2, buf);
       c_tup->lcp_frag_watchdog_print(c_lcpFragWatchdog.tableId,
                                      c_lcpFragWatchdog.fragId);
-      g_eventLogger->info("%s %s", buf2, buf);
     } else {
       // LCP has finished checkpointing the tables, thus no need to
       // add completion status and table/frag info.
       warningEvent("%s", buf2);
-      g_eventLogger->info("%s", buf2);
     }
 
     if ((max_no_progress_time > 0) &&
@@ -32843,7 +32897,6 @@ void Dblqh::checkLcpFragWatchdog(Signal *signal) {
       jam();
       /* Too long with no progress... */
       warningEvent("Waited too long with LCP not progressing.");
-      g_eventLogger->info("Waited too long with LCP not progressing.");
 
       /**
        * Dump some LCP and GCP state for debugging...
@@ -33529,7 +33582,8 @@ void Dblqh::IOTracker::init(Uint32 partNo) {
   m_log_part_no = partNo;
 }
 
-int Dblqh::IOTracker::tick(Uint32 now, Uint32 maxlag, Uint32 maxlag_cnt) {
+int Dblqh::IOTracker::tick(Uint32 instance, Uint32 now, Uint32 maxlag,
+                           Uint32 maxlag_cnt) {
   Uint32 t = m_current_time;
 
   if ((t / SAMPLE_TIME) == (now / SAMPLE_TIME)) return 0;
@@ -33559,10 +33613,10 @@ int Dblqh::IOTracker::tick(Uint32 now, Uint32 maxlag, Uint32 maxlag_cnt) {
     Uint32 lag = bps ? m_sum_outstanding_bytes / bps : 30;
     if (false && lag >= 30) {
       g_eventLogger->info(
-          "part: %u tick(%u) m_sample_completed_bytes: %ukb "
+          "LQH %u : Redo log part %u tick(%u) m_sample_completed_bytes: %ukb "
           "m_sample_sent_bytes: %ukb elapsed: %u kbps: %u lag:"
           " %u",
-          m_log_part_no, now, Uint32(m_sample_completed_bytes / 1024),
+          instance, m_log_part_no, now, Uint32(m_sample_completed_bytes / 1024),
           Uint32(m_sample_sent_bytes / 1024), elapsed, bps / 1000, lag);
     }
 
@@ -33587,6 +33641,7 @@ int Dblqh::IOTracker::tick(Uint32 now, Uint32 maxlag, Uint32 maxlag_cnt) {
        *   increase m_lag_cnt and check if it has reached maxlag_cnt
        */
       Uint32 tmp = m_lag_cnt;
+      // Check precedence in below function - what is it implementing?
       m_lag_cnt += (lag / (maxlag) ? maxlag : 1);
       if (tmp < maxlag_cnt && m_lag_cnt >= maxlag_cnt) {
         retVal = -1;  // start aborting transactions
@@ -33605,19 +33660,20 @@ int Dblqh::IOTracker::tick(Uint32 now, Uint32 maxlag, Uint32 maxlag_cnt) {
 #if 1
     if (m_lag_cnt == 0 && lag == 0) {
     } else if (lag > 0 && m_lag_cnt == 0) {
-      g_eventLogger->info("part: %u : time to complete: %u", m_log_part_no,
-                          lag);
+      g_eventLogger->info(
+          "LQH %u : Redo log part %u : Lag - time to complete : %us", instance,
+          m_log_part_no, lag);
     } else if (m_lag_cnt < maxlag_cnt && m_lag_cnt == save_lag_cnt) {
       g_eventLogger->info(
-          "part: %u : time to complete: %u lag_cnt:"
+          "LQH %u : Redo log part %u : Lag - time to complete : %us lag count :"
           " %u => %u => retVal: %d",
-          m_log_part_no, lag, save_lag_cnt, m_lag_cnt, retVal);
+          instance, m_log_part_no, lag, save_lag_cnt, m_lag_cnt, retVal);
     } else {
       g_eventLogger->info(
-          "part: %u : sum_outstanding: %ukb avg_written:"
+          "LQH %u : Redo log part %u : Lag - sum_outstanding: %ukb avg_written:"
           " %ukb avg_elapsed: %ums time to complete:"
-          " %u lag_cnt: %u => %u retVal: %d",
-          m_log_part_no, Uint32(m_sum_outstanding_bytes / 1024),
+          " %us lag count : %u => %u retVal: %d",
+          instance, m_log_part_no, Uint32(m_sum_outstanding_bytes / 1024),
           Uint32(m_curr_written_bytes / 1024), m_curr_elapsed_millis, lag,
           save_lag_cnt, m_lag_cnt, retVal);
     }
@@ -33866,3 +33922,28 @@ void Dblqh::decrement_usage_count_for_table(Uint32 tableId) {
   ptrCheckGuard(tabPtr, ctabrecFileSize, tablerec);
   tabPtr.p->usageCountR--;
 }
+
+#if defined(USE_INIT_GLOBAL_VARIABLES)
+void Dblqh::checkInitGlobalVariables() {
+  /* Called between signal executions in the job buffer */
+  if (qt_likely(globalData.ndbMtQueryThreads > 0)) {
+    if (unlikely(m_fragment_lock_status != FRAGMENT_UNLOCKED)) {
+      jam();
+      jamLine(refToMain(reference()));
+      jamLine(refToInstance(reference()));
+      jamLine(m_fragment_lock_status);
+      jamLine(m_old_fragment_lock_status);
+
+      g_eventLogger->error(
+          "Block %u instance %u should be unlocked but has "
+          "fragment lock status %u "
+          "old status %u",
+          refToMain(reference()), refToInstance(reference()),
+          m_fragment_lock_status, m_old_fragment_lock_status);
+
+      const bool fragmentLockReleased = false;
+      ndbrequire(fragmentLockReleased);
+    }
+  }
+}
+#endif

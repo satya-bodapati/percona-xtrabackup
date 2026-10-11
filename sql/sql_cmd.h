@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -132,6 +132,14 @@ class Sql_cmd {
     @returns false if success, true if error
   */
   virtual bool execute(THD *thd) = 0;
+
+  /**
+    Some SQL commands currently require re-preparation on re-execution of a
+    prepared statement or stored procedure. For example, a CREATE TABLE command
+    containing an index expression.
+    @return true if re-preparation is required, false otherwise.
+  */
+  virtual bool reprepare_on_execute_required() const { return false; }
 
   /**
     Command-specific reinitialization before execution of prepared statement

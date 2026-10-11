@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -131,6 +131,10 @@ int Module_mysqlx::initialize(MYSQL_PLUGIN plugin_handle) {
   xpl::plugin_handle = plugin_handle;
 
   try {
+    DBUG_EXECUTE_IF("xplugin_shutdown_unixsocket", {
+      XSYNC_POINT_ENABLE({"xacceptor_stop_wait", "xacceptor_pre_loop_wait",
+                          "xacceptor_post_loop_wait"});
+    });
     xpl::init_performance_schema();
 
     provide_udfs();
@@ -189,11 +193,11 @@ int Module_mysqlx::initialize(MYSQL_PLUGIN plugin_handle) {
     if (!Module_cache::m_is_sha256_password_cache_enabled) {
       m_server->delayed_start_tasks();
     }
-
+#ifdef HAVE_PSI_METRICS_INTERFACE
     mysql_meter_register(xpl::Plugin_status_variables::m_xpl_meter,
                          xpl::Plugin_status_variables::get_meter_count());
-
-    guard_of_server_start.commit();
+#endif /* HAVE_PSI_METRICS_INTERFACE */
+    guard_of_server_start.release();
   } catch (const std::exception &e) {
     log_error(ER_XPLUGIN_STARTUP_FAILED, e.what());
     return 1;
@@ -224,9 +228,10 @@ int Module_mysqlx::deinitialize(MYSQL_PLUGIN) {
   unrequire_services();
   unprovide_services();
   unregister_udfs();
+#ifdef HAVE_PSI_METRICS_INTERFACE
   mysql_meter_unregister(xpl::Plugin_status_variables::m_xpl_meter,
                          xpl::Plugin_status_variables::get_meter_count());
-
+#endif /* HAVE_PSI_METRICS_INTERFACE */
   xpl::plugin_handle = nullptr;
 
   return 0;

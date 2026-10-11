@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1561,7 +1561,7 @@ void Clone_Snapshot::end_ddl_file(Clone_notify::Type type, space_id_t space) {
   if (file_index == 0) {
     /* purecov: begin deadcode */
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
     /* purecov: end */
   }
   --file_index;

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -120,7 +120,6 @@ int ndb_file::read_backward(void *buf, ndb_file::size_t count) const {
   }
 
   const DWORD size = count;
-  require(size > 0);
   DWORD dwBytesRead;
   BOOL bRead = ReadFile(m_handle, buf, size, &dwBytesRead, nullptr);
   if (!bRead) {
@@ -131,6 +130,7 @@ int ndb_file::read_backward(void *buf, ndb_file::size_t count) const {
     return -1;
   }
   if (dwBytesRead != size) {
+    SetLastError(0);  // Partial read
     return -1;
   }
 
@@ -356,12 +356,13 @@ void ndb_file::invalidate() {
   m_handle = INVALID_HANDLE_VALUE;
 }
 
-bool ndb_file::have_direct_io_support() const { return false; }
+bool ndb_file::have_direct_io_support() { return false; }
 
 bool ndb_file::avoid_direct_io_on_append() const { return false; }
 
 int ndb_file::set_direct_io(bool /* assume_implicit_datasync */) {
   // Not implemented.
+  SetLastError(ERROR_INVALID_DATA);
   return -1;
 }
 

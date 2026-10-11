@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -42,7 +42,7 @@
 class ReverseIndexRangeScanIterator : public TableRowIterator {
  public:
   ReverseIndexRangeScanIterator(THD *thd, TABLE *table, ha_rows *examined_rows,
-                                double expected_rows, int index,
+                                double expected_rows, uint index,
                                 MEM_ROOT *return_mem_root, uint mrr_flags,
                                 Bounds_checked_array<QUICK_RANGE *> ranges,
                                 bool using_extended_key_parts);
@@ -54,7 +54,7 @@ class ReverseIndexRangeScanIterator : public TableRowIterator {
   static range_seq_t quick_range_rev_seq_init(void *init_param, uint, uint);
 
   const uint m_index; /* Index this quick select uses */
-  ha_rows m_expected_rows;
+  const double m_expected_rows;
   ha_rows *m_examined_rows;
 
   MEM_ROOT *mem_root;
@@ -78,6 +78,9 @@ class ReverseIndexRangeScanIterator : public TableRowIterator {
   // Whether this reverse scan uses extended keyparts (in case of Innodb,
   // secondary index is extended to include primary key).
   bool m_using_extended_key_parts{false};
+
+  // To check if the index is a multi-valued index.
+  bool m_multi_valued_index;
 
   bool range_reads_after_key(QUICK_RANGE *range);
   int cmp_prev(QUICK_RANGE *range);

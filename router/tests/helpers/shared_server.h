@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -80,13 +80,14 @@ class SharedServer {
 
   stdx::expected<MysqlClient, MysqlError> admin_cli();
 
-  void create_schema(MysqlClient &cli, const std::string &schema);
+  static void create_schema(MysqlClient &cli, const std::string &schema);
 
-  void grant_access(MysqlClient &cli, const Account &account,
-                    const std::string &rights);
+  static void grant_access(MysqlClient &cli, const Account &account,
+                           const std::string &rights);
 
-  void grant_access(MysqlClient &cli, const Account &account,
-                    const std::string &rights, const std::string &schema);
+  static void grant_access(MysqlClient &cli, const Account &account,
+                           const std::string &rights,
+                           const std::string &schema);
 
   static void create_account(MysqlClient &cli, Account account);
 

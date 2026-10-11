@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -48,14 +48,15 @@ using BaseRequestHandlerPtr = HttpRequestRouter::BaseRequestHandlerPtr;
 void HttpRequestRouter::append(const std::string &url_regex_str,
                                std::unique_ptr<http::base::RequestHandler> cb) {
   log_debug("adding route for regex: %s", url_regex_str.c_str());
-  std::lock_guard<std::mutex> lock(route_mtx_);
+  std::unique_lock lock(route_mtx_);
+
   request_handlers_.emplace_back(RouterData{
       url_regex_str, std::regex{url_regex_str, std::regex_constants::extended},
       std::move(cb)});
 }
 
 void HttpRequestRouter::remove(const void *handler_id) {
-  std::lock_guard<std::mutex> lock(route_mtx_);
+  std::unique_lock lock(route_mtx_);
 
   for (auto it = request_handlers_.begin(); it != request_handlers_.end();) {
     if (it->handler.get() == handler_id) {
@@ -69,7 +70,8 @@ void HttpRequestRouter::remove(const void *handler_id) {
 
 void HttpRequestRouter::remove(const std::string &url_regex_str) {
   log_debug("removing route for regex: %s", url_regex_str.c_str());
-  std::lock_guard<std::mutex> lock(route_mtx_);
+  std::unique_lock lock(route_mtx_);
+
   for (auto it = request_handlers_.begin(); it != request_handlers_.end();) {
     if (it->url_regex_str == url_regex_str) {
       it = request_handlers_.erase(it);
@@ -98,13 +100,15 @@ void HttpRequestRouter::handler_not_found(http::base::Request &req) {
 void HttpRequestRouter::set_default_route(
     std::unique_ptr<http::base::RequestHandler> cb) {
   log_debug("adding default route");
-  std::lock_guard<std::mutex> lock(route_mtx_);
+  std::unique_lock lock(route_mtx_);
+
   default_route_ = std::move(cb);
 }
 
 void HttpRequestRouter::clear_default_route() {
   log_debug("removing default route");
-  std::lock_guard<std::mutex> lock(route_mtx_);
+  std::unique_lock lock(route_mtx_);
+
   default_route_ = nullptr;
 }
 
@@ -147,7 +151,7 @@ void HttpRequestRouter::route(http::base::Request &req) {
 
 BaseRequestHandlerPtr HttpRequestRouter::find_route_handler(
     const std::string &path) {
-  std::lock_guard<std::mutex> lock(route_mtx_);
+  std::shared_lock lock(route_mtx_);
 
   for (auto &request_handler : request_handlers_) {
     if (std::regex_search(path, request_handler.url_regex)) {

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -29,8 +29,8 @@
 #include <csignal>
 #include <cstring>  // strsignal
 #include <fstream>
-#include <future>  // promise
-#include <iostream>
+#include <future>    // promise
+#include <iostream>  // cerr
 #include <mutex>
 #include <system_error>
 
@@ -43,7 +43,7 @@
 #include <unistd.h>
 #endif
 
-#include "config.h"  // HAVE_SYS_PRCTL_H
+#include "my_config.h"  // HAVE_SYS_PRCTL_H
 
 #ifdef HAVE_SYS_PRCTL_H
 #include <sys/prctl.h>

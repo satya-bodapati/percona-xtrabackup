@@ -1,4 +1,4 @@
-/* Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -328,14 +328,14 @@ auto static set_variable(stored_program_runtime_context sp_runtime_context,
   if (index < 0) return MYSQL_FAILURE;
   auto runtime_context = reinterpret_cast<sp_rcontext *>(sp_runtime_context);
   if (runtime_context == nullptr) runtime_context = current_thd->sp_runtime_ctx;
-  return runtime_context->set_variable(current_thd, index, &item);
+  return runtime_context->set_variable(current_thd, false, index, &item);
 }
 
 auto static set_return_value(stored_program_runtime_context sp_runtime_context,
                              Item *item) -> int {
   auto runtime_context = reinterpret_cast<sp_rcontext *>(sp_runtime_context);
   if (runtime_context == nullptr) runtime_context = current_thd->sp_runtime_ctx;
-  return runtime_context->set_return_value(current_thd, &item);
+  return runtime_context->set_return_value(current_thd, false, &item);
 }
 
 auto static get_item(stored_program_runtime_context sp_runtime_context,

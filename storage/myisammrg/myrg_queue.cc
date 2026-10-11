@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -45,9 +45,9 @@ static int queue_key_cmp(void *keyseg, uchar *a, uchar *b) {
     rowid). This is used by index_merge access method, grep for ROR in
     sql/opt_range.cc for details.
   */
-  return (ma->file_offset < mb->file_offset)
-             ? -1
-             : (ma->file_offset > mb->file_offset) ? 1 : 0;
+  return (ma->file_offset < mb->file_offset)   ? -1
+         : (ma->file_offset > mb->file_offset) ? 1
+                                               : 0;
 } /* queue_key_cmp */
 
 int _myrg_init_queue(MYRG_INFO *info, int inx,

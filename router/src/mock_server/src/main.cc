@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -25,7 +25,8 @@
 
 #include <array>
 #include <csignal>
-#include <iostream>
+#include <iostream>  // cerr
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -73,16 +74,10 @@ struct MysqlServerMockConfig {
 };
 
 static void init_DIM() {
-  mysql_harness::DIM &dim = mysql_harness::DIM::instance();
+  static mysql_harness::logging::Registry static_registry;
 
   // logging facility
-  dim.set_LoggingRegistry(
-      []() {
-        static mysql_harness::logging::Registry registry;
-        return &registry;
-      },
-      [](mysql_harness::logging::Registry *) {}  // don't delete our static!
-  );
+  mysql_harness::DIM::instance().set_static_LoggingRegistry(&static_registry);
 }
 
 class MysqlServerMockFrontend {
@@ -122,10 +117,11 @@ class MysqlServerMockFrontend {
 
   void run() {
     init_DIM();
-    std::unique_ptr<mysql_harness::LoaderConfig> loader_config(
-        new mysql_harness::LoaderConfig(mysql_harness::Config::allow_keys));
+    auto loader_config = std::make_unique<mysql_harness::LoaderConfig>(
+        mysql_harness::Config::allow_keys);
 
     mysql_harness::DIM &dim = mysql_harness::DIM::instance();
+
     mysql_harness::logging::Registry &registry = dim.get_LoggingRegistry();
 
     const auto log_level = config_.verbose
@@ -139,7 +135,7 @@ class MysqlServerMockFrontend {
          "rest_mock_server"},
         mysql_harness::logging::kMainLogger);
     mysql_harness::logging::create_main_log_handler(
-        registry, "mock_server", config_.logging_folder, true);
+        registry, "mock_server_" + config_.port, config_.logging_folder, true);
 
     registry.set_ready();
 
@@ -160,6 +156,22 @@ class MysqlServerMockFrontend {
     logger_conf.add("timestamp_precision", "ms");
     const std::string logfile_name = "mock_server_" + config_.port + ".log";
     logger_conf.add("filename", logfile_name);
+
+    signal_handler_.add_sig_handler(
+        SIGTERM, [&](int /* sig */, const std::string &signal_info) {
+          mysql_harness::ProcessStateComponent::get_instance()
+              .request_application_shutdown(
+                  mysql_harness::ShutdownPending::Reason::REQUESTED,
+                  signal_info);
+        });
+
+    signal_handler_.add_sig_handler(
+        SIGINT, [&](int /* sig */, const std::string &signal_info) {
+          mysql_harness::ProcessStateComponent::get_instance()
+              .request_application_shutdown(
+                  mysql_harness::ShutdownPending::Reason::REQUESTED,
+                  signal_info);
+        });
 
     // initialize the signal handler
     signal_handler_.register_ignored_signals_handler();
@@ -239,14 +251,13 @@ class MysqlServerMockFrontend {
       mock_x_server_config.set("ssl_crlpath", config_.ssl_crlpath);
     }
 
-    mysql_harness::DIM::instance().set_Config(
-        [&]() { return loader_config.release(); },
-        std::default_delete<mysql_harness::LoaderConfig>());
+    dim.set_Config(loader_config.release(),
+                   std::default_delete<mysql_harness::LoaderConfig>());
 
     std::unique_ptr<mysql_harness::Loader> loader_;
     try {
       loader_ = std::make_unique<mysql_harness::Loader>("server-mock",
-                                                        *loader_config);
+                                                        dim.get_Config());
     } catch (const std::runtime_error &err) {
       throw std::runtime_error(std::string("init-loader failed: ") +
                                err.what());
@@ -254,38 +265,14 @@ class MysqlServerMockFrontend {
 
     log_debug("Starting");
 
-#if !defined(_WIN32)
-    //
-    // reopen the logfile on SIGHUP.
-    //
-
     static const char kSignalHandlerServiceName[]{"signal_handler"};
 
     loader_->waitable_services().emplace_back(kSignalHandlerServiceName);
 
-    // as the LogReopener depends on the loggers being started, it must be
-    // initialized after Loader::start_all() has been called.
-    loader_->after_all_started([&]() {
-      signal_handler_.add_sig_handler(
-          SIGTERM, [&](int /* sig */, const std::string &signal_info) {
-            mysql_harness::ProcessStateComponent::get_instance()
-                .request_application_shutdown(
-                    mysql_harness::ShutdownPending::Reason::REQUESTED,
-                    signal_info);
-          });
+    loader_->after_all_started(
+        [&]() { mysql_harness::on_service_ready(kSignalHandlerServiceName); });
 
-      signal_handler_.add_sig_handler(
-          SIGINT, [&](int /* sig */, const std::string &signal_info) {
-            mysql_harness::ProcessStateComponent::get_instance()
-                .request_application_shutdown(
-                    mysql_harness::ShutdownPending::Reason::REQUESTED,
-                    signal_info);
-          });
-
-      mysql_harness::on_service_ready(kSignalHandlerServiceName);
-    });
-
-    // after the first plugin finished, stop the log-reopener
+#if !defined(_WIN32)
     loader_->after_first_finished([&]() {
       signal_handler_.remove_sig_handler(SIGTERM);
       signal_handler_.remove_sig_handler(SIGINT);

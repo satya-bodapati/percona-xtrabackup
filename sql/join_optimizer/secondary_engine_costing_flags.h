@@ -1,4 +1,4 @@
-/* Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -56,7 +56,7 @@ constexpr inline SecondaryEngineCostingFlags MakeSecondaryEngineCostingFlags() {
 /// Creates a bitmap representing a set of costing flags.
 template <typename... Args>
 constexpr inline SecondaryEngineCostingFlags MakeSecondaryEngineCostingFlags(
-    const SecondaryEngineCostingFlag &flag1, const Args &... rest) {
+    const SecondaryEngineCostingFlag &flag1, const Args &...rest) {
   return (uint64_t{1} << static_cast<SecondaryEngineCostingFlags>(flag1)) |
          MakeSecondaryEngineCostingFlags(rest...);
 }

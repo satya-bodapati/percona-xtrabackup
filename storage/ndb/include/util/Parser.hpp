@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -34,7 +34,7 @@ class ParserImpl;
 template <class T>
 struct ParserRow;
 
-//#define PARSER_DEBUG
+// #define PARSER_DEBUG
 #ifdef PARSER_DEBUG
 #include <EventLogger.hpp>
 #define DEBUG(x) g_eventLogger->info("%s:%d:%s", __FILE__, __LINE__, x);

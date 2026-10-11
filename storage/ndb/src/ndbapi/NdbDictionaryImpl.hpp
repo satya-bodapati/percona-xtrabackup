@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -314,8 +314,8 @@ class NdbTableImpl : public NdbDictionary::Table, public NdbDictObjectImpl {
   Uint8 m_noOfKeys;
   // if all pk = dk then this is zero!
   Uint8 m_noOfDistributionKeys;
-  Uint8 m_noOfBlobs;
-  Uint8 m_noOfDiskColumns;
+  Uint16 m_noOfBlobs;
+  Uint16 m_noOfDiskColumns;
   Uint8 m_replicaCount;
 
   /**
@@ -742,7 +742,7 @@ class NdbDictInterface {
   int createEvent(NdbEventImpl &, int getFlag);
   int dropEvent(const NdbEventImpl &);
 
-  int executeSubscribeEvent(NdbEventOperationImpl &);
+  int executeSubscribeEvent(NdbEventOperationImpl &, Uint64 &setup_epoch);
   int stopSubscribeEvent(NdbEventOperationImpl &, Uint64 &stop_gci);
 
   int listObjects(NdbDictionary::Dictionary::List &list, ListTablesReq &ltreq,
@@ -947,7 +947,7 @@ class NdbDictionaryImpl : public NdbDictionary::Dictionary {
   int dropBlobEvents(const NdbEventImpl &);
   int listEvents(List &list);
 
-  int executeSubscribeEvent(NdbEventOperationImpl &);
+  int executeSubscribeEvent(NdbEventOperationImpl &, Uint64 &setup_epoch);
   int stopSubscribeEvent(NdbEventOperationImpl &, Uint64 &stop_gci);
 
   int forceGCPWait(int type);

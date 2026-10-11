@@ -1,4 +1,4 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -86,6 +86,10 @@
 /* clang-format on */
 
 static void native_password_authentication_deprecation_warning() {
+  static std::atomic<bool> warning_logged = false;
+
+  if (warning_logged) return;
+
   /*
     Deprecate message for mysql_native_password plugin.
   */
@@ -94,6 +98,8 @@ static void native_password_authentication_deprecation_warning() {
                    PLUGIN_MYSQL_NATIVE_PASSWORD),
                Cached_authentication_plugins::get_plugin_name(
                    PLUGIN_CACHING_SHA2_PASSWORD));
+
+  warning_logged = true;
 }
 
 static int generate_native_password(char *outbuf, unsigned int *buflen,

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -542,8 +542,8 @@ static int merge_buffers(MI_SORT_PARAM *info, uint keys, IO_CACHE *from_file,
     count += buffpek->count;
     buffpek->base = strpos;
     buffpek->max_keys = maxcount;
-    strpos += (uint)(
-        error = (int)info->read_to_buffer(from_file, buffpek, sort_length));
+    strpos += (uint)(error = (int)info->read_to_buffer(from_file, buffpek,
+                                                       sort_length));
     if (error == -1) goto err; /* purecov: inspected */
     queue_insert(&queue, (uchar *)buffpek);
   }

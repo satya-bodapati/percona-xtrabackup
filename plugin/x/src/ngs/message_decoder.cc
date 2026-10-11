@@ -1,4 +1,4 @@
-// Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+// Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
@@ -142,7 +142,7 @@ class Message_decoder::Compressed_message_decoder {
   }
 
   template <typename... Args>
-  bool parse_compressed_header(Args *... values) {
+  bool parse_compressed_header(Args *...values) {
     {
       CodedInputStream is(m_input_stream);
       if (!read_ints(&is, values...)) return false;
@@ -201,7 +201,7 @@ class Message_decoder::Compressed_message_decoder {
   bool read_ints(CodedInputStream *) { return true; }
 
   template <typename... Rest>
-  bool read_ints(CodedInputStream *cis, uint8_t *first, Rest *... rest) {
+  bool read_ints(CodedInputStream *cis, uint8_t *first, Rest *...rest) {
     if (!cis->ReadRaw(first, 1)) return false;
     DBUG_LOG("debug", "Frame extra header uint8_t=" << *first);
 
@@ -209,7 +209,7 @@ class Message_decoder::Compressed_message_decoder {
   }
 
   template <typename... Rest>
-  bool read_ints(CodedInputStream *cis, uint32_t *first, Rest *... rest) {
+  bool read_ints(CodedInputStream *cis, uint32_t *first, Rest *...rest) {
     if (!cis->ReadLittleEndian32(first)) return false;
     DBUG_LOG("debug", "Frame extra header uint32_t=" << *first);
 

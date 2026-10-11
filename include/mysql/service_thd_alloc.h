@@ -1,5 +1,5 @@
 #ifndef MYSQL_SERVICE_THD_ALLOC_INCLUDED
-/* Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -52,7 +52,7 @@ extern "C" struct thd_alloc_service_st {
   void *(*thd_memdup_func)(MYSQL_THD, const void *, size_t);
   MYSQL_LEX_STRING *(*thd_make_lex_string_func)(MYSQL_THD, MYSQL_LEX_STRING *,
                                                 const char *, size_t, int);
-} * thd_alloc_service;
+} *thd_alloc_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

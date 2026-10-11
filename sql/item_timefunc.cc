@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -867,9 +867,9 @@ my_decimal *Item_temporal_hybrid_func::val_decimal(my_decimal *decimal_value) {
 
     val_datetime(&ltime, flags);
     return null_value ? nullptr
-                      : ltime.time_type == MYSQL_TIMESTAMP_TIME
-                            ? time2my_decimal(&ltime, decimal_value)
-                            : date2my_decimal(&ltime, decimal_value);
+           : ltime.time_type == MYSQL_TIMESTAMP_TIME
+               ? time2my_decimal(&ltime, decimal_value)
+               : date2my_decimal(&ltime, decimal_value);
   }
 }
 

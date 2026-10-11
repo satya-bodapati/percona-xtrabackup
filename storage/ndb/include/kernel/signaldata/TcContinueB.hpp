@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -58,13 +58,7 @@ class TcContinueB {
     ZNF_CHECK_TRANSACTIONS = 19,
     ZSEND_FIRE_TRIG_REQ = 20,
     ZSTART_FRAG_SCANS = 21,
-    ZSEND_FRAG_SCANS = 22
-#ifdef ERROR_INSERT
-    ,
-    ZDEBUG_DELAYED_ABORT = 23,
-    ZDEBUG_DELAY_TCROLLBACKREP = 24
-#endif
-    ,
+    ZSEND_FRAG_SCANS = 22,
     ZSCAN_FOR_READ_BACKUP = 25,
     ZTRANSIENT_POOL_STAT = 26,
     ZSHRINK_TRANSIENT_POOLS = 27

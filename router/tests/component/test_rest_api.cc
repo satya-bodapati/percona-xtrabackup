@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -344,8 +344,10 @@ TEST_F(RestOpenApiTest, invalid_realm) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 
@@ -370,8 +372,10 @@ TEST_F(RestOpenApiTest, duplicated_rest_api_section) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 
@@ -394,8 +398,10 @@ TEST_F(RestOpenApiTest, rest_api_section_key) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 

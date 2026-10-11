@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -51,7 +51,7 @@
  *   - This can help understand usage, leaks etc...
  *   - The owner tag idea may be useful for other resources in future
  */
-//#define NDB_DEBUG_RES_OWNERSHIP
+// #define NDB_DEBUG_RES_OWNERSHIP
 
 /**
  * Section handling

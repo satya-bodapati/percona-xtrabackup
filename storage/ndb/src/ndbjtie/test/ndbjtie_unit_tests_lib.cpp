@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+ Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -52,7 +52,7 @@
 // if they are declared to receive "C" linkage here.
 extern "C" {
 
-//#include "test_NdbJTieConstantsTest.h"
+// #include "test_NdbJTieConstantsTest.h"
 
 /*
  * Class:     test_NdbJTieConstantsTest

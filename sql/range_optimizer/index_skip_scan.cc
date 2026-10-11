@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -32,6 +32,7 @@
 #include "my_sys.h"
 #include "mysql/service_mysql_alloc.h"
 #include "mysql/strings/m_ctype.h"
+#include "scope_guard.h"
 #include "sql/handler.h"
 #include "sql/psi_memory_key.h"
 #include "sql/range_optimizer/internal.h"
@@ -156,6 +157,10 @@ bool IndexSkipScanIterator::Init(void) {
   MY_BITMAP *const save_read_set = table()->read_set;
 
   table()->column_bitmaps_set_no_signal(&column_bitmap, table()->write_set);
+  Scope_guard guard{[this, save_read_set]() {
+    table()->column_bitmaps_set_no_signal(save_read_set, table()->write_set);
+  }};
+
   if ((result = table()->file->ha_index_init(index, true))) {
     table()->file->print_error(result, MYF(0));
     return true;
@@ -172,7 +177,6 @@ bool IndexSkipScanIterator::Init(void) {
     assert(offset <= eq_prefix_len);
   }
 
-  table()->column_bitmaps_set_no_signal(save_read_set, table()->write_set);
   return false;
 }
 
@@ -269,6 +273,9 @@ int IndexSkipScanIterator::Read() {
 
   MY_BITMAP *const save_read_set = table()->read_set;
   table()->column_bitmaps_set_no_signal(&column_bitmap, table()->write_set);
+  Scope_guard guard{[this, save_read_set]() {
+    table()->column_bitmaps_set_no_signal(save_read_set, table()->write_set);
+  }};
   do {
     if (!is_prefix_valid) {
       if (!seen_first_key) {
@@ -294,8 +301,8 @@ int IndexSkipScanIterator::Read() {
                distinct_prefix_len);
 
       if (eq_prefix) {
-        past_eq_prefix =
-            key_cmp(index_info->key_part, eq_prefix, eq_prefix_len);
+        past_eq_prefix = key_cmp(index_info->key_part, eq_prefix, eq_prefix_len,
+                                 /*is_reverse_multi_valued_index_scan=*/false);
         assert(past_eq_prefix >= 0);
 
         // We are past the equality prefix, so get the next prefix.
@@ -328,9 +335,8 @@ int IndexSkipScanIterator::Read() {
         start_key.keypart_map = make_prev_keypart_map(used_key_parts);
         start_key.flag = (range_cond_flag & (EQ_RANGE | NULL_RANGE))
                              ? HA_READ_KEY_EXACT
-                             : (range_cond_flag & NEAR_MIN)
-                                   ? HA_READ_AFTER_KEY
-                                   : HA_READ_KEY_OR_NEXT;
+                         : (range_cond_flag & NEAR_MIN) ? HA_READ_AFTER_KEY
+                                                        : HA_READ_KEY_OR_NEXT;
       } else {
         // If there is no minimum key, just use the distinct prefix.
         start_key.key = distinct_prefix;
@@ -388,8 +394,6 @@ int IndexSkipScanIterator::Read() {
     }
   } while (!thd()->killed &&
            (result == HA_ERR_KEY_NOT_FOUND || result == HA_ERR_END_OF_FILE));
-
-  table()->column_bitmaps_set_no_signal(save_read_set, table()->write_set);
 
   if (result == 0) {
     return 0;

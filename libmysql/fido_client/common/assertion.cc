@@ -1,4 +1,4 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -153,6 +153,6 @@ fido_dev_info_t *assertion::discover_fido2_devices(size_t num_devices) {
     return nullptr;
   }
 
-  cleanup_guard.commit();
+  cleanup_guard.release();
   return dev_infos;
 }

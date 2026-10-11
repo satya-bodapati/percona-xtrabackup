@@ -1,4 +1,4 @@
-// Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+// Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
@@ -139,9 +139,10 @@ size_t write_varlen_bytes(unsigned char *stream,
 /// @return Number of bytes read from the stream or 0 on error. Error occurs
 /// if the stream ends before or in the middle of the encoded numbers.
 template <typename Type>
-size_t read_varlen_bytes_unsigned(
-    const unsigned char *stream, std::size_t stream_bytes,
-    Type &data) requires std::unsigned_integral<Type> {
+size_t read_varlen_bytes_unsigned(const unsigned char *stream,
+                                  std::size_t stream_bytes, Type &data)
+  requires std::unsigned_integral<Type>
+{
   if (stream_bytes == 0) {
     return stream_bytes;
   }
@@ -171,9 +172,10 @@ size_t read_varlen_bytes_unsigned(
 
 /// @copydoc read_varlen_bytes_unsigned
 template <typename Type>
-size_t read_varlen_bytes_signed(
-    const unsigned char *stream, std::size_t stream_bytes,
-    Type &data) requires std::signed_integral<Type> {
+size_t read_varlen_bytes_signed(const unsigned char *stream,
+                                std::size_t stream_bytes, Type &data)
+  requires std::signed_integral<Type>
+{
   using Type_unsigned = std::make_unsigned_t<Type>;
   Type_unsigned data_tmp = 0;
   std::size_t num_bytes =

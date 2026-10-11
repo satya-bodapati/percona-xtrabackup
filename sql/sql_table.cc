@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1511,20 +1511,40 @@ bool rm_table_do_discovery_and_lock_fk_tables(THD *thd, Table_ref *tables) {
   return false;
 }
 
-void Foreign_key_parents_invalidator::add(const char *db_name,
-                                          const char *table_name,
-                                          handlerton *hton) {
+void Foreign_key_parents_invalidator::add(
+    const char *db_name, const char *table_name, handlerton *hton,
+    enum_invalidation_type invalidation_type) {
   m_parent_map.insert(typename Parent_map::value_type(
-      typename Parent_map::key_type(db_name, table_name), hton));
+      typename Parent_map::key_type(db_name, table_name),
+      typename Parent_map::mapped_type(hton, invalidation_type)));
+}
+
+void Foreign_key_parents_invalidator::mark_for_reopen_if_added(
+    const char *db_name, const char *table_name) {
+  auto parent_it =
+      m_parent_map.find(typename Parent_map::key_type(db_name, table_name));
+  if (parent_it != m_parent_map.end()) {
+    parent_it->second.second =
+        enum_invalidation_type::INVALIDATE_AND_MARK_FOR_REOPEN;
+  }
 }
 
 void Foreign_key_parents_invalidator::invalidate(THD *thd) {
   for (auto parent_it : m_parent_map) {
-    // Invalidate Table and Table Definition Caches too.
-    mysql_ha_flush_table(thd, parent_it.first.first.c_str(),
-                         parent_it.first.second.c_str());
-    close_all_tables_for_name(thd, parent_it.first.first.c_str(),
-                              parent_it.first.second.c_str(), false);
+    if (parent_it.second.second ==
+        enum_invalidation_type::INVALIDATE_AND_CLOSE_TABLE) {
+      // Invalidate Table and Table Definition Caches too.
+      mysql_ha_flush_table(thd, parent_it.first.first.c_str(),
+                           parent_it.first.second.c_str());
+      close_all_tables_for_name(thd, parent_it.first.first.c_str(),
+                                parent_it.first.second.c_str(), false);
+    } else {
+      assert(parent_it.second.second ==
+             enum_invalidation_type::INVALIDATE_AND_MARK_FOR_REOPEN);
+      tdc_remove_table(thd, TDC_RT_MARK_FOR_REOPEN,
+                       parent_it.first.first.c_str(),
+                       parent_it.first.second.c_str(), false);
+    }
 
     /*
       TODO: Should revisit the way we do invalidation to avoid
@@ -3953,6 +3973,8 @@ namespace {
 
 struct sort_keys {
   bool operator()(const KEY &a, const KEY &b) const {
+    // std::sort may compare an element to itself:
+    if (&a == &b) return false;
     // Sort UNIQUE before not UNIQUE.
     if ((a.flags ^ b.flags) & HA_NOSAME) return a.flags & HA_NOSAME;
 
@@ -4653,7 +4675,7 @@ bool prepare_create_field(THD *thd, const char *error_schema_name,
 
   if (!(sql_field->flags & NOT_NULL_FLAG)) create_info->null_bits++;
 
-  if (check_column_name(sql_field->field_name)) {
+  if (check_column_name(to_lex_cstring(sql_field->field_name))) {
     my_error(ER_WRONG_COLUMN_NAME, MYF(0), sql_field->field_name);
     return true;
   }
@@ -7445,7 +7467,7 @@ static bool prepare_key(
     return true;
   }
 
-  if (!key_info->name || check_column_name(key_info->name)) {
+  if (!key_info->name || check_column_name(to_lex_cstring(key_info->name))) {
     my_error(ER_WRONG_NAME_FOR_INDEX, MYF(0), key_info->name);
     return true;
   }
@@ -8006,7 +8028,7 @@ static Create_field *add_functional_index_to_create_list(
 
   // First we need to resolve the expression in the functional index so that we
   // know the correct collation, data type, length etc...
-  const ulong saved_privilege = thd->want_privilege;
+  const Access_bitmask saved_privilege = thd->want_privilege;
   thd->want_privilege = SELECT_ACL;
 
   {
@@ -8017,6 +8039,8 @@ static Create_field *add_functional_index_to_create_list(
 
     const Functional_index_error_handler error_handler(
         {key_spec->name.str, key_spec->name.length}, thd);
+
+    const Prepared_stmt_arena_holder ps_arena_holder(thd);
 
     Item *expr = kp->get_expression();
     if (expr->type() == Item::FIELD_ITEM) {
@@ -8064,6 +8088,12 @@ static Create_field *add_functional_index_to_create_list(
 
   if (is_blob(cr->sql_type)) {
     my_error(ER_FUNCTIONAL_INDEX_ON_LOB, MYF(0));
+    return nullptr;
+  }
+
+  // Don't even bother trying to create a non-conformant table.
+  if (alter_info->create_list.is_empty()) {
+    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
     return nullptr;
   }
 
@@ -8539,6 +8569,20 @@ bool mysql_prepare_create_table(
     }
   }
 
+  // Check that we have at least one visible column.
+  bool has_visible_column = false;
+  it.rewind();
+  while ((sql_field = it++)) {
+    if (sql_field->hidden == dd::Column::enum_hidden_type::HT_VISIBLE) {
+      has_visible_column = true;
+      break;
+    }
+  }
+  if (!has_visible_column) {
+    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
+    return true;
+  }
+
   /* If fixed row records, we need one bit to check for deleted rows */
   if (!(create_info->table_options & HA_OPTION_PACK_RECORD))
     create_info->null_bits++;
@@ -8924,19 +8968,6 @@ static bool create_table_impl(
   DBUG_TRACE;
   DBUG_PRINT("enter", ("db: '%s'  table: '%s'  tmp: %d", db, table_name,
                        internal_tmp_table));
-
-  // Check that we have at least one visible column.
-  bool has_visible_column = false;
-  for (const Create_field &create_field : alter_info->create_list) {
-    if (create_field.hidden == dd::Column::enum_hidden_type::HT_VISIBLE) {
-      has_visible_column = true;
-      break;
-    }
-  }
-  if (!has_visible_column) {
-    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
-    return true;
-  }
 
   if (check_engine(db, table_name, create_info)) return true;
 
@@ -10550,16 +10581,18 @@ static bool check_if_keyname_exists(const char *name, KEY *start, KEY *end) {
 
 static const char *make_unique_key_name(const char *field_name, KEY *start,
                                         KEY *end) {
-  char buff[MAX_FIELD_NAME], *buff_end;
+  // NOTE: This may not handle multi-byte characters properly
+  char buff[NAME_CHAR_LEN + 1];
 
   if (!check_if_keyname_exists(field_name, start, end) &&
       my_strcasecmp(system_charset_info, field_name, primary_key_name))
     return field_name;  // Use fieldname
-  buff_end = strmake(buff, field_name, sizeof(buff) - 4);
 
+  // Reserve space for '_', two-digit sequence number and terminating null char:
+  char *buff_end = strmake(buff, field_name, sizeof(buff) - 4);
   /*
-    Only 3 chars + '\0' left, so need to limit to 2 digit
-    This is ok as we can't have more than 100 keys anyway
+    2 digits support up to 100 keys, which is more than the normal MAX_INDEXES
+    limit (64).
   */
   for (uint i = 2; i < 100; i++) {
     *buff_end = '_';
@@ -11916,7 +11949,7 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
   LogErr(SYSTEM_LEVEL, ER_SECONDARY_ENGINE_DDL_TRACK_PROGRESS,
          progress_msg.str().c_str());
   // Transaction committed successfully, no rollback will be necessary.
-  rollback_guard.commit();
+  rollback_guard.release();
 
   if (cleanup()) return true;
 
@@ -12252,6 +12285,7 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
        about nature of changes than those provided from parser.
   */
   uint old_field_index_without_vgc = 0;
+  uint old_field_index_vgc = 0;
   for (f_ptr = table->field; (field = *f_ptr); f_ptr++) {
     DBUG_PRINT("inplace", ("Existing field: %s", field->field_name));
 
@@ -12261,13 +12295,15 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
     field->clear_flag(FIELD_IS_DROPPED);
 
     /* Use transformed info to evaluate flags for storage engine. */
-    uint new_field_index = 0;
     uint new_field_index_without_vgc = 0;
+    uint new_field_index_vgc = 0;
     new_field_it.init(alter_info->create_list);
     while ((new_field = new_field_it++)) {
       if (new_field->field == field) break;
-      if (new_field->stored_in_db) new_field_index_without_vgc++;
-      new_field_index++;
+      if (new_field->stored_in_db)
+        new_field_index_without_vgc++;
+      else
+        new_field_index_vgc++;
     }
 
     if (new_field) {
@@ -12395,7 +12431,7 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
           ha_alter_info->handler_flags |=
               Alter_inplace_info::ALTER_STORED_COLUMN_ORDER;
       } else {
-        if (field->field_index() != new_field_index)
+        if (old_field_index_vgc != new_field_index_vgc)
           ha_alter_info->handler_flags |=
               Alter_inplace_info::ALTER_VIRTUAL_COLUMN_ORDER;
       }
@@ -12429,7 +12465,10 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
       field->set_flag(FIELD_IS_DROPPED);
       dropped_or_renamed_cols.push_back(field);
     }
-    if (field->stored_in_db) old_field_index_without_vgc++;
+    if (field->stored_in_db)
+      old_field_index_without_vgc++;
+    else
+      old_field_index_vgc++;
   }
 
   if (alter_info->flags & Alter_info::ALTER_ADD_COLUMN) {
@@ -13852,6 +13891,8 @@ static bool mysql_inplace_alter_table(
     reopen_tables = true;
     close_temporary_table(thd, altered_table, true, false);
     rollback_needs_dict_cache_reset = true;
+
+    DEBUG_SYNC(thd, "alter_table_inplace_will_need_reset");
 
     /*
       Replace table definition in the data-dictionary.

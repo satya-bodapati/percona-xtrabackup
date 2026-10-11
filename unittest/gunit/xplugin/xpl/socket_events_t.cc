@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -65,7 +65,7 @@ TEST_F(Socket_events_task_suite, break_loop_from_thread) {
 
   std::thread break_thread{[this, &execution_count]() {
     while (execution_count.load() < 10) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(0));
+      std::this_thread::yield();
     }
     m_sut.break_loop();
   }};
@@ -93,7 +93,7 @@ TEST_F(Socket_events_task_suite,
 
   std::thread break_thread{[this, &execution_count]() {
     while (execution_count.load() < 10) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(0));
+      std::this_thread::yield();
     }
     m_sut.break_loop();
   }};

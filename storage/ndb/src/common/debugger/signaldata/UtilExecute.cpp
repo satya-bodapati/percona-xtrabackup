@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
     Use is subject to license terms.
 
    This program is free software; you can redistribute it and/or modify
@@ -64,16 +64,14 @@ bool printUTIL_EXECUTE_REF(FILE *out, const Uint32 *data, Uint32 len,
 
   const UtilExecuteRef *sig = (const UtilExecuteRef *)data;
   fprintf(out, " senderData: H'%.8x, ", sig->senderData);
-  fprintf(out, " errorCode: %s, ",
-          sig->errorCode == UtilExecuteRef::IllegalKeyNumber
-              ? "IllegalKeyNumber"
-              : sig->errorCode == UtilExecuteRef::IllegalAttrNumber
-                    ? "IllegalAttrNumber"
-                    : sig->errorCode == UtilExecuteRef::TCError
-                          ? "TCError"
-                          : sig->errorCode == UtilExecuteRef::AllocationError
-                                ? "AllocationError"
-                                : "Unknown");
+  fprintf(
+      out, " errorCode: %s, ",
+      sig->errorCode == UtilExecuteRef::IllegalKeyNumber ? "IllegalKeyNumber"
+      : sig->errorCode == UtilExecuteRef::IllegalAttrNumber
+          ? "IllegalAttrNumber"
+      : sig->errorCode == UtilExecuteRef::TCError         ? "TCError"
+      : sig->errorCode == UtilExecuteRef::AllocationError ? "AllocationError"
+                                                          : "Unknown");
   fprintf(out, " TCErrorCode: %d\n", sig->TCErrorCode);
   return true;
 }

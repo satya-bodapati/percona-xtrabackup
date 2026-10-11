@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -446,9 +446,10 @@ void my_message_local_stderr(enum loglevel ll, uint ecode, va_list args) {
   size_t len;
   DBUG_TRACE;
 
-  len = snprintf(
-      buff, sizeof(buff), "[%s] ",
-      (ll == ERROR_LEVEL ? "ERROR" : ll == WARNING_LEVEL ? "Warning" : "Note"));
+  len = snprintf(buff, sizeof(buff), "[%s] ",
+                 (ll == ERROR_LEVEL     ? "ERROR"
+                  : ll == WARNING_LEVEL ? "Warning"
+                                        : "Note"));
   vsnprintf(buff + len, sizeof(buff) - len, EE(ecode), args);
 
   my_message_stderr(0, buff, MYF(0));

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -200,7 +200,7 @@ ConfigSection::do_locate(std::string_view option) const noexcept {
   return {OptionMap::const_iterator(), false};
 }
 
-void ConfigSection::set(const std::string &option, const std::string &value) {
+void ConfigSection::set(std::string_view option, const std::string &value) {
   check_option(option);  // throws bad_option (std::runtime_error)
   options_[lower(option)] = value;
 }
@@ -285,7 +285,7 @@ bool Config::has_default(std::string_view option) const {
   return defaults_->has(option);  // throws bad_option (std::runtime_error)
 }
 
-void Config::set_default(const std::string &option, const std::string &value) {
+void Config::set_default(std::string_view option, const std::string &value) {
   defaults_->set(option, value);  // throws bad_option (std::runtime_error)
 }
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -344,7 +344,7 @@ void Clone_persist_gtid::get_gtid_info(trx_t *trx, Gtid_desc &gtid_desc) {
 
   if (!has_gtid(trx, thd, thd_check)) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   uint32_t encoded_version = GTID_VERSION;
@@ -632,6 +632,12 @@ void Clone_persist_gtid::periodic_write() {
     os_event_reset(m_event);
     /* Write accumulated GTIDs to disk table */
     flush_gtids(thd);
+    /* Memory is allocated from thd->memroot to store the information about the
+    table being locked for flushing gtids. In this case, being a background
+    thread which is flushing the gtids every 100 millisecond, we should release
+    the memory after every cycle of flushing gtids to avoid memory growth in
+    Clone_persist_gtid thread .*/
+    thd->mem_root->ClearForReuse();
   }
 
   /* For slow shutdown, consume remaining GTIDs so that undo can be purged. */

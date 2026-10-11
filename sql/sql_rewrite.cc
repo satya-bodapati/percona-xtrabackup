@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -327,7 +327,7 @@ bool rewrite_query(THD *thd, Consumer_type type, const Rewrite_params *params,
 
   The query aimed to be rewritten in the usual log files
   (i.e. General, slow query and audit log) uses default value of
-  type which is Consumer_type::LOG
+  type which is Consumer_type::TEXTLOG
 
    Side-effects:
 
@@ -341,18 +341,18 @@ bool rewrite_query(THD *thd, Consumer_type type, const Rewrite_params *params,
 
   @param thd        The THD to rewrite for.
   @param type       Purpose of rewriting the query
-                     Consumer_type::LOG
+                     Consumer_type::TEXTLOG
                       To rewrite the query either for general, slow query
                       and audit log.
                      Consumer_type::BINLOG
                       To rewrite the query for binlogs.
-                     Consumer_type::CONSOLE
+                     Consumer_type::STDOUT
                       To rewrite the query for standard output.
   @param params     Wrapper object of parameters in case needed by a SQL
                       rewriter.
 */
-void mysql_rewrite_query(THD *thd, Consumer_type type /*= Consumer_type::LOG */,
-                         const Rewrite_params *params /*= nullptr*/) {
+void mysql_rewrite_query(THD *thd, Consumer_type type,
+                         const Rewrite_params *params) {
   String rlb;
 
   DBUG_TRACE;
@@ -375,12 +375,12 @@ void mysql_rewrite_query(THD *thd, Consumer_type type /*= Consumer_type::LOG */,
   @param rlb        Buffer to return rewritten query in (if any) if
                     do_ps_instrument is false.
   @param type       Purpose of rewriting the query
-                     Consumer_type::LOG
+                     Consumer_type::TEXTLOG
                       To rewrite the query either for general, slow query
                       and audit log.
                      Consumer_type::BINLOG
                       To rewrite the query for binlogs.
-                     Consumer_type::CONSOLE
+                     Consumer_type::STDOUT
                       To rewrite the query for standard output.
   @param params     Wrapper object of parameters in case needed by a SQL
                       rewriter.
@@ -394,8 +394,18 @@ void mysql_rewrite_acl_query(THD *thd, String &rlb, Consumer_type type,
   if (rewrite_query(thd, type, params, rlb) && (rlb.length() > 0) &&
       do_ps_instrument) {
     thd->swap_rewritten_query(rlb);
-    thd->set_query_for_display(thd->rewritten_query().ptr(),
-                               thd->rewritten_query().length());
+
+    /*
+      Queries rewritten for Consumer_type::BINLOG may contain
+      sensitive informations, encoded in the binlog event.
+      Do not print these.
+      A subsequent call, using Consumer_type::TEXTLOG,
+      will display a proper sanitized query.
+    */
+    if (type != Consumer_type::BINLOG) {
+      thd->set_query_for_display(thd->rewritten_query().ptr(),
+                                 thd->rewritten_query().length());
+    }
     /*
       rlb now contains the previous rewritten query.
       We clear it here both to save memory and to prevent possible confusion.
@@ -942,9 +952,12 @@ bool Rewriter_alter_user::rewrite(String &rlb) const {
 void Rewriter_alter_user::append_user_auth_info(LEX_USER *user, bool comma,
                                                 String *str) const {
   append_auth_id(m_thd, user, comma, str);
-  if (user->first_factor_auth_info.uses_identified_by_clause ||
-      user->first_factor_auth_info.uses_identified_with_clause ||
-      user->first_factor_auth_info.uses_authentication_string_clause) {
+  const bool has_auth_data_clause =
+      user->first_factor_auth_info.uses_identified_by_clause ||
+      user->first_factor_auth_info.uses_authentication_string_clause;
+
+  if (has_auth_data_clause ||
+      user->first_factor_auth_info.uses_identified_with_clause) {
     str->append(STRING_WITH_LEN(" IDENTIFIED"));
     if (user->first_factor_auth_info.uses_identified_with_clause ||
         m_consumer_type == Consumer_type::BINLOG)
@@ -961,6 +974,15 @@ void Rewriter_alter_user::append_user_auth_info(LEX_USER *user, bool comma,
     } else if (user->first_factor_auth_info.auth.length > 0) {
       str->append(STRING_WITH_LEN(" AS "));
       append_auth_str(user, str);
+    } else if (m_consumer_type == Consumer_type::BINLOG &&
+               has_auth_data_clause) {
+      /*
+        If empty password was specified, add it explicitly.
+        Not adding pasword at all will cause replica to
+        fall out of sync because the account will be created
+        with password expired.
+      */
+      str->append(STRING_WITH_LEN(" AS ''"));
     }
 
     if (user->retain_current_password) {
@@ -1315,7 +1337,7 @@ bool Rewriter_grant::rewrite(String &rlb) const {
     rlb.append(STRING_WITH_LEN("ALL PRIVILEGES"));
   else {
     bool comma = false;
-    ulong priv;
+    Access_bitmask priv;
 
     for (c = 0, priv = SELECT_ACL; priv <= GLOBAL_ACLS; c++, priv <<= 1) {
       if (priv == GRANT_ACL && !lex->grant_privilege) continue;

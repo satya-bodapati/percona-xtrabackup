@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -26,7 +26,6 @@
 #include <gmock/gmock.h>
 
 #include "config_builder.h"
-#include "mysql/harness/utility/string.h"
 #include "router_component_test.h"
 #include "test/temp_directory.h"
 
@@ -456,12 +455,12 @@ TEST_F(RouterCmdlineTest, help_output_is_sane) {
       if (line.empty()) {
         break;
       }
-      if (mysql_harness::utility::starts_with(line, indent)) {
+      if (line.starts_with(indent)) {
         auto file = line.substr(indent.size(), line.size());
         config_files.push_back(file);
       }
     }
-    if (mysql_harness::utility::starts_with(line, "Configuration read")) {
+    if (line.starts_with("Configuration read")) {
       it++;  // skip next line
       found = true;
     }

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -38,7 +38,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <stdint.h>
 #include <stdio.h>
 
-#include "config.h"
+#include "my_config.h"
+
 #include "db0err.h"
 
 /** Page number */
