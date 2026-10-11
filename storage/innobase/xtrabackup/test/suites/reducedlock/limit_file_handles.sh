@@ -17,9 +17,21 @@ $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.rename_table (id INT PRIMARY KEY AU
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.alter_rename_table (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.alter_rename_table VALUES(1)" test
 $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.alter_drop_column_table (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50)); INSERT INTO test.alter_drop_column_table VALUES(1, 'test')" test
 
+# Create the tables in one session, and compare the data of the 1500 tables
+# with one CHECKSUM TABLE statement. A mysqldump of 1500 tables takes minutes,
+# and twice that made the test time out on a slow host.
 for i in {1..1500} ; do
-    $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.tb_${i} (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.tb_${i} VALUES (1)" test
-done;
+    echo "CREATE TABLE test.tb_${i} (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.tb_${i} VALUES (1);"
+done | $MYSQL $MYSQL_ARGS test
+
+function checksum_tables()
+{
+    local tables=$($MYSQL $MYSQL_ARGS -Ns \
+        --init-command="SET SESSION group_concat_max_len=1000000" \
+        -e "SELECT GROUP_CONCAT(table_name ORDER BY table_name)
+            FROM information_schema.tables WHERE table_schema='test'")
+    $MYSQL $MYSQL_ARGS -Ns -e "CHECKSUM TABLE $tables EXTENDED" test > $1
+}
 
 innodb_wait_for_flush_all
 
@@ -67,12 +79,13 @@ if ! egrep -q "DDL tracking : missing after discovery space ID: [0-9]*" $topdir/
 fi
 
 xtrabackup --prepare --target-dir=$topdir/backup
-record_db_state test
+checksum_tables $topdir/checksum_old
 stop_server
 rm -rf $mysql_datadir/*
 xtrabackup --copy-back --target-dir=$topdir/backup
 start_server
-verify_db_state test
+checksum_tables $topdir/checksum_new
+run_cmd diff -u $topdir/checksum_old $topdir/checksum_new
 
 stop_server
 ulimit -n $open_file_limit
