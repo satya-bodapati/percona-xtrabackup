@@ -5310,9 +5310,9 @@ static bool xb_space_create_file(
     return (false);
   }
 
-  *file = os_file_create(
-      innodb_data_file_key, path, OS_FILE_CREATE | OS_FILE_ON_ERROR_NO_EXIT,
-      OS_FILE_NORMAL, OS_DATA_FILE, srv_read_only_mode, &success);
+  *file = os_file_create(innodb_data_file_key, path,
+                         OS_FILE_CREATE | OS_FILE_ON_ERROR_NO_EXIT,
+                         OS_DATA_FILE, srv_read_only_mode, &success);
 
   if (!success) {
     /* The following call will print an error message */

@@ -682,7 +682,7 @@ class Tablespace_dirs {
   @param[in]  thread_id Thread ID
   @param[out] result false in case of failure */
   void open_ibd(const Const_iter &start, const Const_iter &end,
-                size_t thread_id, bool &result);
+                size_t thread_id, std::atomic<bool> &result);
 
  private:
   /** Directories scanned and the files discovered under them. */
@@ -2690,7 +2690,7 @@ dberr_t Fil_shard::get_file_size(fil_node_t *file, bool read_only_mode) {
             read_only_mode, &success);
 #else
         os_file_create(innodb_data_file_key, file->name, OS_FILE_OPEN,
-                       OS_FILE_NORMAL, OS_DATA_FILE, read_only_mode, &success);
+                       OS_DATA_FILE, read_only_mode, &success);
 #endif /* !XTRABACKUP */
 
     if (!success) {
@@ -10372,9 +10372,16 @@ Dirs_in_datadir Dirs_in_datadir::make() {
   }
 
   Dir_Walker::walk(datadir, false, [&](const std::string &path) {
+#ifdef XTRABACKUP
+    const auto [exists, file_type] = Dir_Walker::is_directory(path);
+    if (!exists || file_type != OS_FILE_TYPE_DIR) {
+      return;
+    }
+#else
     if (!Dir_Walker::is_directory(path)) {
       return;
     }
+#endif /* XTRABACKUP */
 
     const auto schema_dir = fil_real_dir_for_lookup(path);
 
@@ -11928,7 +11935,7 @@ std::tuple<dberr_t, space_id_t> fil_open_for_xtrabackup(
 @param[in]  thread_id Thread ID
 @param[in,out]  result  result of the open */
 void Tablespace_dirs::open_ibd(const Const_iter &start, const Const_iter &end,
-                               size_t thread_id, bool &result) {
+                               size_t thread_id, std::atomic<bool> &result) {
   if (!result) return;
 
   for (auto it = start; it != end; ++it) {
@@ -12367,11 +12374,12 @@ dberr_t Tablespace_dirs::scan(bool populate_fil_cache IF_XB(, bool only_undo)) {
 #endif /* XTRABACKUP */
 
   if (err == DB_SUCCESS && populate_fil_cache IF_XB(&&!only_undo)) {
-    bool result = true;
-    std::function<void(const Const_iter &, const Const_iter &, size_t, bool &)>
+    std::atomic<bool> result{true};
+    std::function<void(const Const_iter &, const Const_iter &, size_t,
+                       std::atomic<bool> &)>
         open = std::bind(&Tablespace_dirs::open_ibd, this, _1, _2, _3, _4);
 
-    par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, open, result);
+    par_for(PFS_NOT_INSTRUMENTED, ibd_files, n_threads, open, std::ref(result));
 
     if (!result) err = DB_FAIL;
   }
