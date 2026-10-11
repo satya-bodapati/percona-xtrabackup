@@ -685,7 +685,6 @@ dberr_t ddl_tracker_t::handle_ddl_operations() {
       // open system tablespace for recopying
       srv_sys_space.reset();
 
-      srv_sys_space.set_space_id(TRX_SYS_SPACE);
 
       /* Create the filespace flags. */
       ulint fsp_flags =

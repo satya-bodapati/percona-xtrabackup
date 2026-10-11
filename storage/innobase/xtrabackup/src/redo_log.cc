@@ -961,6 +961,12 @@ bool Redo_Log_Data_Manager::init() {
     }
   }
 
+  /* The checkpoint state (log_checkpointing) is created by
+  Pages_persistence::init() in the server, the backup does not start it. */
+  if (log_checkpointing == nullptr) {
+    Log_checkpointing::init();
+  }
+
   if (log_sys_init(false) != DB_SUCCESS) {
     return (false);
   }
@@ -1291,6 +1297,9 @@ bool Redo_Log_Data_Manager::stop_at(lsn_t lsn, lsn_t checkpoint_lsn) {
 
 void Redo_Log_Data_Manager::close() {
   log_sys_close();
+  if (log_checkpointing != nullptr) {
+    Log_checkpointing::deinit();
+  }
   archived_log_monitor.close();
   os_event_destroy(event);
 }

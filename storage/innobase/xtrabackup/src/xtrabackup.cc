@@ -2433,7 +2433,6 @@ static bool innodb_init_param(void) {
   It was initialized to 16k pages before srv_page_size was set */
   univ_page_size.copy_from(page_size_t(srv_page_size, srv_page_size, false));
 
-  srv_sys_space.set_space_id(TRX_SYS_SPACE);
 
   /* Create the filespace flags. */
   fsp_flags = fsp_flags_init(univ_page_size, false, false, false, false);

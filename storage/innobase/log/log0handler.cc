@@ -697,6 +697,14 @@ bool Handler::reconfigure(size_t max_threads,
   the soft capacity estimated from sysvars AND also emit an ERROR with suggested
   size of the innodb_redo_log_capacity if config is unsafe */
   if (log_sys == nullptr) {
+#ifdef XTRABACKUP
+    /* We dont care about capacity margin safe caclulation in PXB
+    we dont have user threads genearting redo. Also see the comment
+    in server code that says when srv_redo_log_cpacity and
+    srv_redo_log_capacity_used = 0, there will be no upsizing or downsizing of
+    redo logs */
+    return true;
+#endif /* XTRABACKUP */
     bool is_concurrency_margin_safe;
     log_concurrency_margin(
         m_max_threads, m_reserved_bytes_per_thread,

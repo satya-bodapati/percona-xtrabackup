@@ -5549,6 +5549,11 @@ dberr_t os_get_free_space(const char *path, uint64_t &free_space) {
 Access_permissions os_file_check_access(const char *path, bool is_raw_device) {
   bool success = false;
   Access_permissions res{};
+#ifdef XTRABACKUP
+  /* The backup opens the server files read-only, opening them read-write
+  would try to lock them and log an error. */
+  if (!srv_read_only_mode)
+#endif /* XTRABACKUP */
   {
     const auto file = os_file_create_simple_no_error_handling(
         innodb_data_file_key, path,

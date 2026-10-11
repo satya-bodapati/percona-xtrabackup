@@ -1865,12 +1865,17 @@ dberr_t log_files_persist_flags(log_t &log, Log_flags log_flags) {
 }
 
 dberr_t log_files_reset_creator_and_set_full(log_t &log) {
+#ifdef XTRABACKUP
+  /* log_files_prepare_header() always writes the PXB creator name. */
+  const std::string new_creator = LOG_HEADER_CREATOR_PXB_PREPARE;
+#else
   const std::string new_creator = LOG_HEADER_CREATOR_CURRENT;
+#endif /* XTRABACKUP */
 
   const dberr_t rewrite_old_err = log_files_rewrite_old_headers(
       log,
       [&](Log_file_id, Log_file_header &header) {
-        ut_a(header.m_creator_name == log.m_creator_name);
+        ut_a(header.m_creator_name == log.m_creator_name IF_XB(|| true));
         header.m_creator_name = new_creator;
         log_file_header_set_flag(header.m_log_flags, LOG_HEADER_FLAG_FILE_FULL);
       },
@@ -1883,7 +1888,7 @@ dberr_t log_files_reset_creator_and_set_full(log_t &log) {
 
   const dberr_t rewrite_newest_err = log_files_rewrite_newest_header(
       log, [&](Log_file_id, Log_file_header &header) {
-        ut_a(header.m_creator_name == log.m_creator_name);
+        ut_a(header.m_creator_name == log.m_creator_name IF_XB(|| true));
         header.m_creator_name = new_creator;
       });
   if (rewrite_newest_err != DB_SUCCESS) {

@@ -3644,7 +3644,8 @@ void Fil_shard::close_all_files() {
 
 /** Close all open files. */
 void Fil_system::close_all_files() {
-#ifndef UNIV_HOTBACKUP
+  /* xtrabackup closes the files without a buffer pool during the backup. */
+#if !defined(UNIV_HOTBACKUP) && !defined(XTRABACKUP)
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
   bool should_validate_space_reference_count = srv_fast_shutdown == 0;
   DBUG_EXECUTE_IF("buf_disable_space_reference_count_check",
@@ -10818,6 +10819,10 @@ std::tuple<dberr_t, space_id_t> fil_open_for_xtrabackup(
   }
 
   const bool is_tmp = FSP_FLAGS_GET_TEMPORARY(flags);
+
+  if (!dict_sys_t::is_reserved(space_id)) {
+    fil_set_max_space_id_if_bigger(space_id);
+  }
 
   fil_space_t *space =
       fil_space_create(name.c_str(), space_id, flags,
