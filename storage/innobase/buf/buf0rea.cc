@@ -693,9 +693,32 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
   const page_size_t page_size(space->flags);
 
   for (ulint i = 0; i < n_stored; i++) {
+    const page_id_t cur_page_id(space_id, page_nos[i]);
+    buf_pool_t *buf_pool = buf_pool_get(cur_page_id);
+    ulint count = 0;
+
+    /* Keep half of the frames reserved for recovery free. The I/O threads
+    apply the redo when a read completes, and applying it may need a free
+    block (for example to reorganize a page). If the reads used all the
+    frames, the I/O threads could not complete them, and no block would
+    become free. */
+    while (buf_pool->n_pend_reads >=
+           recv_n_frames_for_pages_per_pool_instance / 2) {
+      os_aio_simulated_wake_handler_threads();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+      count++;
+
+      if (!(count % 1000)) {
+        ib::error(ER_IB_MSG_145)
+            << "Waited for " << count / 100 << " seconds for "
+            << buf_pool->n_pend_reads << " pending reads";
+      }
+    }
+
     dberr_t err;
     buf_read_page_low(&err, false, IORequest::DO_NOT_WAKE, BUF_READ_ANY_PAGE,
-                      {space_id, page_nos[i]}, page_size, true);
+                      cur_page_id, page_size, true);
   }
 
   os_aio_simulated_wake_handler_threads();
