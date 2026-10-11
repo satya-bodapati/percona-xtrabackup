@@ -754,6 +754,12 @@ Put that space_id into the space_id_bank.
 @param[in] space_id  undo tablespace number */
 void use_space_id(space_id_t space_id);
 
+#ifdef XTRABACKUP
+/** Forget all the undo space ids in use, xtrabackup opens the undo tablespaces
+more than once. */
+void xb_reset_space_id_bank();
+#endif /* XTRABACKUP */
+
 /** Mark that the given undo space number is being used and
 return the next available space_id for that space number.
 @param[in]  space_num  undo tablespace number

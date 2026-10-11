@@ -68,6 +68,16 @@ class Space_id_bank {
 
   ~Space_id_bank() {}
 
+#ifdef XTRABACKUP
+  /** Forget all the space ids, xtrabackup opens the undo tablespaces more
+  than once. */
+  void reset() {
+    for (auto &account : m_accounts) {
+      account = Space_id_account{};
+    }
+  }
+#endif /* XTRABACKUP */
+
   /** Note that the undo space number for a space ID is being used.
   Put that space_id into the space_id_bank.
   @param[in] space_id  undo tablespace number */
@@ -194,6 +204,10 @@ space_id_t Space_id_bank::get_next_available_space_id() {
 }
 
 void use_space_id(space_id_t space_id) { space_id_bank.use_space_id(space_id); }
+
+#ifdef XTRABACKUP
+void xb_reset_space_id_bank() { space_id_bank.reset(); }
+#endif /* XTRABACKUP */
 
 space_id_t get_next_available_space_id() {
   return space_id_bank.get_next_available_space_id();

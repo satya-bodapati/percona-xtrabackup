@@ -959,6 +959,8 @@ dberr_t srv_undo_tablespaces_init(bool create_new_db [[maybe_unused]],
   ut_a(!create_new_db);
   ut_a(tablespace_scanning != nullptr);
 
+  undo_truncate::xb_reset_space_id_bank();
+
   /* Build the undo number to space id map from the tablespaces found by the
   last scan, the same way srv_start() does after the recovery. */
   std::vector<space_id_t> space_ids;
