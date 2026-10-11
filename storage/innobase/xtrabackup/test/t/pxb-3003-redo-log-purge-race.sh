@@ -76,6 +76,12 @@ do
   vlog "Waiting for redo log files to be created. Current MIN_FILEID: $CURRENT_MIN_FILEID Initial MIN_FILEID: $INITIAL_MIN_FILEID"
   CURRENT_MIN_FILEID=`$MYSQL $MYSQL_ARGS -Ns -e "SELECT MIN(file_id) FROM performance_schema.innodb_redo_log_files"`
 done
+# Stop the inserts before resuming. The capacity shrink removes files even
+# past the registered consumer, so with inserts still running the server can
+# remove the file xtrabackup needs next when xtrabackup is slow.
+kill $insert_pid
+wait $insert_pid || true
+
 # Resume the xtrabackup process
 vlog "Resuming xtrabackup"
 kill -SIGCONT $xb_pid
@@ -86,7 +92,6 @@ if ! grep "Unable to open './#innodb_redo/#ib_redo" $topdir/xtrabackup_reopen_fi
 then
 	die "xtrabackup did not show warning about missing files"
 fi
-run_cmd wait $insert_pid
 
 
 
