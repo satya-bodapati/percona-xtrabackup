@@ -745,6 +745,7 @@ loose-group_replication_start_on_boot=off
 loose-group_replication_bootstrap_group= off
 loose-group_replication_recovery_use_ssl=ON
 loose-group_replication_recovery_get_public_key=ON
+loose-group_replication_communication_stack=XCOM
 loose-group_replication_local_address=\"127.0.0.1:${SRV_MYSQLD_GR_PORT[$i]}\"
 loose-group_replication_group_seeds= \"${GR_CLUSTER_ADDRESS%?}\""
     if [ "$MYSQL_DEBUG_MODE" = "on" ]; then
