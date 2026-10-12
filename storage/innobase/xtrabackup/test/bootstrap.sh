@@ -141,7 +141,7 @@ main () {
         *) 
             echo "Err: Specified unsupported ${TYPE}."
             echo "Supported types are: innodb9x, xtradb9x."
-            echo "Example: $0 --type=xtradb9x --version=9.7.0-1"
+            echo "Example: $0 --type=innodb9x --version=26.7.0"
             exit 1
             ;;
     esac
@@ -178,6 +178,17 @@ main () {
     if test -n "${sourcedir}"; then
         mv "${sourcedir}"/* "${DESTDIR}"
         rm -rf "${sourcedir}"
+    fi
+
+    # Newer distributions (Ubuntu 24.04+) ship libaio.so.1t64 instead of
+    # libaio.so.1. run.sh puts lib/mysql in LD_LIBRARY_PATH, so link it there.
+    if ! ldconfig -p | grep -q 'libaio\.so\.1 '; then
+        t64=$(ldconfig -p | awk '/libaio\.so\.1t64 / {print $NF; exit}')
+        if [[ -n "${t64}" ]]; then
+            mkdir -p "${DESTDIR}/lib/mysql"
+            ln -sf "${t64}" "${DESTDIR}/lib/mysql/libaio.so.1"
+            echo "Linked ${DESTDIR}/lib/mysql/libaio.so.1 to ${t64}"
+        fi
     fi
 }
 
