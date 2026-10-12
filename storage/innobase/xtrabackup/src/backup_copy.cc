@@ -1487,13 +1487,16 @@ bool backup_start(Backup_context &context) {
       debug_sync_point("ddl_tracker_before_lock_ddl");
 
       /* The tablespaces will be closed on handle_ddl_operations. Hence
-      dump the tablespace keys now. For tablespace that are tracked as
-      dropped, dont dump the tablespace encryption keys. Note that we
-      still need to save tablespace keys found from redo. We cannot do it
-      now as the redo log thread is still in progress. It is done after
-      the redo thread is stopped. See TablespaceKeyDumper::dump_from_redo() */
+      dump the tablespace keys now. This includes the tablespaces that are
+      tracked as dropped: prepare opens their copies before it handles the
+      .del files, so it needs their keys. Note that we still need to save
+      tablespace keys found from redo. We cannot do it now as the redo log
+      thread is still in progress. It is done after the redo thread is
+      stopped. See TablespaceKeyDumper::dump_from_redo() */
+      DBUG_EXECUTE_IF("ddl_tracker_sleep_before_key_dump",
+                      std::this_thread::sleep_for(std::chrono::seconds(3)););
       if (context.ts_key_dumper != nullptr) {
-        context.ts_key_dumper->dump_from_spaces(true);
+        context.ts_key_dumper->dump_from_spaces();
       }
 
       if (!lock_tables_for_backup(main_conn(), opt_backup_lock_timeout,
