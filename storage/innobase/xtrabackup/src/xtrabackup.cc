@@ -4893,7 +4893,7 @@ void xtrabackup_backup_func(void) {
   Tablespace_map::instance().serialize(ds_data);
 
   if (ts_key_dumper.is_initialized()) {
-    if (!ts_key_dumper.dump_from_spaces(false)) {
+    if (!ts_key_dumper.dump_from_spaces()) {
       xb::error() << "Couldn't dump transition key for all tablespaces.";
     }
 
