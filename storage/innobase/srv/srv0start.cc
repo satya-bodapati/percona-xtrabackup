@@ -655,9 +655,15 @@ dberr_t srv_undo_tablespace_open(undo_truncate::Tablespace &undo_space,
                 "undo_create_node";
             debug_sync_point("undo_create_node");
           });
-#endif /* XTRABACKUP */
 
+      if (xb_fil_node_create(file_name, space, false, PAGE_NO_MAX) !=
+          DB_SUCCESS) {
+        fil_space_free(space_id, false);
+        return DB_CANNOT_OPEN_FILE;
+      }
+#else
       fil_node_create(file_name, space, false, PAGE_NO_MAX);
+#endif /* XTRABACKUP */
     }
 
     /* Read the encryption metadata in this undo tablespace.

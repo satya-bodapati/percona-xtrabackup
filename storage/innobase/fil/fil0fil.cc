@@ -475,7 +475,9 @@ class Fil_shard {
     }
 
     ut_ad(it->second->magic_n == FIL_SPACE_MAGIC_N);
-    ut_ad(fsp_is_system_temporary(space_id) || it->second->files.size() == 1);
+    /* PXB frees a space whose file was gone before its node was created. */
+    ut_ad(fsp_is_system_temporary(space_id) ||
+          it->second->files.size() == 1 IF_XB(|| it->second->files.empty()));
 
     return it->second;
   }
@@ -2326,6 +2328,14 @@ void fil_node_create(const char *name, fil_space_t *space, bool is_raw,
   const auto err = shard->create_node(name, space, is_raw, max_pages);
   ut_a_eq(err, DB_SUCCESS);
 }
+
+#ifdef XTRABACKUP
+dberr_t xb_fil_node_create(const char *name, fil_space_t *space, bool is_raw,
+                           page_no_t max_pages) {
+  auto shard = fil_system->shard_by_id(space->id);
+  return shard->create_node(name, space, is_raw, max_pages);
+}
+#endif /* XTRABACKUP */
 
 bool fil_space_t::is_fsp_cache_valid() const {
   return m_fsp_cache.m_cache_valid;
@@ -10874,18 +10884,22 @@ std::tuple<dberr_t, space_id_t> fil_open_for_xtrabackup(
     fil_set_max_space_id_if_bigger(space_id);
   }
 
-  fil_space_t *space =
-      fil_space_create(name.c_str(), space_id, flags,
-                       is_tmp ? FIL_TYPE_TEMPORARY : FIL_TYPE_TABLESPACE);
+  const auto shard = fil_system->shard_by_id(space_id);
 
-  ut_a(space != nullptr);
+  auto space_ptr = Fil_shard::space_create(
+      name.c_str(), space_id, flags,
+      is_tmp ? FIL_TYPE_TEMPORARY : FIL_TYPE_TABLESPACE);
 
-  err = fil_system->shard_by_id(space_id)->create_node(path.c_str(), space,
-                                                       false, PAGE_NO_MAX);
+  /* The file may be gone already with --lock-ddl=REDUCED. Add the space to
+  the cache only with its file. */
+  err = shard->create_node(path.c_str(), space_ptr.get(), false, PAGE_NO_MAX);
   if (err != DB_SUCCESS) {
-    fil_space_free(space->id, false);
     return {DB_CANNOT_OPEN_FILE, space_id};
   }
+
+  fil_space_t *space = shard->space_add(std::move(space_ptr));
+
+  ut_a(space != nullptr);
 
   /* For encrypted tablespace, initialize encryption information.*/
   if (FSP_FLAGS_GET_ENCRYPTION(flags)) {

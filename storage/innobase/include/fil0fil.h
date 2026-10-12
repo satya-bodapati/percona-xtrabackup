@@ -1740,6 +1740,18 @@ void fil_space_set_imported(space_id_t space_id);
 void fil_node_create(const char *name, fil_space_t *space, bool is_raw,
                      page_no_t max_pages);
 
+#ifdef XTRABACKUP
+/** Attach a node to a tablespace. The file may be gone already with
+--lock-ddl=REDUCED.
+@param[in]      name            file name (file must be closed)
+@param[in,out]  space           space where to attach to. Must not be null.
+@param[in]      is_raw          true if a raw device or a raw disk partition
+@param[in]      max_pages       maximum number of pages in file
+@return DB_SUCCESS or DB_CANNOT_OPEN_FILE */
+[[nodiscard]] dberr_t xb_fil_node_create(const char *name, fil_space_t *space,
+                                         bool is_raw, page_no_t max_pages);
+#endif /* XTRABACKUP */
+
 /** Create a space memory object and put it to the fil_system hash table.
 The tablespace name is independent from the tablespace file-name.
 Error messages are issued to the server log.
