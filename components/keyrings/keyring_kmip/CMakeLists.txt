@@ -74,8 +74,9 @@ SET(KEYRING_KMIP_SOURCE
 
 SET(KEYRING_KMIP_LIBRARIES
   keyring_common
-  ${SSL_LIBRARIES}
-  kmippp
+  OpenSSL::SSL
+  OpenSSL::Crypto
+  kmipclient
 )
 
 MYSQL_ADD_COMPONENT(keyring_kmip
@@ -83,6 +84,15 @@ MYSQL_ADD_COMPONENT(keyring_kmip
   LINK_LIBRARIES ${KEYRING_KMIP_LIBRARIES}
   MODULE_ONLY
 )
+
+IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  # kmipclient public headers currently emit these diagnostics under strict
+  # server flags; keep suppression target-local instead of source pragmas.
+  TARGET_COMPILE_OPTIONS(component_keyring_kmip PRIVATE
+    -Wno-extra-semi
+    -Wno-overloaded-virtual)
+ENDIF()
+
 IF(APPLE)
   SET_TARGET_PROPERTIES(component_keyring_kmip PROPERTIES
     LINK_FLAGS "-undefined dynamic_lookup")
