@@ -65,6 +65,7 @@ Data dictionary interface */
 #include "ut0crc32.h"
 #ifndef UNIV_HOTBACKUP
 #include "btr0sea.h"
+#include "debug_sync.h"
 #include "default_values.h"
 #include "derror.h"
 #include "fts0plugin.h"
@@ -74,6 +75,7 @@ Data dictionary interface */
 #include "mysql/plugin.h"
 #include "mysql/strings/m_ctype.h"
 #include "query_options.h"
+#include "row0mysql.h"
 #include "sql/create_field.h"
 #include "sql/mysqld.h"  // lower_case_file_system
 #include "storage/innobase/xtrabackup/src/xb_dict.h"
@@ -5589,8 +5591,11 @@ dberr_t dd_table_load_fk_from_dd(dict_table_t *m_table,
 #endif
     /* Fill in foreign->foreign_table and index, then add to
     dict_table_t */
-    err =
-        dict_foreign_add_to_cache(foreign, col_names, false, true, ignore_err);
+    /* COPY ALTER temp tables (#sql-xxx) must not register their FK into
+    the referenced table's referenced_set — see dict_foreign_add_to_cache. */
+    const bool skip_ref = row_is_mysql_tmp_table_name(m_table->name.m_name);
+    err = dict_foreign_add_to_cache(foreign, col_names, false, true, ignore_err,
+                                    skip_ref);
     if (!dict_locked) {
       dict_sys_mutex_exit();
     }
@@ -6421,6 +6426,15 @@ dict_table_t *dd_open_table_one(dd::cache::Dictionary_client *client,
   m_table->acquire();
 
   dict_sys_mutex_exit();
+
+  /* Race-condition test sync point: m_table is in the dict cache but its
+  FK has not been loaded yet.  A concurrent COPY ALTER that references
+  this table could pollute its referenced_set in this window. */
+  DBUG_EXECUTE_IF("t2_before_load_fk", {
+    if (strcmp(m_table->name.m_name, "test/t2") == 0) {
+      DEBUG_SYNC(thd, "after_dict_table_add_to_cache_before_load_fk");
+    }
+  });
 
   /* Check if this is a DD system table */
   if (m_table != nullptr) {
