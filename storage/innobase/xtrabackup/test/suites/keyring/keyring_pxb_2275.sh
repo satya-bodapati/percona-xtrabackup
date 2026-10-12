@@ -25,7 +25,7 @@ mkdir $topdir/backup
 
 # Test 1 - should fail since we don't have any entry on keyring file yet
 vlog "Test 1 - Should fail as keyring file does not have encryption information"
-run_cmd_expect_failure $XB_BIN $XB_ARGS --innodb-redo-log-capacity=160M --xtrabackup-plugin-dir=${plugin_dir} --lock-ddl=REDUCED --backup \
+run_cmd_expect_failure $XB_BIN $XB_ARGS --innodb-redo-log-capacity=160M --xtrabackup-plugin-dir=${plugin_dir} --lock-ddl=OFF --backup \
 --target-dir=$topdir/backup --debug-sync="xtrabackup_pause_after_redo_catchup" \
 --register-redo-log-consumer 2> >(tee $topdir/backup.log)&
 

@@ -31,7 +31,7 @@ INSERT INTO test.t2_2 VALUES (10), (20), (30);
 INSERT INTO test.t2_3 VALUES (100), (200), (300);
 EOF
 
-xtrabackup --backup --target-dir=$topdir/full
+xtrabackup --backup --target-dir=$topdir/full --lock-ddl=REDUCED
 
 run_cmd $MYSQL $MYSQL_ARGS <<EOF
 
