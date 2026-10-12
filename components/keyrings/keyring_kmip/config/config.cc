@@ -36,6 +36,7 @@
 #ifdef XTRABACKUP
 #include <storage/innobase/xtrabackup/src/keyring_components.h>
 #endif
+
 using keyring_common::config::Config_reader;
 using keyring_kmip::g_config_pod;
 

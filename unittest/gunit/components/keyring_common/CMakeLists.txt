@@ -63,7 +63,9 @@ MYSQL_ADD_EXECUTABLE(merge_component_keyring_common_tests-t
   ADD_TEST merge_component_keyring_common_tests
   EXCLUDE_FROM_GCOV
   LINK_LIBRARIES
-  ${KEYRING_COMPONENT_LIBS} ${GTEST_LIBRARIES} gtest_main
+  ${KEYRING_COMPONENT_LIBS}
+  gunit_large
+  server_unittest_library
 )
 IF(TARGET merge_component_keyring_common_tests-t)
   DOWNGRADE_STRINGOP_WARNINGS(merge_component_keyring_common_tests-t)

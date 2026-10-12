@@ -24,7 +24,6 @@
 
 #include <components/keyrings/common/config/config_reader.h> /* Config_reader */
 #include <include/mysql/components/component_implementation.h>
-
 #ifdef XTRABACKUP
 #include <storage/innobase/xtrabackup/src/keyring_components.h>
 #endif

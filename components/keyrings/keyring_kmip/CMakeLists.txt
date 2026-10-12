@@ -93,6 +93,8 @@ IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     -Wno-overloaded-virtual)
 ENDIF()
 
+MY_TARGET_LINK_OPTIONS(component_keyring_kmip "${LINK_FLAG_NO_UNDEFINED}")
+
 IF(APPLE)
   SET_TARGET_PROPERTIES(component_keyring_kmip PROPERTIES
     LINK_FLAGS "-undefined dynamic_lookup")
