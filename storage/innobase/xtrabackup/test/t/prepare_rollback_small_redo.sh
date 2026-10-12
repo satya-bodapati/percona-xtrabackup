@@ -51,6 +51,12 @@ if ! grep -q "Rolling back trx with id .*, 200000 rows to undo" $OUTFILE; then
   die "The prepare did not roll back the uncommitted transaction"
 fi
 
+# With too little capacity the rollback can also stall on redo space instead
+# of failing.
+if grep -q "MY-014084" $OUTFILE; then
+  die "The rollback ran out of redo log space"
+fi
+
 stop_server
 rm -rf $mysql_datadir
 xtrabackup --copy-back --target-dir=$topdir/backup
