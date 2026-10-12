@@ -720,6 +720,12 @@ dberr_t srv_undo_tablespace_open(undo_truncate::Tablespace &undo_space,
   return DB_SUCCESS;
 }
 
+#ifdef XTRABACKUP
+/** True while srv_undo_tablespaces_init() opens the undo tablespaces before
+the redo log is applied, in backup or before the prepare. */
+static bool xb_undo_open_before_recovery = false;
+#endif /* XTRABACKUP */
+
 /** Open an undo tablespace with a specified undo number.
 If the undo space is undergoing truncation, we will delete the undo file.
 @param[in]  space_num  undo tablespace number
@@ -807,12 +813,16 @@ static dberr_t srv_undo_tablespace_open_by_num(const space_id_t space_num) {
     }
     if (unusable_header) {
 #ifdef XTRABACKUP
-      if (srv_backup_mode) {
-        /* The undo tablespace is being truncated or created by the server.
-        Never touch the server files during the backup. */
+      if (xb_undo_open_before_recovery) {
+        /* The undo tablespace is being created or truncated, or it was just
+        before the backup and its header page is not flushed yet. Open the file
+        anyway: the redo log has the final state of the header, and srv_start()
+        handles the tablespace after the recovery. Never touch the server files
+        during the backup. */
         xb::info() << "Undo tablespace " << undo_space.file_name()
-                   << " is marked unusable (truncation in progress)";
-        return DB_UNDO_FILE_UNDER_TRUNCATION;
+                   << " is marked unusable on disk";
+        undo_truncate::use_space_id(space_id);
+        return srv_undo_tablespace_open(undo_space, true);
       }
 #endif /* XTRABACKUP */
       if (srv_read_only_mode) {
@@ -845,8 +855,9 @@ static dberr_t srv_undo_tablespace_open_by_num(const space_id_t space_num) {
 
   } else if (FSP_FLAGS_GET_UNDO_UNUSABLE(space->flags)) {
 #ifdef XTRABACKUP
-    if (srv_backup_mode) {
-      return DB_UNDO_FILE_UNDER_TRUNCATION;
+    if (xb_undo_open_before_recovery) {
+      undo_truncate::use_space_id(space_id);
+      return srv_undo_tablespace_open(undo_space, true);
     }
 #endif /* XTRABACKUP */
     if (srv_read_only_mode) {
@@ -972,7 +983,9 @@ dberr_t srv_undo_tablespaces_init(bool create_new_db [[maybe_unused]],
   undo_truncate::num2id_map =
       ut::make_unique<undo_truncate::Undo_num2id_map>(space_ids);
 
+  xb_undo_open_before_recovery = true;
   const dberr_t err = srv_undo_tablespaces_open();
+  xb_undo_open_before_recovery = false;
 
   undo_truncate::num2id_map.reset();
 

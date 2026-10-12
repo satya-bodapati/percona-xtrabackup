@@ -143,9 +143,10 @@ xb_fil_cur_result_t xb_fil_cur_open(
   /* In the backup mode we should already have a tablespace handle created
   by fil_load_single_table_tablespace() unless it is a system
   tablespace or srv_close_files is true. Otherwise we open the file here.
-  srv_close_files has an effect only on IBD tablespaces. */
+  srv_close_files has an effect only on IBD tablespaces. An undo tablespace
+  whose header is marked unusable on disk is not opened at startup. */
   if (cursor->is_system || !srv_backup_mode ||
-      (srv_close_files && cursor->is_ibd)) {
+      (srv_close_files && cursor->is_ibd) || !node->is_open()) {
     if (!fil_node_open_file(node)) {
       /* The following call prints an error message */
 
