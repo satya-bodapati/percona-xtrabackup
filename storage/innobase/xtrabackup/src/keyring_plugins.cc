@@ -38,7 +38,6 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include "keyring_operations_helper.h"
 
 #include "backup_mysql.h"
-#include "ddl_tracker.h"
 #include "keyring_plugins.h"
 #include "rpl_log_encryption.h"
 #include "utils.h"
@@ -845,11 +844,7 @@ bool TablespaceKeyDumper::initialize() {
   return true;
 }
 
-bool TablespaceKeyDumper::dump_from_spaces(bool use_ddl_tracker) {
-  if (use_ddl_tracker) {
-    ut_a(ddl_tracker != nullptr);
-  }
-
+bool TablespaceKeyDumper::dump_from_spaces() {
   if (m_state != State::Initialized && m_state != State::SpacesDumpedOnce)
     return fail_state("dump_from_spaces");
 
@@ -858,12 +853,6 @@ bool TablespaceKeyDumper::dump_from_spaces(bool use_ddl_tracker) {
   dberr_t err = Fil_space_iterator::for_each_space([&](fil_space_t *space) {
     if (space->m_encryption_metadata.m_type == Encryption::NONE) {
       return DB_SUCCESS;
-    }
-
-    if (use_ddl_tracker && ddl_tracker != nullptr) {
-      if (ddl_tracker->is_tablespace_dropped(space->id)) {
-        return DB_SUCCESS;
-      }
     }
 
     if (!xb_tablespace_keys_write_single(m_stream, m_derived_key, space->id,

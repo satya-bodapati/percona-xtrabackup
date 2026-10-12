@@ -107,7 +107,7 @@ class TablespaceKeyDumper {
                       size_t transition_key_len);
 
   bool initialize();
-  bool dump_from_spaces(bool use_ddl_tracker);
+  bool dump_from_spaces();
   bool dump_from_redo();
   bool dump_from_encryption_infos();
   void finalize();
