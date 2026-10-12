@@ -2264,6 +2264,17 @@ dberr_t Fil_shard::create_node(const char *name, fil_space_t *space,
   const uint32_t node_order = space->files.size();
   const page_size_t page_size(space->flags);
 
+#ifdef XTRABACKUP
+  DBUG_EXECUTE_IF(
+      "shard_create_node", if (strncmp(name, "./test/drop_table.ibd",
+                                       strlen("./test/drop_table.ibd")) == 0) {
+        *const_cast<const char **>(&xtrabackup_debug_sync) =
+            "shard_create_node";
+
+        debug_sync_point("shard_create_node");
+      });
+#endif /* XTRABACKUP */
+
   const auto node_info = tablespaces_nodes->get_node_info(
       space->id, node_order, {.m_path = name, .m_is_raw_disk = is_raw},
       page_size.physical());
@@ -2949,6 +2960,15 @@ dberr_t Fil_shard::open_file(fil_node_t *file) {
   ut_ad(have_right_for_open);
 
   ut_a(file->get_cached_size_in_pages() != 0);
+
+#ifdef XTRABACKUP
+  DBUG_EXECUTE_IF(
+      "before_file_open_dbug",
+      if (strcmp(file->name, "./test/drop_table.ibd") == 0) {
+        *const_cast<const char **>(&xtrabackup_debug_sync) = "before_file_open";
+        debug_sync_point("before_file_open");
+      });
+#endif /* XTRABACKUP */
 
   if (!file->open()) {
     /* Release the rights acquired as we failed to open it in the end. */
