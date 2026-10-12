@@ -2544,13 +2544,29 @@ static bool innodb_init_param(void) {
                    << "Free memory %: " << xtrabackup_use_free_memory_pct
                    << ". Allowed usage of Free Memory: " << free_memory_usable;
 
-        /* We might exaust free memory if we pass 100% as parameter.
-         * In this case we align usable memory down
-         */
-        if (buf_pool_size_align(free_memory_usable) > free_memory_total) {
-          free_memory_usable = buf_pool_size_align_down(free_memory_usable);
+        /* PXB-3770 defence-in-depth: if free memory is reported below
+         * the InnoDB minimum buffer pool size, do NOT route through
+         * buf_pool_size_align_down(): with size==0 it computes
+         * (size/m - 1) * m which unsigned-underflows ulint and yields
+         * ~16 EiB once stored back. Keep the user-supplied
+         * xtrabackup_use_memory and warn instead. */
+        if (free_memory_usable < srv_buf_pool_min_size) {
+          xb::warn() << "Cannot honour --use-free-memory-pct="
+                     << xtrabackup_use_free_memory_pct
+                     << " : computed allowance (" << free_memory_usable
+                     << " bytes) is below the InnoDB minimum buffer pool"
+                     << " size (" << srv_buf_pool_min_size << " bytes)."
+                     << " Falling back to --use-memory="
+                     << xtrabackup_use_memory << ".";
+        } else {
+          /* We might exaust free memory if we pass 100% as parameter.
+           * In this case we align usable memory down
+           */
+          if (buf_pool_size_align(free_memory_usable) > free_memory_total) {
+            free_memory_usable = buf_pool_size_align_down(free_memory_usable);
+          }
+          xtrabackup_use_memory = free_memory_usable;
         }
-        xtrabackup_use_memory = free_memory_usable;
       } else {
         xtrabackup_use_memory = mem;
       }
@@ -3464,12 +3480,12 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
   action = xb_get_copy_action();
 
   if (xtrabackup_stream) {
-    xb::info() << action << " file with space_id " << node->space->id << " "
-               << node_path << ", size " << cursor.statinfo.st_size << " ("
+    xb::info() << "space_id: " << node->space->id << ", " << action << node_path
+               << ", size " << cursor.statinfo.st_size << " ("
                << xtrabackup::utils::human_readable(cursor.statinfo.st_size)
                << ")";
   } else {
-    xb::info() << action << " file with space_id " << node->space->id << " "
+    xb::info() << "space_id: " << node->space->id << ", " << action << " "
                << node_path << " to " << dstfile->path << ", size "
                << cursor.statinfo.st_size << " ("
                << xtrabackup::utils::human_readable(cursor.statinfo.st_size)
@@ -3496,12 +3512,11 @@ bool xtrabackup_copy_datafile_func(fil_node_t *node, uint thread_n,
 
   /* close */
   if (xtrabackup_stream) {
-    xb::info() << "Done: " << action << " file with space_id "
-               << node->space->id << " " << node_path;
+    xb::info() << "space_id: " << node->space->id << ", Done: " << action << " "
+               << node_path;
   } else {
-    xb::info() << "Done: " << action << " file with space_id "
-               << node->space->id << " " << node_path << " to "
-               << dstfile->path;
+    xb::info() << "space_id: " << node->space->id << ", Done: " << action << " "
+               << node_path << " to " << dstfile->path;
   }
 
   xb_fil_cur_close(&cursor);
@@ -4890,7 +4905,7 @@ void xtrabackup_backup_func(void) {
   Tablespace_map::instance().serialize(ds_data);
 
   if (ts_key_dumper.is_initialized()) {
-    if (!ts_key_dumper.dump_from_spaces(false)) {
+    if (!ts_key_dumper.dump_from_spaces()) {
       xb::error() << "Couldn't dump transition key for all tablespaces.";
     }
 

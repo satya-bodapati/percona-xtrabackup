@@ -351,7 +351,9 @@ function get_free_port()
     local port
     local lockfile
 
-    for (( port=3307 + RANDOM; port < 65535; port++))
+    # Stay below the kernel ephemeral range (default 32768-60999): a port in
+    # it can be taken by an outgoing connection before the server binds it.
+    for (( port=3307 + RANDOM % (32768 - 3307); port < 32768; port++))
     do
 	lockfile="/tmp/xtrabackup_port_lock.$port"
 	# Try to atomically lock the current port number
@@ -581,6 +583,7 @@ EOF
         fi
 
         # Start the server
+        touch "$MYSQLD_VARDIR/.start_marker"
         if [ -z ${WITH_RR+x} ]; then
           echo "Starting ${MYSQLD} ${MYSQLD_ARGS} $* "
           ${MYSQLD} ${MYSQLD_ARGS} $* &
@@ -596,8 +599,25 @@ EOF
                 if ((++attempts < max_attempts))
                 then
                     vlog "Made $attempts attempts to find a free port"
-                    reset_server_variables $id
                     free_reserved_port $MYSQLD_PORT
+                    if [ $new_instance = yes ]
+                    then
+                      # The failed start already wrote to the new instance,
+                      # e.g. opened a binary log. Retry from a clean install
+                      # so that the files match those of a first start.
+                      find "$MYSQLD_VARDIR" -newer "$MYSQLD_VARDIR/.start_marker" \
+                           -type f ! -path "$MYSQLD_DATADIR/*" -delete
+                      rm -rf "$MYSQLD_DATADIR"
+                    fi
+                    if [[ "${type}" = "gr" ]];
+                    then
+                      # GR variables are set once by bulk_init_gr_variables
+                      # and the other members know this server's GR port, so
+                      # only pick a new client port.
+                      SRV_MYSQLD_PORT[$id]=`get_free_port $id`
+                    else
+                      reset_server_variables $id
+                    fi
                     continue
                 else
                     vlog "Failed to find a free port after $attempts attempts"
