@@ -608,8 +608,13 @@ static inline const rec_t *page_rec_get_next_low(
 
   offs = rec_get_next_offs(rec, comp);
 
-#ifdef UNIV_DEBUG
+/* xtrabackup --check-tables walks corrupted pages and must report the
+corruption instead of asserting, see PXB-3804. */
+#if defined(UNIV_DEBUG) && !defined(XTRABACKUP)
   const auto try_get_next = page_rec_try_get_next_offs(rec, comp);
+#define page_rec_get_next_low_ad(e) ut_ad(e)
+#else
+#define page_rec_get_next_low_ad(e)
 #endif
 
   if (offs >= UNIV_PAGE_SIZE) {
@@ -619,15 +624,16 @@ static inline const rec_t *page_rec_get_next_low(
             "InnoDB: rec address %p, space id %lu, page %lu\n",
             (ulong)offs, (ulong)page_offset(rec), (void *)rec,
             (ulong)page_get_space_id(page), (ulong)page_get_page_no(page));
-    ut_ad(!try_get_next.has_value());
+    page_rec_get_next_low_ad(!try_get_next.has_value());
     ut_error;
   } else if (offs == 0) {
-    ut_ad(!try_get_next.has_value());
+    page_rec_get_next_low_ad(!try_get_next.has_value());
     return (nullptr);
   }
 
-  ut_ad(try_get_next.has_value());
-  ut_ad(try_get_next.value() == offs);
+  page_rec_get_next_low_ad(try_get_next.has_value());
+  page_rec_get_next_low_ad(try_get_next.value() == offs);
+#undef page_rec_get_next_low_ad
   return (page + offs);
 }
 
