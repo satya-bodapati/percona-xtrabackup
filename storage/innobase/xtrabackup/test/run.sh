@@ -437,7 +437,7 @@ function get_version_info()
 
     INNODB_VERSION=`$MYSQL ${MYSQL_ARGS} -Nsf -e "SHOW VARIABLES LIKE 'innodb_version'"`
     INNODB_VERSION=${INNODB_VERSION#"innodb_version	"}
-    XTRADB_VERSION="`echo $INNODB_VERSION  | sed 's/[0-9]\.[0-9]\.[0-9][0-9]*\(-[0-9][0-9]*\.[0-9][0-9]*\)*$/\1/'`"
+    XTRADB_VERSION="`echo $INNODB_VERSION  | sed 's/^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(-[0-9][0-9]*\.[0-9][0-9]*\)*$/\1/'`"
 
     WSREP_ENABLED=`$MYSQL ${MYSQL_ARGS} -Nsf -e "SHOW VARIABLES" | grep -i wsrep`
 
