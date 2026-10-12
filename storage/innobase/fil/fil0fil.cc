@@ -3405,10 +3405,13 @@ ut::Expected<fil_space_t *> Fil_shard::space_open(space_id_t space_id) {
   for (auto it = space->files.rbegin(); it != space->files.rend(); ++it) {
     const auto err = open_file(&*it);
     if (err != DB_SUCCESS) {
+      /* The caller gets no space to release. */
+      space_release(space);
       return ut::Unexpected(err);
     }
   }
   if (const auto err = space->validate_first_page(); err != DB_SUCCESS) {
+    space_release(space);
     return ut::Unexpected(err);
   }
 
