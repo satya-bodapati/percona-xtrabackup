@@ -907,6 +907,45 @@ static bool create_trigger(MYSQL *conn, const Table &t,
   return ok;
 }
 
+/** Rebuild the FULLTEXT indexes of an imported table, which the import leaves
+unusable. One ALTER TABLE can't do it: dropping and adding an index with the
+same definition is no change to the server, and InnoDB adds one FULLTEXT index
+per statement. While any FULLTEXT index is unusable, adding another fails, so
+all of them are dropped first, in one statement, then each is added in its own.
+Neither step rebuilds the table.
+@param[in]	conn	connection
+@param[in,out]	t	table; what fails goes to its warnings */
+static void rebuild_fulltext(MYSQL *conn, Table *t) {
+  std::string error;
+  std::string drop = "ALTER TABLE " + qualified(*t);
+  for (size_t i = 0; i < t->fts.size(); i++) {
+    drop += (i == 0 ? " DROP INDEX " : ", DROP INDEX ") +
+            quote_ident(t->fts[i].name);
+  }
+  if (!exec(conn, drop, &error)) {
+    t->warnings.push_back("FULLTEXT indexes not rebuilt: " + error);
+    return;
+  }
+
+  for (const auto &fts : t->fts) {
+    std::string cols;
+    for (const auto &c : fts.columns) {
+      if (!cols.empty()) cols += ", ";
+      cols += quote_ident(c);
+    }
+    std::string add = "ALTER TABLE " + qualified(*t) + " ADD FULLTEXT INDEX " +
+                      quote_ident(fts.name) + " (" + cols + ")";
+    if (!fts.parser.empty()) {
+      add += " WITH PARSER " + quote_ident(fts.parser);
+    }
+    if (!exec(conn, add, &error)) {
+      t->warnings.push_back("FULLTEXT index " + fts.name +
+                            " was dropped and not added back (" + error +
+                            "); add it with: " + add);
+    }
+  }
+}
+
 /** Restore one table.
 @param[in]	conn	connection
 @param[in,out]	t	table */
@@ -1034,28 +1073,8 @@ run without a current database. */
                           std::to_string(t->autoinc) + ": " + error);
   }
 
-  for (const auto &fts : t->fts) {
-    std::string cols;
-    for (const auto &c : fts.columns) {
-      if (!cols.empty()) cols += ", ";
-      cols += quote_ident(c);
-    }
-    /* The import leaves the index unusable. Dropping it and adding it in
-    one ALTER TABLE keeps it so, because the definition does not change;
-    two statements rebuild it. */
-    std::string add = "ALTER TABLE " + qualified(*t) + " ADD FULLTEXT INDEX " +
-                      quote_ident(fts.name) + " (" + cols + ")";
-    if (!fts.parser.empty()) {
-      add += " WITH PARSER " + quote_ident(fts.parser);
-    }
-    if (!exec(conn,
-              "ALTER TABLE " + qualified(*t) + " DROP INDEX " +
-                  quote_ident(fts.name),
-              &error) ||
-        !exec(conn, add, &error)) {
-      t->warnings.push_back("FULLTEXT index " + fts.name +
-                            " not rebuilt: " + error);
-    }
+  if (!t->fts.empty()) {
+    rebuild_fulltext(conn, t);
   }
 
   for (const auto &tr : t->triggers) {

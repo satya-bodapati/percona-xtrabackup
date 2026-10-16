@@ -32,9 +32,11 @@ CREATE TRIGGER trg2 AFTER INSERT ON t1 FOR EACH ROW
 CREATE TRIGGER trg3 AFTER INSERT ON t1 FOR EACH ROW PRECEDES trg2
   INSERT INTO audit VALUES ('first');
 
-CREATE TABLE ft (id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ftk (body))
+CREATE TABLE ft (id INT PRIMARY KEY, title VARCHAR(100), body TEXT,
+                 FULLTEXT KEY ftk (body), FULLTEXT KEY ftt (title))
   ENGINE=InnoDB;
-INSERT INTO ft VALUES (1, 'hello world'), (2, 'quick brown fox');
+INSERT INTO ft VALUES (1, 'greeting', 'hello world'),
+                      (2, 'animals', 'quick brown fox');
 
 CREATE TABLE tp (a INT, b VARCHAR(10)) ENGINE=InnoDB
   PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (10),
@@ -111,7 +113,10 @@ mysql db1 -e "INSERT INTO t1 (a) VALUES (1)"
   "first,ins 6" ] || die "triggers trg2 and trg3 are wrong"
 [ "$(mysql -Ns -e "SELECT id FROM db1.ft
                    WHERE MATCH (body) AGAINST ('fox')")" = "2" ] || \
-  die "FULLTEXT search does not work"
+  die "FULLTEXT search on ftk does not work"
+[ "$(mysql -Ns -e "SELECT id FROM db1.ft
+                   WHERE MATCH (title) AGAINST ('greeting')")" = "1" ] || \
+  die "FULLTEXT search on ftt does not work"
 run_cmd_expect_failure $MYSQL $MYSQL_ARGS db1 \
   -e "INSERT INTO child VALUES (30, 99)"
 [ "$(stat -c %a $mysql_datadir/db1/t1.ibd)" = "640" ] || \
