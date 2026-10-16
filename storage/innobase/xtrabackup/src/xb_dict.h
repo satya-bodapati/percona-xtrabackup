@@ -21,7 +21,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define XB_DICT_H
 #include <mysql.h>
 #include <memory>
+#include <string>
 #include <unordered_set>
+#include <vector>
 #include "include/db0err.h"
 #include "include/dict0types.h"
 // Forward declaration
@@ -238,6 +240,71 @@ std::unique_ptr<dd::Table> get_dd_Table(space_id_t space_id,
 
 /** Clear all the maps created to handle dictionary during prepare */
 void clear_dd_cache_maps();
+
+/** A table definition read from the SDI of a tablespace. */
+struct Sdi_table {
+  /** the table definition, not converted to dict_table_t */
+  std::unique_ptr<dd::Table> table;
+  /** name of the schema the table belongs to */
+  std::string schema;
+  /** id of the SDI record, which is the id of the table in mysql.tables */
+  uint64_t sdi_id{0};
+};
+
+/** Read every table definition stored in the SDI of a tablespace. A partition
+tablespace other than the one holding the SDI of its table yields none.
+@param[in]	space_id	InnoDB tablespace id
+@param[out]	tables		definitions found, appended
+@return DB_SUCCESS or error code */
+dberr_t get_sdi_tables(space_id_t space_id, std::vector<Sdi_table> *tables);
+
+/** One row of mysql.schemata. */
+struct Schema_row {
+  /** schema name */
+  std::string name;
+  /** id of the default collation */
+  uint64_t collation_id{0};
+  /** DEFAULT ENCRYPTION='Y' */
+  bool default_encryption{false};
+};
+
+/** Read mysql.schemata from the backup's data dictionary.
+@param[out]	rows	the rows, appended
+@return DB_SUCCESS or error code */
+dberr_t scan_schemata(std::vector<Schema_row> *rows);
+
+/** One row of mysql.triggers. */
+struct Trigger_row {
+  /** id of the table in mysql.tables */
+  uint64_t table_id{0};
+  /** trigger name */
+  std::string name;
+  /** 1 INSERT, 2 UPDATE, 3 DELETE */
+  uint32_t event_type{0};
+  /** 1 BEFORE, 2 AFTER */
+  uint32_t action_timing{0};
+  /** position among the triggers with the same timing and event */
+  uint64_t action_order{0};
+  /** body as the client sent it, in the client character set */
+  std::string action_statement;
+  /** body in utf8mb3 */
+  std::string action_statement_utf8;
+  /** sql_mode the trigger was created with, as the SET bitmap */
+  uint64_t sql_mode{0};
+  /** user@host */
+  std::string definer;
+  /** character_set_client, as a collation id */
+  uint64_t client_collation_id{0};
+  /** collation_connection */
+  uint64_t connection_collation_id{0};
+  /** default collation of the schema at creation */
+  uint64_t schema_collation_id{0};
+};
+
+/** Read mysql.triggers from the backup's data dictionary.
+@param[out]	rows	the rows, appended
+@return DB_SUCCESS or error code */
+dberr_t scan_triggers(std::vector<Trigger_row> *rows);
 }  // namespace prepare
 
 }  // namespace xb

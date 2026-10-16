@@ -75,6 +75,8 @@ static const char *purpose_name(Purpose purpose) {
       return ("redo log consumer");
     case Purpose::HISTORY_RECORD:
       return ("history record");
+    case Purpose::RESTORE:
+      return ("restore");
   }
 
   ut_error;
@@ -239,6 +241,7 @@ static Destination destination_of(Purpose purpose) {
     case Purpose::QUERY_KILLER:
     case Purpose::REDO_ARCHIVE:
     case Purpose::REDO_CONSUMER:
+    case Purpose::RESTORE:
       return (Destination::MAIN);
     case Purpose::HISTORY_RECORD:
       return (Destination::HISTORY);

@@ -116,6 +116,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "keyring_plugins.h"
 #include "read_filt.h"
 #include "redo_log.h"
+#include "restore.h"
 #include "space_map.h"
 #include "trx0purge.h"
 #include "utils.h"
@@ -883,6 +884,13 @@ enum options_xtrabackup {
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_CHECK_TABLES,
+  OPT_XTRA_RESTORE,
+  OPT_XTRA_RESTORE_INCLUDE,
+  OPT_XTRA_RESTORE_EXCLUDE,
+  OPT_XTRA_RESTORE_INCLUDE_FILE,
+  OPT_XTRA_RESTORE_EXCLUDE_FILE,
+  OPT_XTRA_RESTORE_REPORT,
+  OPT_XTRA_DRY_RUN,
 };
 
 struct my_option xb_client_options[] = {
@@ -902,6 +910,41 @@ struct my_option xb_client_options[] = {
     {"export", OPT_XTRA_EXPORT,
      "create files to import to another database when prepare.",
      (G_PTR *)&xtrabackup_export, (G_PTR *)&xtrabackup_export, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"restore", OPT_XTRA_RESTORE,
+     "Restore the tables selected by --restore-include from the prepared "
+     "backup in --target-dir into the running Percona Server on this host "
+     "(connection options as for --backup). Tables that already exist are "
+     "never replaced.",
+     (G_PTR *)&xtrabackup_restore, (G_PTR *)&xtrabackup_restore, 0, GET_BOOL,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
+    {"restore-include", OPT_XTRA_RESTORE_INCLUDE,
+     "Comma separated db.table patterns of the tables --restore restores. "
+     "'*' and '?' are wildcards and a bare db means db.*. Names are as SQL "
+     "shows them.",
+     (G_PTR *)&opt_restore_include, (G_PTR *)&opt_restore_include, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"restore-exclude", OPT_XTRA_RESTORE_EXCLUDE,
+     "Comma separated db.table patterns of tables --restore leaves out, "
+     "although --restore-include selects them.",
+     (G_PTR *)&opt_restore_exclude, (G_PTR *)&opt_restore_exclude, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"restore-include-file", OPT_XTRA_RESTORE_INCLUDE_FILE,
+     "File with --restore-include patterns, one per line.",
+     (G_PTR *)&opt_restore_include_file, (G_PTR *)&opt_restore_include_file, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"restore-exclude-file", OPT_XTRA_RESTORE_EXCLUDE_FILE,
+     "File with --restore-exclude patterns, one per line.",
+     (G_PTR *)&opt_restore_exclude_file, (G_PTR *)&opt_restore_exclude_file, 0,
+     GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"restore-report", OPT_XTRA_RESTORE_REPORT,
+     "Write the outcome of --restore for each table to this file, as JSON.",
+     (G_PTR *)&opt_restore_report, (G_PTR *)&opt_restore_report, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+    {"dry-run", OPT_XTRA_DRY_RUN,
+     "With --restore, list the tables that would be restored and change "
+     "nothing on the server.",
+     (G_PTR *)&opt_restore_dry_run, (G_PTR *)&opt_restore_dry_run, 0, GET_BOOL,
      NO_ARG, 0, 0, 0, 0, 0, 0},
     {"check-tables", OPT_XTRA_CHECK_TABLES,
      "Validate all InnoDB B-tree indexes during --prepare. "
@@ -6938,6 +6981,27 @@ static bool xb_export_cfg_write(
   return (err);
 }
 
+bool xb_write_cfp_file(const fil_space_t *space, const char *path) {
+  FILE *file = fopen(path, "w+b");
+
+  if (file == nullptr) {
+    xb::error() << "Can't create file " << SQUOTE(path) << " (errno: " << errno
+                << " - " << strerror(errno) << ")";
+    return false;
+  }
+
+  dberr_t err =
+      xb_export_write_transfer_key(space->m_encryption_metadata, file);
+
+  if (fflush(file) != 0 || fclose(file) != 0) {
+    xb::error() << "IO Write error: (" << errno << ", " << strerror(errno)
+                << ") " << path;
+    err = DB_IO_ERROR;
+  }
+
+  return err == DB_SUCCESS;
+}
+
 static void innodb_free_param() {
   srv_sys_space.shutdown();
   srv_tmp_space.shutdown();
@@ -7527,6 +7591,10 @@ skip_check:
     }
   }
 
+  if (xtrabackup_restore && !xb::restore::collect()) {
+    goto error_cleanup;
+  }
+
   if (xtrabackup_export) {
     xb::info() << "export option is specified.";
 
@@ -7775,7 +7843,40 @@ error_cleanup:
 
   xb_filters_free();
 
-  exit(EXIT_FAILURE);
+  exit(xtrabackup_restore ? RESTORE_EXIT_FATAL : EXIT_FAILURE);
+}
+
+/** --restore: read the backup with InnoDB the way --prepare does, then restore
+the selected tables into the server.
+@param[in]	argc	argument count, as for xtrabackup_prepare_func()
+@param[in]	argv	arguments
+@return exit code, one of restore_exit_t */
+static int xtrabackup_restore_func(int argc, char **argv) {
+  read_metadata();
+
+  if (strcmp(metadata_type_str, "full-prepared") != 0) {
+    xb::error() << "--restore: the backup in " << xtrabackup_real_target_dir
+                << " is not prepared (" << metadata_type_str
+                << "). Prepare it without --apply-log-only first.";
+    return RESTORE_EXIT_FATAL;
+  }
+
+  if (xtrabackup_export || xtrabackup_check_tables ||
+      xtrabackup_apply_log_only || xtrabackup_incremental_dir != nullptr) {
+    xb::error() << "--restore can't be combined with --export, "
+                   "--check-tables, --apply-log-only or --incremental-dir";
+    return RESTORE_EXIT_FATAL;
+  }
+
+  if (!xb::restore::init()) {
+    return RESTORE_EXIT_FATAL;
+  }
+
+  /* InnoDB starts on the backup as for --prepare, which on a prepared backup
+  applies nothing; collect() reads what the restore needs while it runs. */
+  xtrabackup_prepare_func(argc, argv);
+
+  return xb::restore::run();
 }
 
 /**************************************************************************
@@ -8305,9 +8406,11 @@ static void handle_options(int argc, char **argv, int *argc_client,
   int i;
   int ho_error;
   char conf_file[FN_REFLEN];
+  char client_conf_file[FN_REFLEN];
 
   const char *target_dir = NULL;
   bool prepare = false;
+  bool restore = false;
 
   *argc_client = argc;
   *argc_server = argc;
@@ -8337,6 +8440,15 @@ static void handle_options(int argc, char **argv, int *argc_client,
       prepare = true;
     }
 
+    /* --restore reads the backup with InnoDB as --prepare does, so InnoDB
+    must be set up from the backup's options, not the live server's: with the
+    server's innodb_directories it would find the server's own files. It also
+    connects to the server, so the client options come from the usual place. */
+    if (!strncmp(argv[i], "--restore", optend - argv[i])) {
+      prepare = true;
+      restore = true;
+    }
+
     if (!strncmp(argv[i], "--target-dir", optend - argv[i]) && *optend) {
       target_dir = optend + 1;
     }
@@ -8351,6 +8463,9 @@ static void handle_options(int argc, char **argv, int *argc_client,
   if (prepare && target_dir) {
     snprintf(conf_file, sizeof(conf_file), "%s/backup-my.cnf", target_dir);
   }
+
+  snprintf(client_conf_file, sizeof(client_conf_file), "%s",
+           restore ? "my" : conf_file);
 
   if (load_defaults(conf_file, xb_server_default_groups, argc_server,
                     argv_server, &argv_alloc)) {
@@ -8401,7 +8516,7 @@ static void handle_options(int argc, char **argv, int *argc_client,
     param_str.clear();
   }
 
-  if (load_defaults(conf_file, xb_client_default_groups, argc_client,
+  if (load_defaults(client_conf_file, xb_client_default_groups, argc_client,
                     argv_client, &argv_alloc)) {
     exit(EXIT_FAILURE);
   }
@@ -8508,6 +8623,16 @@ int main(int argc, char **argv) {
 
   handle_options(argc, argv, &client_argc, &client_defaults, &server_argc,
                  &server_defaults);
+
+  /* --restore is a mode of its own, but it runs on the prepare machinery, so
+  everything that depends on --prepare must see it. */
+  if (xtrabackup_restore) {
+    if (xtrabackup_prepare) {
+      xb::error() << "--restore and --prepare are mutually exclusive";
+      exit(RESTORE_EXIT_FATAL);
+    }
+    xtrabackup_prepare = true;
+  }
 
   print_version();
 
@@ -8712,6 +8837,11 @@ int main(int argc, char **argv) {
   /* --backup */
   if (xtrabackup_backup) {
     xtrabackup_backup_func();
+  }
+
+  /* --restore */
+  if (xtrabackup_restore) {
+    exit(xtrabackup_restore_func(server_argc, server_defaults));
   }
 
   /* --prepare */

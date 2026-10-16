@@ -40,12 +40,13 @@ enum class Destination {
 announces itself with, so that the several connections a backup opens can be
 told apart in the log. */
 enum class Purpose {
-  BACKUP,        /** the main connection the backup runs on */
-  MDL_LOCK,      /** holds the MDL of --lock-ddl-per-table */
-  QUERY_KILLER,  /** kills queries older than --kill-long-queries-timeout */
-  REDO_ARCHIVE,  /** drives innodb_redo_log_archive_* */
-  REDO_CONSUMER, /** registers the redo log consumer */
-  HISTORY_RECORD /** reads and writes PERCONA_SCHEMA.xtrabackup_history */
+  BACKUP,         /** the main connection the backup runs on */
+  MDL_LOCK,       /** holds the MDL of --lock-ddl-per-table */
+  QUERY_KILLER,   /** kills queries older than --kill-long-queries-timeout */
+  REDO_ARCHIVE,   /** drives innodb_redo_log_archive_* */
+  REDO_CONSUMER,  /** registers the redo log consumer */
+  HISTORY_RECORD, /** reads and writes PERCONA_SCHEMA.xtrabackup_history */
+  RESTORE         /** runs the statements of --restore */
 };
 
 /** The TLS settings of a destination.

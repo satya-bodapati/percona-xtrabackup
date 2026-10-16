@@ -1173,6 +1173,25 @@ function require_server_version_higher_than()
 }
 
 #########################################################################
+# Skip the test unless the running server can IMPORT TABLE FROM an .ibd
+# file, which xtrabackup --restore needs. Servers without it refuse any file
+# name but *.sdi with "Incorrect File Name".
+########################################################################
+function require_import_table_ibd()
+{
+    local out
+    $MYSQL $MYSQL_ARGS -e "CREATE DATABASE IF NOT EXISTS xb_import_probe"
+    echo "not a tablespace" > $mysql_datadir/xb_import_probe/probe.ibd
+    out=$($MYSQL $MYSQL_ARGS xb_import_probe \
+          -e "IMPORT TABLE FROM 'xb_import_probe/probe.ibd'" 2>&1 || true)
+    rm -f $mysql_datadir/xb_import_probe/probe.ibd
+    $MYSQL $MYSQL_ARGS -e "DROP DATABASE xb_import_probe"
+    if echo "$out" | grep -q "Incorrect File Name"; then
+        skip_test "Requires a server that can IMPORT TABLE FROM an .ibd"
+    fi
+}
+
+#########################################################################
 # Requires debug pxb version
 ########################################################################
 function require_debug_pxb_version()

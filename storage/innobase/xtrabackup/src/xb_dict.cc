@@ -34,6 +34,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "sql/dd/types/column_type_element.h"
 #include "storage/innobase/include/btr0pcur.h"
 #include "storage/innobase/include/dict0dd.h"
+#include "storage/innobase/include/lob0lob.h"
 #include "xb0xb.h"
 
 namespace xb {
@@ -338,11 +339,13 @@ callback (load_table_cb)
 @param[in] trx           InnoDB trx object (for using SDI APIs)
 @param[in] load_table_cb The callback function that processes dd::Table. A
                          callback can convert dd::Table to dict_table_t or
-                         send the dd::Table to caller without conversion
+                         send the dd::Table to caller without conversion. It
+                         also gets the schema name and the SDI record id
 @return DB_SUCCESS on success, other DB_* codes on errors */
 static dberr_t dict_load_tables_from_space_id_low(
     space_id_t space_id, table_id_t table_id, THD *thd, trx_t *trx,
-    std::function<dberr_t(dd_Table_Ptr dd_table, dd::String_type &schema_name)>
+    std::function<dberr_t(dd_Table_Ptr dd_table, dd::String_type &schema_name,
+                          uint64 sdi_id)>
         load_table_cb) {
   sdi_vector_t sdi_vector;
   ib_sdi_vector_t ib_vector;
@@ -463,7 +466,7 @@ static dberr_t dict_load_tables_from_space_id_low(
     }
 
     // Callback.
-    err = load_table_cb(std::move(dd_table), schema_name);
+    err = load_table_cb(std::move(dd_table), schema_name, ib_key.sdi_key->id);
     // Do not use dd_table from here. The ownership has been transferred to
     // callback
     ut_ad(dd_table == nullptr);
@@ -492,7 +495,8 @@ xb_dict_tuple dict_load_tables_from_space_id(space_id_t space_id,
   std::vector<dict_table_t *> tables_vec;
 
   auto load_table_func = [&](dd_Table_Ptr dd_table,
-                             dd::String_type &schema_name) -> dberr_t {
+                             dd::String_type &schema_name,
+                             uint64 sdi_id [[maybe_unused]]) -> dberr_t {
     fil_space_t *space = fil_space_get(space_id);
 
     using Client = dd::cache::Dictionary_client;
@@ -550,7 +554,8 @@ dd_Table_Ptr get_dd_Table(space_id_t space_id, table_id_t table_id) {
   // This callback doesn't convert the dd::Table object to InnoDB table
   // dict_table_t. This function returns dd::Table object to caller.
   auto load_table_func_cb = [&](dd_Table_Ptr dd_table,
-                                dd::String_type &schema_name) -> dberr_t {
+                                dd::String_type &schema_name [[maybe_unused]],
+                                uint64 sdi_id [[maybe_unused]]) -> dberr_t {
     tbl = std::move(dd_table);
     return (DB_SUCCESS);
   };
@@ -848,6 +853,193 @@ xb_dict_tuple dict_load_from_mysql_ibd() {
              << " seconds";
 
   return result;
+}
+
+dberr_t get_sdi_tables(space_id_t space_id, std::vector<Sdi_table> *tables) {
+  auto collect_cb = [&](dd_Table_Ptr dd_table, dd::String_type &schema_name,
+                        uint64 sdi_id) -> dberr_t {
+    Sdi_table t;
+    t.table = std::move(dd_table);
+    t.schema.assign(schema_name.c_str(), schema_name.length());
+    t.sdi_id = sdi_id;
+    tables->push_back(std::move(t));
+    return DB_SUCCESS;
+  };
+
+  THD *thd = current_thd;
+  ut_a(thd != nullptr);
+
+  ib_trx_t trx = ib_trx_begin(IB_TRX_READ_COMMITTED, false, false, thd);
+  dberr_t err =
+      dict_load_tables_from_space_id_low(space_id, 0, thd, trx, collect_cb);
+  ib_trx_commit(trx);
+  ib_trx_release(trx);
+
+  return err;
+}
+
+/** Read a column of a record of a data dictionary table, copying it to the
+heap if it is stored externally.
+@param[in]	heap	heap for the copy and the offsets
+@param[in]	rec	record of the clustered index
+@param[in]	offsets	offsets of rec
+@param[in]	table	the data dictionary table
+@param[in]	trx	transaction used to read an externally stored value
+@param[in]	name	column name
+@param[out]	len	length of the value, UNIV_SQL_NULL for NULL
+@return the value, or nullptr if an external value could not be read */
+static const byte *dd_rec_field(mem_heap_t *heap, const rec_t *rec,
+                                const ulint *offsets, dict_table_t *table,
+                                trx_t *trx, const char *name, ulint *len) {
+  dict_index_t *index = table->first_index();
+  ulint no = table->field_number(name);
+
+  /* The first column is the primary key "id"; DB_TRX_ID and DB_ROLL_PTR
+  follow it in the clustered index record, before the other columns. */
+  if (no != 0) {
+    no += DD_FIELD_OFFSET;
+  }
+
+  if (rec_offs_nth_extern(index, offsets, no)) {
+    return lob::btr_rec_copy_externally_stored_field(
+        trx, index, rec, offsets, dict_table_page_size(table), no, len, nullptr,
+        false, heap);
+  }
+  return rec_get_nth_field(index, rec, offsets, no, len);
+}
+
+/** Read an unsigned integer column (integer, ENUM or SET) of a data dictionary
+record.
+@param[in]	field	the value
+@param[in]	len	its length
+@return the value, 0 if NULL */
+static uint64_t dd_rec_uint(const byte *field, ulint len) {
+  if (field == nullptr || len == UNIV_SQL_NULL || len == 0 || len > 8) {
+    return 0;
+  }
+  return mach_read_int_type(field, len, true);
+}
+
+/** Read a string column of a data dictionary record.
+@param[in]	field	the value
+@param[in]	len	its length
+@return the value, empty if NULL */
+static std::string dd_rec_string(const byte *field, ulint len) {
+  if (field == nullptr || len == UNIV_SQL_NULL) {
+    return std::string();
+  }
+  return std::string(reinterpret_cast<const char *>(field), len);
+}
+
+/** Scan a data dictionary table of mysql.ibd, calling a function on every
+record that is not delete marked. The function gets the record, its offsets,
+the table, a heap emptied after each record and a transaction to read
+externally stored values with.
+@param[in]	table_name	"mysql/<table>"
+@param[in]	process		function to call
+@return DB_SUCCESS or error code */
+static dberr_t scan_dd_table(
+    const char *table_name,
+    const std::function<void(const rec_t *, const ulint *, dict_table_t *,
+                             mem_heap_t *, trx_t *)> &process) {
+  THD *thd = current_thd;
+  ut_a(thd != nullptr);
+
+  dict_table_t *sys_table = nullptr;
+  btr_pcur_t pcur;
+  mtr_t mtr;
+  MDL_ticket *mdl = nullptr;
+  mem_heap_t *heap = mem_heap_create(1000, UT_LOCATION_HERE);
+  ib_trx_t ib_trx = ib_trx_begin(IB_TRX_READ_COMMITTED, false, false, thd);
+  trx_t *trx = static_cast<trx_t *>(ib_trx);
+
+  dict_sys_mutex_enter();
+  mtr_start(&mtr);
+  const rec_t *rec =
+      dd_startscan_system(thd, &mdl, &pcur, &mtr, table_name, &sys_table);
+
+  while (rec != nullptr) {
+    ulint *offsets = rec_get_offsets(rec, sys_table->first_index(), nullptr,
+                                     ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
+    process(rec, offsets, sys_table, heap, trx);
+    mtr_commit(&mtr);
+    mem_heap_empty(heap);
+
+    mtr_start(&mtr);
+    rec = dd_getnext_system_rec(&pcur, &mtr);
+  }
+
+  mtr_commit(&mtr);
+  dd_table_close(sys_table, thd, &mdl, true);
+  dict_sys_mutex_exit();
+
+  ib_trx_commit(ib_trx);
+  ib_trx_release(ib_trx);
+  mem_heap_free(heap);
+
+  return DB_SUCCESS;
+}
+
+dberr_t scan_schemata(std::vector<Schema_row> *rows) {
+  return scan_dd_table(
+      "mysql/schemata", [&](const rec_t *rec, const ulint *offsets,
+                            dict_table_t *table, mem_heap_t *heap, trx_t *trx) {
+        ulint len;
+        const byte *f;
+        Schema_row row;
+
+        f = dd_rec_field(heap, rec, offsets, table, trx, "name", &len);
+        row.name = dd_rec_string(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "default_collation_id",
+                         &len);
+        row.collation_id = dd_rec_uint(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "default_encryption",
+                         &len);
+        /* ENUM('NO', 'YES') */
+        row.default_encryption = dd_rec_uint(f, len) == 2;
+        rows->push_back(row);
+      });
+}
+
+dberr_t scan_triggers(std::vector<Trigger_row> *rows) {
+  return scan_dd_table(
+      "mysql/triggers", [&](const rec_t *rec, const ulint *offsets,
+                            dict_table_t *table, mem_heap_t *heap, trx_t *trx) {
+        ulint len;
+        const byte *f;
+        Trigger_row row;
+
+        f = dd_rec_field(heap, rec, offsets, table, trx, "table_id", &len);
+        row.table_id = dd_rec_uint(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "name", &len);
+        row.name = dd_rec_string(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "event_type", &len);
+        row.event_type = static_cast<uint32_t>(dd_rec_uint(f, len));
+        f = dd_rec_field(heap, rec, offsets, table, trx, "action_timing", &len);
+        row.action_timing = static_cast<uint32_t>(dd_rec_uint(f, len));
+        f = dd_rec_field(heap, rec, offsets, table, trx, "action_order", &len);
+        row.action_order = dd_rec_uint(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "action_statement",
+                         &len);
+        row.action_statement = dd_rec_string(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx,
+                         "action_statement_utf8", &len);
+        row.action_statement_utf8 = dd_rec_string(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "sql_mode", &len);
+        row.sql_mode = dd_rec_uint(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "definer", &len);
+        row.definer = dd_rec_string(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "client_collation_id",
+                         &len);
+        row.client_collation_id = dd_rec_uint(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx,
+                         "connection_collation_id", &len);
+        row.connection_collation_id = dd_rec_uint(f, len);
+        f = dd_rec_field(heap, rec, offsets, table, trx, "schema_collation_id",
+                         &len);
+        row.schema_collation_id = dd_rec_uint(f, len);
+        rows->push_back(row);
+      });
 }
 
 /** Clear all the maps created to handle dictionary during prepare */
