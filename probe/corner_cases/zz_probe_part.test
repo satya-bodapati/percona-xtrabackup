@@ -1,0 +1,175 @@
+--source include/have_innodb_16k.inc
+--disable_abort_on_error
+let $D = `SELECT @@datadir`;
+let $T = $MYSQL_TMP_DIR/zzp;
+--mkdir $T
+CREATE DATABASE db2;
+
+CREATE TABLE pt (id INT PRIMARY KEY, v VARCHAR(20)) PARTITION BY RANGE (id)
+ (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+  PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO pt VALUES (1,'a'),(2,'b'),(11,'k'),(12,'l'),(21,'u');
+FLUSH TABLES pt FOR EXPORT;
+--copy_files_wildcard $D/test $T pt#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE pt;
+
+--echo ##### P1: files of p0 and p1 swapped
+--copy_file $T/pt#p#p0.ibd $D/test/pt#p#p1.ibd
+--copy_file $T/pt#p#p1.ibd $D/test/pt#p#p0.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/pt#p#p2.ibd
+IMPORT TABLE FROM 'test/pt#p#*.ibd';
+SELECT * FROM pt ORDER BY id;
+SELECT * FROM pt WHERE id = 11;
+--list_files $D/test pt*
+DROP TABLE IF EXISTS pt;
+--remove_files_wildcard $D/test pt#p#*
+
+--echo ##### P4: p2 renamed to a name that is no partition (pt#p#zz)
+--copy_file $T/pt#p#p0.ibd $D/test/pt#p#p0.ibd
+--copy_file $T/pt#p#p1.ibd $D/test/pt#p#p1.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/pt#p#zz.ibd
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'test/pt#p#p1.ibd', 'test/pt#p#zz.ibd';
+SELECT * FROM pt ORDER BY id;
+--list_files $D/test pt*
+DROP TABLE IF EXISTS pt;
+--remove_files_wildcard $D/test pt#p#*
+
+--echo ##### P4b: names p0, p1, zz; the real p2 file is present but not named
+--copy_file $T/pt#p#p0.ibd $D/test/pt#p#p0.ibd
+--copy_file $T/pt#p#p1.ibd $D/test/pt#p#p1.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/pt#p#p2.ibd
+--copy_file $T/pt#p#p1.ibd $D/test/pt#p#zz.ibd
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'test/pt#p#p1.ibd', 'test/pt#p#zz.ibd';
+SELECT * FROM pt ORDER BY id;
+--list_files $D/test pt*
+DROP TABLE IF EXISTS pt;
+--remove_files_wildcard $D/test pt#p#*
+
+--echo ##### P4c: p1 named twice through two patterns, p2 not named
+--copy_file $T/pt#p#p0.ibd $D/test/pt#p#p0.ibd
+--copy_file $T/pt#p#p1.ibd $D/test/pt#p#p1.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/pt#p#p2.ibd
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'test/pt#p#p1.ibd', 'test/pt#p#p?.ibd';
+SELECT * FROM pt ORDER BY id;
+DROP TABLE IF EXISTS pt;
+--remove_files_wildcard $D/test pt#p#*
+
+--echo ##### P8: partition files split across two schema directories
+--copy_file $T/pt#p#p0.ibd $D/test/pt#p#p0.ibd
+--copy_file $T/pt#p#p1.ibd $D/db2/pt#p#p1.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/pt#p#p2.ibd
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'db2/pt#p#p1.ibd', 'test/pt#p#p2.ibd';
+SHOW TABLES;
+--list_files $D/test pt*
+--list_files $D/db2
+DROP TABLE IF EXISTS pt;
+--remove_files_wildcard $D/test pt#p#*
+--remove_files_wildcard $D/db2 pt#p#*
+
+--echo ##### P7a: whole table placed in another schema directory
+--copy_files_wildcard $T $D/db2 pt#p#*.ibd
+IMPORT TABLE FROM 'db2/pt#p#*.ibd';
+USE db2;
+SHOW TABLES;
+USE test;
+--remove_files_wildcard $D/db2 pt#p#*
+
+--echo ##### P7b: whole table renamed to another table name
+--copy_file $T/pt#p#p0.ibd $D/test/qt#p#p0.ibd
+--copy_file $T/pt#p#p1.ibd $D/test/qt#p#p1.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/qt#p#p2.ibd
+IMPORT TABLE FROM 'test/qt#p#*.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test qt#p#*
+
+--echo ##### P7c: a partition file named as a whole table
+--copy_file $T/pt#p#p0.ibd $D/test/pt.ibd
+IMPORT TABLE FROM 'test/pt.ibd';
+SHOW TABLES;
+--remove_file $D/test/pt.ibd
+
+--echo ##### P7d: only the first partition
+--copy_file $T/pt#p#p0.ibd $D/test/pt#p#p0.ibd
+IMPORT TABLE FROM 'test/pt#p#p0.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test pt#p#*
+
+--echo ##### P7e: no first partition (no SDI anywhere)
+--copy_file $T/pt#p#p1.ibd $D/test/pt#p#p1.ibd
+--copy_file $T/pt#p#p2.ibd $D/test/pt#p#p2.ibd
+IMPORT TABLE FROM 'test/pt#p#*.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test pt#p#*
+
+--echo ##### P0: sanity, the correct files
+--copy_files_wildcard $T $D/test pt#p#*.ibd
+IMPORT TABLE FROM 'test/pt#p#*.ibd';
+SELECT * FROM pt ORDER BY id;
+SELECT * FROM pt PARTITION (p1) ORDER BY id;
+CHECK TABLE pt;
+DROP TABLE pt;
+
+--echo ##### P6: empty partitioned table and an empty plain table
+CREATE TABLE ept (id INT AUTO_INCREMENT PRIMARY KEY) PARTITION BY HASH (id) PARTITIONS 3;
+CREATE TABLE et (id INT AUTO_INCREMENT PRIMARY KEY, v TEXT);
+FLUSH TABLES ept, et FOR EXPORT;
+--copy_files_wildcard $D/test $T ept#p#*.ibd
+--copy_file $D/test/et.ibd $T/et.ibd
+UNLOCK TABLES;
+DROP TABLE ept, et;
+--copy_files_wildcard $T $D/test ept#p#*.ibd
+--copy_file $T/et.ibd $D/test/et.ibd
+IMPORT TABLE FROM 'test/ept#p#*.ibd', 'test/et.ibd';
+SELECT COUNT(*) FROM ept;
+SELECT COUNT(*) FROM et;
+INSERT INTO ept VALUES (NULL),(NULL);
+INSERT INTO et (v) VALUES ('x');
+SELECT * FROM ept ORDER BY id;
+SELECT id FROM et;
+CHECK TABLE ept, et;
+DROP TABLE ept, et;
+
+--echo ##### P12: the first partition was dropped before the export
+CREATE TABLE dp (id INT PRIMARY KEY) PARTITION BY RANGE (id)
+ (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+  PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO dp VALUES (1),(11),(21);
+ALTER TABLE dp DROP PARTITION p0;
+FLUSH TABLES dp FOR EXPORT;
+--copy_files_wildcard $D/test $T dp#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE dp;
+--copy_files_wildcard $T $D/test dp#p#*.ibd
+IMPORT TABLE FROM 'test/dp#p#*.ibd';
+SELECT * FROM dp ORDER BY id;
+DROP TABLE IF EXISTS dp;
+--remove_files_wildcard $D/test dp#p#*
+
+--echo ##### P11: EXCHANGE PARTITION before the export
+CREATE TABLE xp (id INT PRIMARY KEY) PARTITION BY RANGE (id)
+ (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+CREATE TABLE xn (id INT PRIMARY KEY);
+INSERT INTO xp VALUES (1),(11);
+INSERT INTO xn VALUES (2),(3);
+ALTER TABLE xp EXCHANGE PARTITION p0 WITH TABLE xn;
+SELECT * FROM xp ORDER BY id;
+SELECT * FROM xn ORDER BY id;
+FLUSH TABLES xp, xn FOR EXPORT;
+--copy_files_wildcard $D/test $T xp#p#*.ibd
+--copy_file $D/test/xn.ibd $T/xn.ibd
+UNLOCK TABLES;
+DROP TABLE xp, xn;
+--copy_files_wildcard $T $D/test xp#p#*.ibd
+--copy_file $T/xn.ibd $D/test/xn.ibd
+IMPORT TABLE FROM 'test/xp#p#*.ibd';
+IMPORT TABLE FROM 'test/xn.ibd';
+SHOW TABLES;
+SELECT * FROM xp ORDER BY id;
+SELECT * FROM xn ORDER BY id;
+DROP TABLE IF EXISTS xp, xn;
+--remove_files_wildcard $D/test xp#p#*
+--remove_files_wildcard $D/test xn.ibd
+
+DROP DATABASE db2;
+--force-rmdir $T

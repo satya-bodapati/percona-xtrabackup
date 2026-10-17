@@ -1,0 +1,16 @@
+let $zz_ddl = ALTER TABLE it ADD INDEX ka (a);
+let $zz_dml = INSERT INTO it VALUES (4,4,4),(14,14,14);
+--source suite/innodb/t/zz_probe_instant.inc
+--echo ##### ADD INDEX: p0 (SDI) before, p1 after
+--copy_file $A/it#p#p0.ibd $D/test/it#p#p0.ibd
+--copy_file $B/it#p#p1.ibd $D/test/it#p#p1.ibd
+IMPORT TABLE FROM 'test/it#p#*.ibd';
+SELECT * FROM it ORDER BY id;
+SELECT * FROM it WHERE id = 12 OR id = 11 OR id = 13 OR id = 14;
+CHECK TABLE it;
+UPDATE it SET a = a + 100;
+SELECT * FROM it ORDER BY id;
+DROP TABLE IF EXISTS it;
+--remove_files_wildcard $D/test it#p#*
+--force-rmdir $A
+--force-rmdir $B

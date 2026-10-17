@@ -1,0 +1,107 @@
+# IMPORT TABLE FROM '.ibd': corner cases probed (2026-10-17)
+
+Probed on `ps-8.4-import-refactor` (3debe50b2f9), debug build, with MTR tests kept in `probe2/` of the PS build dir
+(`zz_probe_part`, `zz_probe_instant1-4`, `zz_probe_files`, `zz_probe_files2`, `zz_probe_dd`).
+
+## How partitions are imported today
+
+- **Which file has the definition.** Only the first partition's file holds the table's SDI. The other partition
+  files hold none, so they are tied to the table by name only: same directory, `<table>#p#` prefix, and the
+  count of named files must equal the number of leaf partitions.
+- **What InnoDB does per partition.** It opens the file at the partition's standard path. It builds that
+  partition's metadata from the one SDI, with the file's own space id, then converts the pages.
+- **What catches a wrong file.** Two checks:
+  - the page converter refuses pages whose index id isn't in the partition's definition (each partition has its
+    own index ids);
+  - after conversion, `btr_validate_index` checks every index.
+
+## Problems found
+
+1. **Crash: partitions from both sides of an INSTANT ADD/DROP COLUMN.**
+   - Case: p0, which holds the SDI, was copied before the ALTER, and p1 after rows were written with the new
+     column.
+   - The debug server asserts during IMPORT (`rec.h:1042 !rec_new_is_versioned(rec)`, in
+     `PageConverter::update_records`). INSTANT DROP gives the same assertion.
+   - Cause: every partition's metadata comes from p0's SDI, and the converter doesn't check a record's row version
+     against the table's. ALTER TABLE ... IMPORT TABLESPACE is safe here only because each partition has its own
+     `.cfg`.
+   - Release build (verified): the assertion is `ut_ad`, so the converter parses the rows with the wrong layout
+     and writes the system fields at the wrong offsets. Here the index validation after conversion caught it
+     ("Summed data size 58, returned by func 59", then "Clustered index validation failed, due to data file
+     corruption"), and the import was refused. Nothing guarantees that for other row layouts: parsing a row with
+     the wrong lengths can also read past it.
+   - The same exposure exists for one file whose SDI page is older than its data pages, such as a file copied
+     while the server runs. Not reproduced: I couldn't force that flush order.
+   - Fix: the converter refuses a versioned record when the table has no row versions, or when the record's
+     version is newer than the table's current one. The converter already visits every record.
+2. **A failed import deletes the files it had already converted.**
+   - Cases:
+     - two partition files swapped: p0's file was deleted;
+     - a partition renamed to a name that is no partition: p0 and p1 were deleted;
+     - two tables, the second refused for a missing FK parent: the first table's file was deleted.
+   - Files refused before conversion are kept.
+   - With `--restore` the files are copies, so nothing is lost. Someone importing by hand loses their copy.
+   - Fix:
+     - run every check for every table (names, partition names, FK parents) before converting any file;
+     - document that IMPORT consumes the files it imports.
+3. **A file that wasn't named gets imported.**
+   - Case: named `p0`, `p1` and `zz`, while the real `p2` file was in the directory. IMPORT succeeded using the
+     unnamed `p2` file and ignored `zz`. A stale file at an unnamed path would be imported silently.
+   - Fix: each named file must be exactly a leaf partition's file, and every leaf partition's file must be named.
+4. **Partitions from different points in time are accepted silently.**
+   - Case: the same table, with no DDL between the copies, or with p0 the newer copy.
+   - The result mixes rows from both copies: one row from the later copy is there, one is missing.
+   - The files can't show this.
+   - Fix: document that every file of a table must come from one copy (one backup, or one FLUSH TABLES ... FOR
+     EXPORT).
+5. **The table is created with an SRID that doesn't exist.**
+   - CREATE TABLE refuses this with ER_SRS_NOT_FOUND. IMPORT bypasses CREATE TABLE's checks.
+   - Reads warn. Spatial index lookups and INSERT fail until the SRS is created again. No crash.
+   - Fix: run the SRID check, and review the other CREATE TABLE checks IMPORT skips: system schemas,
+     `table_encryption_privilege_check`, `disabled_storage_engines`.
+
+## Refused correctly, but the messages could be better
+
+- These give "Internal error: Cannot reset LSNs ... Data structure corruption":
+  - swapped partition files;
+  - a partition file from after an ADD INDEX;
+  - a corrupt clustered or secondary index root page.
+
+  The message should say which file doesn't belong to the table.
+- A partitioned table split across two schema directories gives "needs all 3 partition files, 2 were named",
+  although 3 were named.
+- mysql.ibd and ibdata1 give "general tablespace".
+- A hard link or symlink to a live table's file gives "the tablespace has no SDI; it was not created by MySQL 8.0".
+  The real cause: the SDI page wasn't flushed yet.
+- Errors print absolute datadir paths.
+
+## Refused correctly, with clear messages
+
+- **Placement:**
+  - a whole table in another schema's directory, or renamed to another table name;
+  - a partition file named as a whole table;
+  - only the first partition, or no first partition;
+  - a file defining a table that another named file defines too;
+  - the live table's own file ("already exists").
+- **Damaged or foreign files:** zero-length, truncated, random bytes, a corrupt SDI page, an undo tablespace,
+  FULLTEXT aux files.
+- **Dictionary conflicts:**
+  - an FK parent with another column type, or without an index ("Cannot add foreign key constraint");
+  - an FK name or CHECK constraint name already used in the schema.
+
+## Worked
+
+- The correct partition files.
+- Empty partitioned and empty plain tables: AUTO_INCREMENT starts at 1.
+- The first partition dropped before the export: the SDI is in the new first partition.
+- A table that went through EXCHANGE PARTITION, on both sides.
+- Names that need encoding (`t-1 ñ`).
+- A table with a generated invisible primary key.
+
+## Not covered yet
+
+- `lower_case_table_names` 1 and 2, which need their own server, and name case collisions.
+- A partition file from another server whose index ids match, such as a replica with the same DDL history. The
+  index id check passes, so only fix 1 and the index validation would protect it.
+- Two sessions importing the same file at once.
+- Crafted SDI content.

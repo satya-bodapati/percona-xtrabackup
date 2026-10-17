@@ -1,0 +1,184 @@
+CREATE DATABASE db2;
+CREATE TABLE pt (id INT PRIMARY KEY, v VARCHAR(20)) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO pt VALUES (1,'a'),(2,'b'),(11,'k'),(12,'l'),(21,'u');
+FLUSH TABLES pt FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE pt;
+##### P1: files of p0 and p1 swapped
+IMPORT TABLE FROM 'test/pt#p#*.ibd';
+ERROR HY000: Internal error: Cannot reset LSNs in table `test`.`pt` /* Partition `p0` */ : Data structure corruption
+SELECT * FROM pt ORDER BY id;
+ERROR 42S02: Table 'test.pt' doesn't exist
+SELECT * FROM pt WHERE id = 11;
+ERROR 42S02: Table 'test.pt' doesn't exist
+pt#p#p1.ibd
+pt#p#p2.ibd
+DROP TABLE IF EXISTS pt;
+Warnings:
+Note	1051	Unknown table 'test.pt'
+##### P4: p2 renamed to a name that is no partition (pt#p#zz)
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'test/pt#p#p1.ibd', 'test/pt#p#zz.ibd';
+ERROR HY000: Can't find file: './test/pt#p#p2.ibd' (errno: 2 - the tablespace file to import is not in place)
+SELECT * FROM pt ORDER BY id;
+ERROR 42S02: Table 'test.pt' doesn't exist
+pt#p#zz.ibd
+DROP TABLE IF EXISTS pt;
+Warnings:
+Note	1051	Unknown table 'test.pt'
+##### P4b: names p0, p1, zz; the real p2 file is present but not named
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'test/pt#p#p1.ibd', 'test/pt#p#zz.ibd';
+SELECT * FROM pt ORDER BY id;
+id	v
+1	a
+2	b
+11	k
+12	l
+21	u
+pt#p#p0.ibd
+pt#p#p1.ibd
+pt#p#p2.ibd
+pt#p#zz.ibd
+DROP TABLE IF EXISTS pt;
+##### P4c: p1 named twice through two patterns, p2 not named
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'test/pt#p#p1.ibd', 'test/pt#p#p?.ibd';
+SELECT * FROM pt ORDER BY id;
+id	v
+1	a
+2	b
+11	k
+12	l
+21	u
+DROP TABLE IF EXISTS pt;
+##### P8: partition files split across two schema directories
+IMPORT TABLE FROM 'test/pt#p#p0.ibd', 'db2/pt#p#p1.ibd', 'test/pt#p#p2.ibd';
+ERROR HY000: Schema mismatch (IMPORT TABLE of `test`.`pt` needs all 3 partition files, 2 were named)
+SHOW TABLES;
+Tables_in_test
+pt#p#p0.ibd
+pt#p#p2.ibd
+pt#p#p1.ibd
+DROP TABLE IF EXISTS pt;
+Warnings:
+Note	1051	Unknown table 'test.pt'
+##### P7a: whole table placed in another schema directory
+IMPORT TABLE FROM 'db2/pt#p#*.ibd';
+ERROR HY000: Schema mismatch ('/home/satya/WORK/ps/ps-8.4-import-refactor/bld/probe2/var/1/mysqld.1/data/db2/pt#p#p0.ibd' is not in the directory of the table's schema)
+USE db2;
+SHOW TABLES;
+Tables_in_db2
+USE test;
+##### P7b: whole table renamed to another table name
+IMPORT TABLE FROM 'test/qt#p#*.ibd';
+ERROR HY000: Schema mismatch ('/home/satya/WORK/ps/ps-8.4-import-refactor/bld/probe2/var/1/mysqld.1/data/test/qt#p#p0.ibd' is not named after a partition of its table)
+SHOW TABLES;
+Tables_in_test
+##### P7c: a partition file named as a whole table
+IMPORT TABLE FROM 'test/pt.ibd';
+ERROR HY000: Schema mismatch ('/home/satya/WORK/ps/ps-8.4-import-refactor/bld/probe2/var/1/mysqld.1/data/test/pt.ibd' holds a partitioned table but is not a partition file)
+SHOW TABLES;
+Tables_in_test
+##### P7d: only the first partition
+IMPORT TABLE FROM 'test/pt#p#p0.ibd';
+ERROR HY000: Schema mismatch (IMPORT TABLE of `test`.`pt` needs all 3 partition files, 1 were named)
+SHOW TABLES;
+Tables_in_test
+##### P7e: no first partition (no SDI anywhere)
+IMPORT TABLE FROM 'test/pt#p#*.ibd';
+ERROR HY000: Schema mismatch ('/home/satya/WORK/ps/ps-8.4-import-refactor/bld/probe2/var/1/mysqld.1/data/test/pt#p#p1.ibd' holds no table definition and is not a partition of a table being imported)
+SHOW TABLES;
+Tables_in_test
+##### P0: sanity, the correct files
+IMPORT TABLE FROM 'test/pt#p#*.ibd';
+SELECT * FROM pt ORDER BY id;
+id	v
+1	a
+2	b
+11	k
+12	l
+21	u
+SELECT * FROM pt PARTITION (p1) ORDER BY id;
+id	v
+11	k
+12	l
+CHECK TABLE pt;
+Table	Op	Msg_type	Msg_text
+test.pt	check	status	OK
+DROP TABLE pt;
+##### P6: empty partitioned table and an empty plain table
+CREATE TABLE ept (id INT AUTO_INCREMENT PRIMARY KEY) PARTITION BY HASH (id) PARTITIONS 3;
+CREATE TABLE et (id INT AUTO_INCREMENT PRIMARY KEY, v TEXT);
+FLUSH TABLES ept, et FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE ept, et;
+IMPORT TABLE FROM 'test/ept#p#*.ibd', 'test/et.ibd';
+SELECT COUNT(*) FROM ept;
+COUNT(*)
+0
+SELECT COUNT(*) FROM et;
+COUNT(*)
+0
+INSERT INTO ept VALUES (NULL),(NULL);
+INSERT INTO et (v) VALUES ('x');
+SELECT * FROM ept ORDER BY id;
+id
+1
+2
+SELECT id FROM et;
+id
+1
+CHECK TABLE ept, et;
+Table	Op	Msg_type	Msg_text
+test.ept	check	status	OK
+test.et	check	status	OK
+DROP TABLE ept, et;
+##### P12: the first partition was dropped before the export
+CREATE TABLE dp (id INT PRIMARY KEY) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO dp VALUES (1),(11),(21);
+ALTER TABLE dp DROP PARTITION p0;
+FLUSH TABLES dp FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE dp;
+IMPORT TABLE FROM 'test/dp#p#*.ibd';
+SELECT * FROM dp ORDER BY id;
+id
+11
+21
+DROP TABLE IF EXISTS dp;
+##### P11: EXCHANGE PARTITION before the export
+CREATE TABLE xp (id INT PRIMARY KEY) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+CREATE TABLE xn (id INT PRIMARY KEY);
+INSERT INTO xp VALUES (1),(11);
+INSERT INTO xn VALUES (2),(3);
+ALTER TABLE xp EXCHANGE PARTITION p0 WITH TABLE xn;
+SELECT * FROM xp ORDER BY id;
+id
+2
+3
+11
+SELECT * FROM xn ORDER BY id;
+id
+1
+FLUSH TABLES xp, xn FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE xp, xn;
+IMPORT TABLE FROM 'test/xp#p#*.ibd';
+IMPORT TABLE FROM 'test/xn.ibd';
+SHOW TABLES;
+Tables_in_test
+xn
+xp
+SELECT * FROM xp ORDER BY id;
+id
+2
+3
+11
+SELECT * FROM xn ORDER BY id;
+id
+1
+DROP TABLE IF EXISTS xp, xn;
+DROP DATABASE db2;

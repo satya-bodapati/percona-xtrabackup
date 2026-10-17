@@ -1,0 +1,31 @@
+CREATE TABLE it (id INT PRIMARY KEY, a INT, x INT) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO it VALUES (1,1,1),(11,11,11);
+FLUSH TABLES it FOR EXPORT;
+UNLOCK TABLES;
+ALTER TABLE it ADD COLUMN c VARCHAR(30) DEFAULT 'dflt', ALGORITHM=INSTANT;
+INSERT INTO it VALUES (2,2,2,'new2'),(12,12,12,'new12');
+SELECT * FROM it ORDER BY id;
+id	a	x	c
+1	1	1	dflt
+2	2	2	new2
+11	11	11	dflt
+12	12	12	new12
+FLUSH TABLES it FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE it;
+##### INSTANT ADD: p0 (SDI) before, p1 after
+IMPORT TABLE FROM 'test/it#p#*.ibd';
+ERROR HY000: Lost connection to MySQL server during query
+SELECT * FROM it ORDER BY id;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT * FROM it WHERE id = 12 OR id = 11 OR id = 13 OR id = 14;
+ERROR HY000: Lost connection to MySQL server during query
+CHECK TABLE it;
+ERROR HY000: Lost connection to MySQL server during query
+UPDATE it SET a = a + 100;
+ERROR HY000: Lost connection to MySQL server during query
+SELECT * FROM it ORDER BY id;
+ERROR HY000: Lost connection to MySQL server during query
+DROP TABLE IF EXISTS it;
+ERROR HY000: Lost connection to MySQL server during query

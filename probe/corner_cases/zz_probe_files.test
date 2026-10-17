@@ -1,0 +1,134 @@
+--source include/have_innodb_16k.inc
+--source include/have_debug.inc
+--disable_abort_on_error
+let $D = `SELECT @@datadir`;
+let $T = $MYSQL_TMP_DIR/zzf;
+--mkdir $T
+CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(100), KEY kv (v));
+INSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c');
+FLUSH TABLES t FOR EXPORT;
+--copy_file $D/test/t.ibd $T/t.ibd
+UNLOCK TABLES;
+DROP TABLE t;
+
+--echo ##### F1: zero-length file
+--exec touch $D/test/t.ibd
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+--remove_file $D/test/t.ibd
+
+--echo ##### F2: only the first page
+--exec head -c 16384 $T/t.ibd > $D/test/t.ibd
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+--remove_file $D/test/t.ibd
+
+--echo ##### F3: the first 4 pages (SDI root included, index pages missing)
+--exec head -c 65536 $T/t.ibd > $D/test/t.ibd
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test t.ibd
+
+--echo ##### F4: random bytes
+--exec head -c 114688 /dev/urandom > $D/test/t.ibd
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test t.ibd
+
+--echo ##### F5: SDI root page (3) overwritten with random bytes
+--copy_file $T/t.ibd $D/test/t.ibd
+--exec dd if=/dev/urandom of=$D/test/t.ibd bs=16384 seek=3 count=1 conv=notrunc 2>/dev/null
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test t.ibd
+
+--echo ##### F6: clustered index root page (4) overwritten with random bytes
+--copy_file $T/t.ibd $D/test/t.ibd
+--exec dd if=/dev/urandom of=$D/test/t.ibd bs=16384 seek=4 count=1 conv=notrunc 2>/dev/null
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+--list_files $D/test t*
+--remove_files_wildcard $D/test t.ibd
+
+--echo ##### F7: secondary index root page (5) overwritten with random bytes
+--copy_file $T/t.ibd $D/test/t.ibd
+--exec dd if=/dev/urandom of=$D/test/t.ibd bs=16384 seek=5 count=1 conv=notrunc 2>/dev/null
+IMPORT TABLE FROM 'test/t.ibd';
+SHOW TABLES;
+SELECT * FROM t;
+SELECT * FROM t FORCE INDEX (kv) WHERE v = 'b';
+DROP TABLE IF EXISTS t;
+--remove_files_wildcard $D/test t.ibd
+
+--echo ##### F8: undo tablespace copied as a table file
+--copy_file $D/undo_001 $D/test/u.ibd
+IMPORT TABLE FROM 'test/u.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test u.ibd
+
+--echo ##### F9: mysql.ibd copied as a table file
+FLUSH TABLES;
+SET GLOBAL innodb_buf_flush_list_now = 1;
+--copy_file $D/mysql.ibd $D/test/m.ibd
+IMPORT TABLE FROM 'test/m.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test m.ibd
+
+--echo ##### F10: ibdata1 copied as a table file
+--copy_file $D/ibdata1 $D/test/i.ibd
+IMPORT TABLE FROM 'test/i.ibd';
+SHOW TABLES;
+--remove_files_wildcard $D/test i.ibd
+
+--echo ##### F11: a FULLTEXT auxiliary table file, imported on its own
+CREATE TABLE f (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY fb (b));
+INSERT INTO f VALUES (1,'hello world'),(2,'quick brown fox');
+SET GLOBAL innodb_buf_flush_list_now = 1;
+--exec ls $D/test | grep '^fts_' | grep -v '_fb\|_[0-9a-f]*_index_' | head -1 > $T/auxname
+--exec cp $D/test/\$(cat $T/auxname) $T/aux.ibd
+DROP TABLE f;
+--exec cp $T/aux.ibd $D/test/\$(cat $T/auxname)
+--exec ls $D/test | grep '^fts_'
+--exec bash -c "echo IMPORT TABLE FROM \'test/\$(cat $T/auxname | tr -d '\n')\'\;" > $T/aux.sql
+--exec $MYSQL test < $T/aux.sql 2>&1 || true
+SHOW TABLES;
+SELECT name FROM information_schema.innodb_tables WHERE name LIKE 'test/%';
+--exec rm -f $D/test/fts_*
+
+--echo ##### F12: hard link and symlink to the file of a live table
+CREATE TABLE live (id INT PRIMARY KEY);
+INSERT INTO live VALUES (1);
+--exec ln $D/test/live.ibd $D/test/live9.ibd
+--exec ln -s $D/test/live.ibd $D/test/live8.ibd
+IMPORT TABLE FROM 'test/live9.ibd';
+IMPORT TABLE FROM 'test/live8.ibd';
+IMPORT TABLE FROM 'test/live.ibd';
+SHOW TABLES;
+SELECT * FROM live;
+--remove_file $D/test/live9.ibd
+--remove_file $D/test/live8.ibd
+DROP TABLE live;
+
+--echo ##### F13: names that need encoding
+CREATE TABLE `t-1 ñ` (id INT PRIMARY KEY);
+INSERT INTO `t-1 ñ` VALUES (7);
+FLUSH TABLES `t-1 ñ` FOR EXPORT;
+--exec ls $D/test | grep '^t@' > $T/encname
+--exec cp $D/test/\$(cat $T/encname) $T/enc.ibd
+UNLOCK TABLES;
+DROP TABLE `t-1 ñ`;
+--exec cp $T/enc.ibd $D/test/\$(cat $T/encname)
+--exec bash -c "echo IMPORT TABLE FROM \'test/\$(cat $T/encname | tr -d '\n')\'\;" > $T/enc.sql
+--exec $MYSQL test < $T/enc.sql 2>&1 || true
+SELECT * FROM `t-1 ñ`;
+DROP TABLE IF EXISTS `t-1 ñ`;
+
+--echo ##### F14: a file defining a table that another named file defines too
+--copy_file $T/t.ibd $D/test/t.ibd
+--copy_file $T/t.ibd $D/test/t2.ibd
+IMPORT TABLE FROM 'test/t.ibd', 'test/t2.ibd';
+--list_files $D/test t*
+SHOW TABLES;
+DROP TABLE IF EXISTS t;
+--remove_files_wildcard $D/test t*.ibd
+--force-rmdir $T
