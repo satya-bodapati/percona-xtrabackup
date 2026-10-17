@@ -1,0 +1,69 @@
+--source include/have_innodb_16k.inc
+--source include/rpl/init_source_replica.inc
+
+--connection master
+let $SRC = `SELECT @@datadir`;
+--connection slave
+let $REP = `SELECT @@datadir`;
+--connection master
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1,1),(2,2);
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT) ENGINE=InnoDB;
+INSERT INTO t2 VALUES (1,1),(2,2);
+FLUSH TABLES t1, t2 FOR EXPORT;
+--copy_file $SRC/test/t1.ibd $MYSQL_TMP_DIR/t1.ibd
+--copy_file $SRC/test/t2.ibd $MYSQL_TMP_DIR/t2.ibd
+--copy_file $SRC/test/t2.cfg $MYSQL_TMP_DIR/t2.cfg
+UNLOCK TABLES;
+DROP TABLE t1;
+ALTER TABLE t2 DISCARD TABLESPACE;
+--source include/rpl/sync_to_replica.inc
+
+--echo #### A. IMPORT TABLE FROM .ibd, file placed on the source only
+--connection master
+let $pos = query_get_value(SHOW BINARY LOG STATUS, Position, 1);
+--copy_file $MYSQL_TMP_DIR/t1.ibd $SRC/test/t1.ibd
+IMPORT TABLE FROM 'test/t1.ibd';
+--replace_column 1 # 2 # 5 #
+eval SHOW BINLOG EVENTS FROM $pos;
+SELECT * FROM t1;
+--source include/rpl/sync_to_replica.inc
+--echo # replica after sync:
+SHOW TABLES;
+
+--echo #### B. ALTER TABLE IMPORT TABLESPACE, file placed on the source only
+--connection master
+let $pos = query_get_value(SHOW BINARY LOG STATUS, Position, 1);
+--copy_file $MYSQL_TMP_DIR/t2.ibd $SRC/test/t2.ibd
+--copy_file $MYSQL_TMP_DIR/t2.cfg $SRC/test/t2.cfg
+ALTER TABLE t2 IMPORT TABLESPACE;
+--replace_column 1 # 2 # 5 #
+eval SHOW BINLOG EVENTS FROM $pos;
+--connection slave
+let $wait_condition = SELECT COUNT(*) FROM performance_schema.replication_applier_status_by_worker WHERE LAST_ERROR_NUMBER <> 0;
+--source include/wait_condition.inc
+SELECT LAST_ERROR_NUMBER, LAST_ERROR_MESSAGE FROM performance_schema.replication_applier_status_by_worker WHERE LAST_ERROR_NUMBER <> 0;
+--echo # put the file on the replica too and resume
+--copy_file $MYSQL_TMP_DIR/t2.ibd $REP/test/t2.ibd
+--copy_file $MYSQL_TMP_DIR/t2.cfg $REP/test/t2.cfg
+START REPLICA SQL_THREAD;
+--connection master
+--source include/rpl/sync_to_replica.inc
+SELECT * FROM t2;
+
+--echo #### C. Same file placed on both, IMPORT TABLE on the source
+--connection master
+DROP TABLE t2;
+--source include/rpl/sync_to_replica.inc
+--connection master
+--copy_file $MYSQL_TMP_DIR/t2.ibd $SRC/test/t2.ibd
+--copy_file $MYSQL_TMP_DIR/t2.ibd $REP/test/t2.ibd
+IMPORT TABLE FROM 'test/t2.ibd';
+INSERT INTO t2 VALUES (3,3);
+--connection slave
+let $wait_condition = SELECT COUNT(*) FROM performance_schema.replication_applier_status_by_worker WHERE LAST_ERROR_NUMBER <> 0;
+--source include/wait_condition.inc
+SELECT LAST_ERROR_NUMBER, LAST_ERROR_MESSAGE FROM performance_schema.replication_applier_status_by_worker WHERE LAST_ERROR_NUMBER <> 0;
+SHOW TABLES;
+--list_files $REP/test
