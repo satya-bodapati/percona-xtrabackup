@@ -1,0 +1,36 @@
+CREATE TABLE it (id INT PRIMARY KEY, a INT, x INT) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO it VALUES (1,1,1),(11,11,11);
+FLUSH TABLES it FOR EXPORT;
+UNLOCK TABLES;
+ALTER TABLE it ADD COLUMN c VARCHAR(30) DEFAULT 'dflt', ALGORITHM=INSTANT;
+INSERT INTO it VALUES (2,2,2,'new2'),(12,12,12,'new12');
+SELECT * FROM it ORDER BY id;
+id	a	x	c
+1	1	1	dflt
+2	2	2	new2
+11	11	11	dflt
+12	12	12	new12
+FLUSH TABLES it FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE it;
+##### INSTANT ADD: p0 (SDI) after, p1 before
+IMPORT TABLE FROM 'test/it#p#*.ibd';
+SELECT * FROM it ORDER BY id;
+id	a	x	c
+1	1	1	dflt
+2	2	2	new2
+11	11	11	dflt
+SELECT * FROM it WHERE id = 12 OR id = 11 OR id = 13 OR id = 14;
+id	a	x	c
+11	11	11	dflt
+CHECK TABLE it;
+Table	Op	Msg_type	Msg_text
+test.it	check	status	OK
+UPDATE it SET a = a + 100;
+SELECT * FROM it ORDER BY id;
+id	a	x	c
+1	101	1	dflt
+2	102	2	new2
+11	111	11	dflt
+DROP TABLE IF EXISTS it;

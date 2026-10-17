@@ -3,7 +3,46 @@
 Probed on `ps-8.4-import-refactor` (3debe50b2f9), debug build, with MTR tests kept in `probe2/` of the PS build dir
 (`zz_probe_part`, `zz_probe_instant1-4`, `zz_probe_files`, `zz_probe_files2`, `zz_probe_dd`).
 
-## How partitions are imported today
+## Fixed (2026-10-17, PS branch `ps-8.4-import-refactor`)
+
+Every fix comes with cases in the new test `innodb.import_table_ibd_mismatch`, which fails without it.
+
+- `782d48b3429` **The crash (problem 1).** The page converter checks the row version, and the old INSTANT flag, of
+  each row before it parses the row. A partition file newer than the definition gives "page N of the tablespace
+  file has rows written by a later definition of the table". This also covers ALTER TABLE ... IMPORT TABLESPACE
+  with a `.cfg` that doesn't match the file.
+- `8fe865aadae` **Exact partition files (problems 2 and 3).**
+  - A new handlerton call, `sdi_check_import_files`, runs for every table before any file is locked or changed.
+    InnoDB requires one named file per partition, named after it, and holding the tablespace whose space id the
+    definition records for that partition.
+  - Swapped partitions give "holds partition `p1`, not partition `p0`". A partition of another table is named as
+    "a file of another table". A named file that is no partition is refused, and an unnamed file is never imported.
+  - All named files are kept.
+  - A partition file in another directory is reported as such.
+- `913cccd2b4e` **Checks before creating (problem 2).** The schema, the table name and the FK parents outside the
+  statement are checked for every table before the first is created, so a later table's failure no longer
+  deletes the earlier tables' files.
+- `cf80e2d0608` **SRID (problem 5).** A column whose spatial reference system is missing is refused
+  (ER_SRS_NOT_FOUND), as CREATE TABLE does.
+- `b2edad29d1b` **Message.** A page of an index the definition doesn't have, such as a partition copied after an
+  ADD INDEX, gives a schema mismatch naming the table, partition and page, instead of "Cannot reset LSNs ... Data
+  structure corruption".
+
+**Regression.** All `import_table_ibd*` tests and the 68 existing IMPORT TABLESPACE, IMPORT PARTITION and IMPORT
+TABLE tests pass, except three that also fail on the upstream base `5db7de6b67b` today: `innodb.sdi_compressed`
+(stale-page assertion), `clone.error_ddl` and `innodb.partition_upgrade_create` (no `zip` binary). The first two
+passed in the baseline of 2026-10-16. The original probes, rerun on the fixed build, are in `probe/corner_cases/after/`.
+
+**Still open:**
+- Partitions from different copies with no DDL between them can't be detected (problem 4). Document it.
+- A failure found while converting (corrupt pages, a newer row, an incompatible FK) still deletes the files that
+  the statement already converted. Those files are half converted and can't be imported again. Document that
+  IMPORT consumes its files.
+- Messages: "general tablespace" for mysql.ibd and ibdata1; "no SDI" for a live table's file; absolute paths.
+- The other CREATE TABLE checks that IMPORT skips (system schemas, `table_encryption_privilege_check`,
+  `disabled_storage_engines`) are not probed.
+
+## How partitions were imported before the fixes
 
 - **Which file has the definition.** Only the first partition's file holds the table's SDI. The other partition
   files hold none, so they are tied to the table by name only: same directory, `<table>#p#` prefix, and the

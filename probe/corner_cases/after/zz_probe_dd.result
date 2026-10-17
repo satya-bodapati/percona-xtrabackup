@@ -1,0 +1,136 @@
+##### D1: the FK parent was recreated with another column type
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT, CONSTRAINT fkc FOREIGN KEY (pid) REFERENCES p (id) ON DELETE CASCADE);
+INSERT INTO p VALUES (1),(2);
+INSERT INTO c VALUES (10,1),(20,2);
+FLUSH TABLES c FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE c, p;
+CREATE TABLE p (id VARCHAR(10) PRIMARY KEY);
+INSERT INTO p VALUES ('1'),('2');
+IMPORT TABLE FROM 'test/c.ibd';
+ERROR HY000: Cannot add foreign key constraint
+SHOW CREATE TABLE c;
+ERROR 42S02: Table 'test.c' doesn't exist
+INSERT INTO c VALUES (30, 3);
+ERROR 42S02: Table 'test.c' doesn't exist
+INSERT INTO c VALUES (40, 1);
+ERROR 42S02: Table 'test.c' doesn't exist
+DELETE FROM p WHERE id = '1';
+SELECT * FROM c ORDER BY id;
+ERROR 42S02: Table 'test.c' doesn't exist
+DROP TABLE IF EXISTS c;
+Warnings:
+Note	1051	Unknown table 'test.c'
+DROP TABLE p;
+##### D2: the FK parent was recreated without an index on the column
+CREATE TABLE p (id INT, v INT, KEY kv (v));
+INSERT INTO p VALUES (1,1),(2,2);
+IMPORT TABLE FROM 'test/c.ibd';
+ERROR HY000: Cannot add foreign key constraint
+SHOW CREATE TABLE c;
+ERROR 42S02: Table 'test.c' doesn't exist
+INSERT INTO c VALUES (30, 3);
+ERROR 42S02: Table 'test.c' doesn't exist
+DELETE FROM p WHERE id = 1;
+SELECT * FROM c ORDER BY id;
+ERROR 42S02: Table 'test.c' doesn't exist
+DROP TABLE IF EXISTS c;
+Warnings:
+Note	1051	Unknown table 'test.c'
+DROP TABLE p;
+##### D3: the FK name is taken by another table of the schema
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE other (id INT PRIMARY KEY, pid INT, CONSTRAINT fkc FOREIGN KEY (pid) REFERENCES p (id));
+IMPORT TABLE FROM 'test/c.ibd';
+ERROR HY000: Duplicate foreign key constraint name 'fkc'
+SHOW TABLES;
+Tables_in_test
+other
+p
+DROP TABLE IF EXISTS c;
+Warnings:
+Note	1051	Unknown table 'test.c'
+DROP TABLE other, p;
+##### D4: the CHECK constraint name is taken by another table
+CREATE TABLE ck (a INT, CONSTRAINT chk1 CHECK (a > 0));
+INSERT INTO ck VALUES (5);
+FLUSH TABLES ck FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE ck;
+CREATE TABLE other (b INT, CONSTRAINT chk1 CHECK (b > 0));
+IMPORT TABLE FROM 'test/ck.ibd';
+ERROR HY000: Duplicate check constraint name 'chk1'.
+SHOW TABLES;
+Tables_in_test
+other
+DROP TABLE IF EXISTS ck;
+Warnings:
+Note	1051	Unknown table 'test.ck'
+DROP TABLE other;
+##### D5: the spatial reference system no longer exists
+CREATE SPATIAL REFERENCE SYSTEM 4000001 NAME 'TEST4000001 Long-Lat WGS 84' DEFINITION 'GEOGCS["Long-Lat WGS 84",DATUM["World Geodetic System 1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.017453292519943278,AUTHORITY["EPSG","9122"]],AXIS["Lon",EAST],AXIS["Lat",NORTH],AUTHORITY["EPSG","4326"]]';
+CREATE TABLE g (id INT PRIMARY KEY, pt POINT NOT NULL SRID 4000001, SPATIAL INDEX sp (pt));
+INSERT INTO g VALUES (1, ST_GeomFromText('POINT(1 1)', 4000001)), (2, ST_GeomFromText('POINT(5 5)', 4000001));
+FLUSH TABLES g FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE g;
+DROP SPATIAL REFERENCE SYSTEM 4000001;
+IMPORT TABLE FROM 'test/g.ibd';
+ERROR SR001: There's no spatial reference system with SRID 4000001.
+SHOW CREATE TABLE g;
+ERROR 42S02: Table 'test.g' doesn't exist
+SELECT id, ST_AsText(pt) FROM g ORDER BY id;
+ERROR 42S02: Table 'test.g' doesn't exist
+SELECT id FROM g FORCE INDEX (sp) WHERE MBRContains(ST_GeomFromText('POLYGON((0 0,0 3,3 3,3 0,0 0))', 4000001), pt);
+ERROR 42S02: Table 'test.g' doesn't exist
+INSERT INTO g VALUES (3, ST_GeomFromText('POINT(2 2)', 4000001));
+ERROR 42S02: Table 'test.g' doesn't exist
+DROP TABLE IF EXISTS g;
+Warnings:
+Note	1051	Unknown table 'test.g'
+##### D6: an INSTANT column default with a charset/collation, and a GIPK table
+SET sql_generate_invisible_primary_key = ON;
+CREATE TABLE gk (a INT, s VARCHAR(10) COLLATE utf8mb4_bin);
+INSERT INTO gk (a, s) VALUES (1,'x'),(2,'y');
+SET sql_generate_invisible_primary_key = OFF;
+FLUSH TABLES gk FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE gk;
+IMPORT TABLE FROM 'test/gk.ibd';
+SET show_gipk_in_create_table_and_information_schema = ON;
+SHOW CREATE TABLE gk;
+Table	Create Table
+gk	CREATE TABLE `gk` (
+  `my_row_id` bigint unsigned NOT NULL AUTO_INCREMENT /*!80023 INVISIBLE */,
+  `a` int DEFAULT NULL,
+  `s` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`my_row_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT my_row_id, a, s FROM gk ORDER BY my_row_id;
+my_row_id	a	s
+1	1	x
+2	2	y
+INSERT INTO gk (a, s) VALUES (3, 'z');
+SELECT my_row_id, a FROM gk ORDER BY my_row_id;
+my_row_id	a
+1	1
+2	2
+3	3
+DROP TABLE gk;
+##### D7: two tables; the second fails after the first was converted
+CREATE TABLE aaa (id INT PRIMARY KEY);
+INSERT INTO aaa VALUES (1);
+FLUSH TABLES aaa FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE aaa;
+IMPORT TABLE FROM 'test/aaa.ibd', 'test/c.ibd';
+ERROR HY000: Failed to open the referenced table 'p'
+aaa.ibd
+c.ibd
+SHOW TABLES;
+Tables_in_test
+DROP TABLE IF EXISTS aaa, c;
+Warnings:
+Note	1051	Unknown table 'test.aaa'
+Note	1051	Unknown table 'test.c'

@@ -1,0 +1,34 @@
+CREATE TABLE it (id INT PRIMARY KEY, a INT, x INT) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO it VALUES (1,1,1),(11,11,11);
+FLUSH TABLES it FOR EXPORT;
+UNLOCK TABLES;
+ALTER TABLE it DROP COLUMN x, ALGORITHM=INSTANT;
+INSERT INTO it VALUES (3,3),(13,13);
+SELECT * FROM it ORDER BY id;
+id	a
+1	1
+3	3
+11	11
+13	13
+FLUSH TABLES it FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE it;
+##### INSTANT DROP: p0 (SDI) before, p1 after
+IMPORT TABLE FROM 'test/it#p#*.ibd';
+ERROR HY000: Schema mismatch (Table `test`.`it` /* Partition `p1` */: page 4 of the tablespace file has rows written by a later definition of the table than the one it is imported with. The files of the table were copied at different times.)
+SELECT * FROM it ORDER BY id;
+ERROR 42S02: Table 'test.it' doesn't exist
+SELECT * FROM it WHERE id = 12 OR id = 11 OR id = 13 OR id = 14;
+ERROR 42S02: Table 'test.it' doesn't exist
+CHECK TABLE it;
+Table	Op	Msg_type	Msg_text
+test.it	check	Error	Table 'test.it' doesn't exist
+test.it	check	status	Operation failed
+UPDATE it SET a = a + 100;
+ERROR 42S02: Table 'test.it' doesn't exist
+SELECT * FROM it ORDER BY id;
+ERROR 42S02: Table 'test.it' doesn't exist
+DROP TABLE IF EXISTS it;
+Warnings:
+Note	1051	Unknown table 'test.it'
