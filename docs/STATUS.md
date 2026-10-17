@@ -57,6 +57,7 @@ encryption and DATA DIRECTORY tests.
   lines). Draft Jira comment for PXB-3754: `PXB-3754_comment.md`, not posted yet.
   Decided 2026-10-17: no interim gate for `--lock-ddl=ON` backups (no `lock_ddl_type` line in `xtrabackup_checkpoints`,
   no reading `xtrabackup_info` from xbcloud). Selective download waits for the unified `backup_metadata.json`.
+  Stages: `backup_metadata.json` unlocks `--lock-ddl=ON` backups; `backup_files.jsonl` with DDL lines unlocks REDUCED.
 
 - **Step 6** (9.7 `--download` filter) is deferred, as you said.
 - **PS-9459, PS-8687, the PXB `--export` exit code and the DISCARD ordering** are kept separate, as you said. The

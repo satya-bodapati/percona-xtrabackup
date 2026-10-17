@@ -53,7 +53,10 @@ unchanged. With `--lock-ddl=ON`, nothing is added.
 
 **xbcloud rules:**
 
-- Without `backup_metadata.json` and `backup_files.jsonl`, refuse selective download and say to download the whole
-  backup.
+- Without `backup_metadata.json`, refuse selective download and say to download the whole backup.
+- `lock_ddl_type` ON: `backup_metadata.json` is enough. Names are final, so xbcloud selects by name. File lines, when
+  present, only spare it the listing.
+- `lock_ddl_type` REDUCED: needs `backup_files.jsonl` with its DDL lines. Without it, refuse.
+- `lock_ddl_type` OFF: refuse.
 - Refuse incremental backups for now. A rename between the full and an incremental changes names across the chain,
   which needs a chain-level mapping.
