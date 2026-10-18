@@ -1,0 +1,74 @@
+# 1. The parent is named after the child.
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT,
+FOREIGN KEY (pid) REFERENCES p (id));
+CREATE TABLE a1 (id INT PRIMARY KEY);
+INSERT INTO p VALUES (1);
+INSERT INTO c VALUES (1, 1);
+INSERT INTO a1 VALUES (1);
+FLUSH TABLES p, c, a1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE c, p, a1;
+IMPORT TABLE FROM 'test/a1.ibd', 'test/c.ibd', 'test/p.ibd';
+c.ibd
+p.ibd
+SHOW TABLES;
+Tables_in_test
+# 1b. Two tables referencing each other.
+SET foreign_key_checks = 0;
+CREATE TABLE x1 (id INT PRIMARY KEY, y INT, FOREIGN KEY (y) REFERENCES x2 (id));
+CREATE TABLE x2 (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES x1 (id));
+SET foreign_key_checks = 1;
+FLUSH TABLES x1, x2 FOR EXPORT;
+UNLOCK TABLES;
+SET foreign_key_checks = 0;
+DROP TABLE x1, x2;
+SET foreign_key_checks = 1;
+IMPORT TABLE FROM 'test/x1.ibd', 'test/x2.ibd';
+x1.ibd
+x2.ibd
+SHOW TABLES LIKE 'x%';
+Tables_in_test (x%)
+# 2. REFERENCES on the parent.
+CREATE TABLE p2 (id INT PRIMARY KEY);
+CREATE TABLE c2 (id INT PRIMARY KEY, pid INT,
+FOREIGN KEY (pid) REFERENCES p2 (id));
+FLUSH TABLES c2 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE c2;
+CREATE USER importer@localhost;
+GRANT CREATE, ALTER ON test.* TO importer@localhost;
+IMPORT TABLE FROM 'test/c2.ibd';
+SHOW TABLES LIKE 'c2';
+Tables_in_test (c2)
+c2
+# 3. table_encryption_privilege_check.
+CREATE DATABASE edb DEFAULT ENCRYPTION = 'Y';
+CREATE TABLE edb.e1 (id INT PRIMARY KEY) ENCRYPTION = 'N';
+Warnings:
+Warning	3824	Creating an unencrypted table in a database with default encryption enabled.
+FLUSH TABLES edb.e1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE edb.e1;
+GRANT CREATE, ALTER ON edb.* TO importer@localhost;
+SET GLOBAL table_encryption_privilege_check = ON;
+IMPORT TABLE FROM 'edb/e1.ibd';
+SHOW WARNINGS;
+Level	Code	Message
+SHOW TABLES IN edb;
+Tables_in_edb
+e1
+SET GLOBAL table_encryption_privilege_check = OFF;
+# 4. disabled_storage_engines.
+CREATE TABLE d1 (id INT PRIMARY KEY);
+FLUSH TABLES d1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE d1;
+# restart: --disabled-storage-engines=InnoDB
+CREATE TABLE d2 (id INT PRIMARY KEY) ENGINE = InnoDB;
+ERROR HY000: Storage engine InnoDB is disabled (Table creation is disallowed).
+IMPORT TABLE FROM 'test/d1.ibd';
+SHOW TABLES LIKE 'd1';
+Tables_in_test (d1)
+d1
+# restart:

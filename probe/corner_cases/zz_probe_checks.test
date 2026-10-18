@@ -1,0 +1,103 @@
+# Probe for the checks CREATE TABLE makes, run on b2edad29d1b (before the
+# fixes of 2026-10-18). The errors are optional so that the result shows what
+# the server did in each case.
+--source include/have_innodb_16k.inc
+
+let $MYSQLD_DATADIR = `SELECT @@datadir`;
+let $A = $MYSQL_TMP_DIR/import_checks;
+--mkdir $A
+
+--echo # 1. The parent is named after the child.
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT,
+                FOREIGN KEY (pid) REFERENCES p (id));
+CREATE TABLE a1 (id INT PRIMARY KEY);
+INSERT INTO p VALUES (1);
+INSERT INTO c VALUES (1, 1);
+INSERT INTO a1 VALUES (1);
+FLUSH TABLES p, c, a1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/p.ibd $A/p.ibd
+--copy_file $MYSQLD_DATADIR/test/c.ibd $A/c.ibd
+--copy_file $MYSQLD_DATADIR/test/a1.ibd $A/a1.ibd
+UNLOCK TABLES;
+DROP TABLE c, p, a1;
+--copy_file $A/a1.ibd $MYSQLD_DATADIR/test/a1.ibd
+--copy_file $A/c.ibd $MYSQLD_DATADIR/test/c.ibd
+--copy_file $A/p.ibd $MYSQLD_DATADIR/test/p.ibd
+--error 0, ER_FK_CANNOT_OPEN_PARENT
+IMPORT TABLE FROM 'test/a1.ibd', 'test/c.ibd', 'test/p.ibd';
+--list_files $MYSQLD_DATADIR/test *.ibd
+SHOW TABLES;
+
+--echo # 1b. Two tables referencing each other.
+SET foreign_key_checks = 0;
+CREATE TABLE x1 (id INT PRIMARY KEY, y INT, FOREIGN KEY (y) REFERENCES x2 (id));
+CREATE TABLE x2 (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES x1 (id));
+SET foreign_key_checks = 1;
+FLUSH TABLES x1, x2 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/x1.ibd $A/x1.ibd
+--copy_file $MYSQLD_DATADIR/test/x2.ibd $A/x2.ibd
+UNLOCK TABLES;
+SET foreign_key_checks = 0;
+DROP TABLE x1, x2;
+SET foreign_key_checks = 1;
+--copy_file $A/x1.ibd $MYSQLD_DATADIR/test/x1.ibd
+--copy_file $A/x2.ibd $MYSQLD_DATADIR/test/x2.ibd
+--error 0, ER_FK_CANNOT_OPEN_PARENT
+IMPORT TABLE FROM 'test/x1.ibd', 'test/x2.ibd';
+--list_files $MYSQLD_DATADIR/test x*.ibd
+SHOW TABLES LIKE 'x%';
+
+--echo # 2. REFERENCES on the parent.
+CREATE TABLE p2 (id INT PRIMARY KEY);
+CREATE TABLE c2 (id INT PRIMARY KEY, pid INT,
+                 FOREIGN KEY (pid) REFERENCES p2 (id));
+FLUSH TABLES c2 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/c2.ibd $A/c2.ibd
+UNLOCK TABLES;
+DROP TABLE c2;
+CREATE USER importer@localhost;
+GRANT CREATE, ALTER ON test.* TO importer@localhost;
+--copy_file $A/c2.ibd $MYSQLD_DATADIR/test/c2.ibd
+--connect (con1, localhost, importer,,test)
+--error 0, ER_TABLEACCESS_DENIED_ERROR
+IMPORT TABLE FROM 'test/c2.ibd';
+--disconnect con1
+--connection default
+SHOW TABLES LIKE 'c2';
+
+--echo # 3. table_encryption_privilege_check.
+CREATE DATABASE edb DEFAULT ENCRYPTION = 'Y';
+CREATE TABLE edb.e1 (id INT PRIMARY KEY) ENCRYPTION = 'N';
+FLUSH TABLES edb.e1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/edb/e1.ibd $A/e1.ibd
+UNLOCK TABLES;
+DROP TABLE edb.e1;
+GRANT CREATE, ALTER ON edb.* TO importer@localhost;
+SET GLOBAL table_encryption_privilege_check = ON;
+--copy_file $A/e1.ibd $MYSQLD_DATADIR/edb/e1.ibd
+--connect (con1, localhost, importer,,test)
+--error 0, ER_CANNOT_SET_TABLE_ENCRYPTION
+IMPORT TABLE FROM 'edb/e1.ibd';
+SHOW WARNINGS;
+--disconnect con1
+--connection default
+SHOW TABLES IN edb;
+SET GLOBAL table_encryption_privilege_check = OFF;
+
+--echo # 4. disabled_storage_engines.
+CREATE TABLE d1 (id INT PRIMARY KEY);
+FLUSH TABLES d1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/d1.ibd $A/d1.ibd
+UNLOCK TABLES;
+DROP TABLE d1;
+--let $restart_parameters = restart: --disabled-storage-engines=InnoDB
+--source include/restart_mysqld.inc
+--error ER_DISABLED_STORAGE_ENGINE
+CREATE TABLE d2 (id INT PRIMARY KEY) ENGINE = InnoDB;
+--copy_file $A/d1.ibd $MYSQLD_DATADIR/test/d1.ibd
+--error 0, ER_DISABLED_STORAGE_ENGINE
+IMPORT TABLE FROM 'test/d1.ibd';
+SHOW TABLES LIKE 'd1';
+--let $restart_parameters = restart:
+--source include/restart_mysqld.inc

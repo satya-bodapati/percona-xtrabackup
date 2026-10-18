@@ -13,6 +13,8 @@ Built on origin/8.4 5db7de6b67b.
 | `acf462f1221` | **Read the SDI of an unattached tablespace file** (`handlerton::sdi_get_from_file`). Pages are read directly; encrypted (.cfp), ROW_FORMAT=COMPRESSED and SDI BLOBs are handled; corrupt files give errors, not asserts. | Mechanism only; exercised by the tests of 3debe50b2f9. |
 | `a188f7737df` | **InnoDB creates a table on top of an existing file and attaches it** (`HA_CREATE_INFO::m_import_source`, `row_import_attach()`, `Import_sdi_source`). | Mechanism only. |
 | `3debe50b2f9` | **`IMPORT TABLE FROM '<file>.ibd'`** (SQL layer) | 5 new MTR tests, all pass (see below). |
+| `782d48b3429` .. `b2edad29d1b` | **Corner-case fixes (2026-10-17):** row-version check in the page converter (the crash), exact partition files checked before any change (`handlerton::sdi_check_import_files`), all tables checked before any is created, SRID, index-mismatch message. | `innodb.import_table_ibd_mismatch`. Details in `IMPORT_CORNER_CASES.md`. |
+| `f6656e96ab5` .. `c98c8bd46f0` | **CREATE TABLE's checks (2026-10-18):** FK parents created first, REFERENCES on the parents, `table_encryption_privilege_check`, `disabled_storage_engines`. | `innodb.import_table_ibd_checks`. Details in `IMPORT_CORNER_CASES.md`. |
 
 New MTR tests, all in `innodb.import_table_ibd*`:
 - **basic:** BLOBs, a secondary index, AUTO_INCREMENT across a restart, an existing table, wrong location, a missing

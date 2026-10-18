@@ -33,14 +33,39 @@ TABLE tests pass, except three that also fail on the upstream base `5db7de6b67b`
 (stale-page assertion), `clone.error_ddl` and `innodb.partition_upgrade_create` (no `zip` binary). The first two
 passed in the baseline of 2026-10-16. The original probes, rerun on the fixed build, are in `probe/corner_cases/after/`.
 
+## Fixed (2026-10-18): the checks CREATE TABLE makes
+
+Probed first with `zz_probe_checks` (log in `probe3/` of the PS build dir): all four cases reproduced on
+`b2edad29d1b`. Every fix adds its cases to the new test `innodb.import_table_ibd_checks`; the probe shows each case
+behaving differently without its fix.
+
+- `f6656e96ab5` **FK parents first.** `IMPORT TABLE FROM 'a1.ibd', 'c.ibd', 'p.ibd'` with `c` referencing `p` failed
+  with "Failed to open the referenced table 'p'" and the rollback deleted `a1.ibd`. The targets are now ordered so
+  that parents imported by the same statement are created before their children. Tables referencing each other are
+  refused before any file is changed when `foreign_key_checks` is on, and imported in the named order when it is off.
+- `8444be7ee69` **REFERENCES privilege.** CREATE and ALTER on the schema were enough to import a table with a foreign
+  key to any table. Now REFERENCES on each parent table is needed, with CREATE TABLE's error.
+- `ec0e68f602d` **`table_encryption_privilege_check`.** An unencrypted file could be imported into a schema with
+  DEFAULT ENCRYPTION='Y' by anyone who may create tables there. Now, as for CREATE TABLE: with the check on, a table
+  encrypted unlike the schema's default needs TABLE_ENCRYPTION_ADMIN (ER_CANNOT_SET_TABLE_ENCRYPTION); with it off,
+  an unencrypted table in an encrypted schema gets warning 3824.
+- `c98c8bd46f0` **`disabled_storage_engines`.** With InnoDB listed, CREATE TABLE is refused but IMPORT went through.
+  Now IMPORT is refused with the same error, before any file is read.
+
+Not fixed, by analysis: a file whose SDI names `performance_schema` or `information_schema` as its schema (only a
+crafted SDI can) is refused by `check_access`, which denies CREATE in those schemas to everyone; a crafted SDI of a
+data dictionary table is refused as "already exists". `mysql` and `sys` accept user tables, as CREATE TABLE does.
+
+For `xtrabackup --restore`: it creates missing databases with their charset but without DEFAULT ENCRYPTION, so with
+`table_encryption_privilege_check` on, restoring encrypted tables needs TABLE_ENCRYPTION_ADMIN. To do: create the
+database with the same DEFAULT ENCRYPTION, if the backup records it.
+
 **Still open:**
 - Partitions from different copies with no DDL between them can't be detected (problem 4). Document it.
 - A failure found while converting (corrupt pages, a newer row, an incompatible FK) still deletes the files that
   the statement already converted. Those files are half converted and can't be imported again. Document that
   IMPORT consumes its files.
 - Messages: "general tablespace" for mysql.ibd and ibdata1; "no SDI" for a live table's file; absolute paths.
-- The other CREATE TABLE checks that IMPORT skips (system schemas, `table_encryption_privilege_check`,
-  `disabled_storage_engines`) are not probed.
 
 ## How partitions were imported before the fixes
 
