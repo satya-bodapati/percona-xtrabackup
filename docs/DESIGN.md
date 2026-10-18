@@ -79,7 +79,7 @@ This extends the existing IMPORT TABLE, which today takes `.sdi` files and suppo
   `mysql.compression_dictionary_cols`.
 - **AUTO_INCREMENT.** The import **persists** `MAX(col)+1`. Today import sets the counter in memory only
   (`row0import.cc:4893-4906`), which is the root cause of PS-8687.
-- **Binlog.** Not binlogged. IMPORT TABLE never is, today.
+- **Binlog.** Not binlogged. IMPORT TABLE never is, today. Confirmed for v1 (Satya, 2026-10-18); replication is v2.
 - **InnoDB core (decided 2026-10-16): a new attach path built on a refactored import.**
   - **No fake states.** The attach path never puts the table through "create, then discard".
   - **The existing import code splits into three reusable layers:**

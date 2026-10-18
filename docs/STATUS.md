@@ -51,6 +51,33 @@ New MTR tests, all in `innodb.import_table_ibd*`:
 **Related existing PXB tests** pass on the stock 8.4.11 server (23 of 23): dictionary, partial backup, export,
 encryption and DATA DIRECTORY tests.
 
+## Full suites (2026-10-18)
+
+**PS `innodb`, `main`, `rpl` (debug build at `c98c8bd46f0`):** 3063 tests, 6 failed:
+`innodb.tablespace_portability`, `rpl.rpl_deprecations`, `rpl.rpl_semi_sync_alias`, `rpl.rpl_show_replica_auth_info`,
+`rpl.rpl_shutdown_with_optimize_for_static_plugin_config` and MTR's `shutdown_report`. All five tests fail in
+`assert_error_log.inc` on the same three warnings the container writes at every server start, "Failed to set NUMA
+memory policy ... Operation not permitted" (MY-011873/11879/11875). Rerun with `--mysqld=--innodb-numa-interleave=0`,
+all six pass. Not ours. Logs: `ps-8.4-import-refactor/bld/suites_ps*.log`.
+
+**PXB default suites (`run.sh -f -j 16`, xtrabackup at `e033612bcedc`, against the new PS server):** 443 run, 348 passed,
+91 skipped (no Galera, KMIP, KMS, Vault), 4 failed. All `xb_restore*` tests passed. The four fail the same way against
+the old `server/` copy and against the untouched upstream base `5db7de6b67b` (built in `ps-8.4-import-repros/bld`,
+installed to its `bld/install`), so none is caused by the PS changes; the PXB changes are in `restore*.cc`, `xb_dict.cc`
+and the options in `xtrabackup.cc`, none of which these tests run.
+- `main.bug1002688`, `main.bug759701` (flaky, passed alone): after copy-back of a full + incremental backup, the debug
+  server asserts at startup: `Duplicate entry '402' for key 'tables.PRIMARY'` while `innobase_post_recover` creates the
+  P_S native table (`log_pfs_create_tables`), then `THD::send_statement_status(): Assertion '0'`, a debug-only assert.
+  A release server logs the error and starts. The `mysql.tables` AUTO_INCREMENT is stale after the restore.
+- `main.estimate_memory`: `host_free_memory()` (procps `kb_main_available`) returns 0 in this container, so
+  `--use-free-memory-pct=99` sets the buffer pool to -134217728 and xtrabackup segfaults in
+  `buf_pool_t::allocate_chunk`. A PXB robustness bug on top of an environment quirk; the test's own gate read
+  MemAvailable 445 GB from /proc/meminfo.
+- `reducedlock.basic_operation`: "xtrabackup did not handle delete table DDL", the DDL tracker printed no line for the
+  table dropped while the backup was paused. Deterministic here, same on both servers. Not root-caused.
+Logs: `pxb_full.log`, `pxb_rerun4.log`, `pxb_rerun3_oldserver.log`, `pxb_rerun3_baseserver.log`, results in
+`pxb_*_results/`.
+
 ## Not done / open
 
 - **xbcloud selective download dropped (2026-10-16).** The commit `d1ae120578f8` (`xbcloud get --restore-include`)
