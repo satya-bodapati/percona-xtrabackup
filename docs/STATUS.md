@@ -72,11 +72,24 @@ and the options in `xtrabackup.cc`, none of which these tests run.
 - `main.estimate_memory`: `host_free_memory()` (procps `kb_main_available`) returns 0 in this container, so
   `--use-free-memory-pct=99` sets the buffer pool to -134217728 and xtrabackup segfaults in
   `buf_pool_t::allocate_chunk`. A PXB robustness bug on top of an environment quirk; the test's own gate read
-  MemAvailable 445 GB from /proc/meminfo.
+  MemAvailable 445 GB from /proc/meminfo. Already fixed as PXB-3770 on `pxb-8.4-fix-flaky` (`80fe8061e56f`) and
+  `pxb-9.7-fix-flaky` (`8336993ac65e`), 2026-10-10; not on this branch yet.
 - `reducedlock.basic_operation`: "xtrabackup did not handle delete table DDL", the DDL tracker printed no line for the
   table dropped while the backup was paused. Deterministic here, same on both servers. Not root-caused.
 Logs: `pxb_full.log`, `pxb_rerun4.log`, `pxb_rerun3_oldserver.log`, `pxb_rerun3_baseserver.log`, results in
 `pxb_*_results/`.
+
+**Resolution (2026-10-19), from the flaky-tests session, which owns both `pxb-8.4-fix-flaky` and `pxb-9.7-fix-flaky`:**
+all four are fixed on both branches; none of the fixes is on this branch yet, they come with the next 8.4 merge.
+- `bug1002688`, `bug759701` (and `bug1028949`, `bug932623`): "[9] apply the last incremental without --apply-log-only",
+  8.4 `2c0ace864649`, 9.7 `bc6b533cdf14`. Applying the last incremental with `--apply-log-only` loses the
+  AUTO_INCREMENT of `mysql.tables` (PXB-2865), hence the duplicate key in `log_pfs_create_tables`.
+- `estimate_memory`: PXB-3770, 8.4 `80fe8061e56f`, 9.7 `8336993ac65e`.
+- `reducedlock.basic_operation`: "fix reducedlock/basic_operation.sh without a UTF-8 locale", 8.4 `81a9c60397ef` ([19]),
+  9.7 `d9ef682d0b92` ([20]), both 2026-10-19. The container has no locale (POSIX), so in the test's special_char pass
+  every mysql client statement fails with ERROR 1064 near '?table'; no DDL runs while the backup is paused, so the
+  tracker has nothing to print. My log shows the same 7 ERROR 1064 lines right after "Running test with special_char".
+  The fix passes `--default-character-set=utf8mb4`.
 
 ## Not done / open
 
@@ -94,8 +107,7 @@ Logs: `pxb_full.log`, `pxb_rerun4.log`, `pxb_rerun3_oldserver.log`, `pxb_rerun3_
   columns.
 - **Tickets:** none created; branches and commits have no ticket ids yet.
 - **Error codes:** existing ones are reused. Dedicated errors would need new numbers.
-- **Not run:** the full innodb/main MTR suites, and the full PXB suite. Only the import-related tests and a PXB
-  subset were run.
+- **Full suites:** run 2026-10-18, see "Full suites" above. Nothing fails because of these branches.
 - **Option name (parked, 2026-10-16):** `--backup-dir` as an alias of `--target-dir`, accepted by every mode that
   reads a backup. Satya: OK in principle, but first check how the name fits `--copy-back`, `--move-back`,
   `--prepare` and `--decompress`. Then: one generic alias for all of them. Not started.
