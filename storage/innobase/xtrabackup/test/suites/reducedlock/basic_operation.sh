@@ -32,9 +32,13 @@ function run_test() {
     RENAMED_TABLE_IN_DISK="renamed_table"
     NEW_TABLE_IN_DISK="new_table"
   fi
-  $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.${DELETE_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT);" test
-  $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.${ORIGINAL_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.${ORIGINAL_TABLE} VALUES(1)" test
-  $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.${OP_DDL_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50)); INSERT INTO test.${OP_DDL_TABLE} VALUES(1, 'test')" test
+  # The table names are UTF-8. Do not depend on the locale for the client
+  # character set: without a UTF-8 locale the client does not send them
+  # as utf8mb4 and the statements fail, so no DDL happens to track.
+  local CHARSET="--default-character-set=utf8mb4"
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "CREATE TABLE test.${DELETE_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT);" test
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "CREATE TABLE test.${ORIGINAL_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.${ORIGINAL_TABLE} VALUES(1)" test
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "CREATE TABLE test.${OP_DDL_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50)); INSERT INTO test.${OP_DDL_TABLE} VALUES(1, 'test')" test
 
   innodb_wait_for_flush_all
 
@@ -49,16 +53,16 @@ function run_test() {
   echo "backup pid is $job_pid"
 
   # Generate redo on table than delete it
-  $MYSQL $MYSQL_ARGS -Ns -e "INSERT INTO test.${DELETE_TABLE} VALUES (1); DROP TABLE test.${DELETE_TABLE};" test
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "INSERT INTO test.${DELETE_TABLE} VALUES (1); DROP TABLE test.${DELETE_TABLE};" test
 
   # Create table and generate redo
-  $MYSQL $MYSQL_ARGS -Ns -e "CREATE TABLE test.${NEW_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.${NEW_TABLE} VALUES (), ();" test
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "CREATE TABLE test.${NEW_TABLE} (id INT PRIMARY KEY AUTO_INCREMENT); INSERT INTO test.${NEW_TABLE} VALUES (), ();" test
 
   # Rename table and generate redo
-  $MYSQL $MYSQL_ARGS -Ns -e "RENAME TABLE test.${ORIGINAL_TABLE} TO test.${RENAMED_TABLE}; INSERT INTO test.${RENAMED_TABLE} VALUES (2);" test
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "RENAME TABLE test.${ORIGINAL_TABLE} TO test.${RENAMED_TABLE}; INSERT INTO test.${RENAMED_TABLE} VALUES (2);" test
 
   # Bulk Index Load and generate redo
-  $MYSQL $MYSQL_ARGS -Ns -e "ALTER TABLE test.${OP_DDL_TABLE} ADD INDEX(name); INSERT INTO test.${OP_DDL_TABLE} VALUES (2, 'test2');" test
+  $MYSQL $MYSQL_ARGS $CHARSET -Ns -e "ALTER TABLE test.${OP_DDL_TABLE} ADD INDEX(name); INSERT INTO test.${OP_DDL_TABLE} VALUES (2, 'test2');" test
 
   # Resume the xtrabackup process
   vlog "Resuming xtrabackup"
