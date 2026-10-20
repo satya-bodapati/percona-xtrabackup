@@ -5957,7 +5957,13 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
     if (recv_recovery_is_on()) {
       /* Pages must be uncompressed for crash recovery. */
       ut_a(uncompressed);
+      const auto recvdbg_t0 = std::chrono::steady_clock::now();
       recv_recover_page(true, (buf_block_t *)bpage);
+      extern std::atomic<uint64_t> recvdbg_apply_ns, recvdbg_apply_cnt;
+      recvdbg_apply_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - recvdbg_t0)
+                              .count();
+      ++recvdbg_apply_cnt;
     } else if (uncompressed && !Compression::is_compressed_page(frame) &&
                fil_page_get_type(frame) == FIL_PAGE_INDEX &&
                page_is_leaf(frame) &&

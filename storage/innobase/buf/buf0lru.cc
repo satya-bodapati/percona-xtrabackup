@@ -45,6 +45,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "hash0hash.h"
 #include "ibuf0ibuf.h"
 #include "log0recv.h"
+void recvdbg_report(const char *where, bool force);
 #include "log0write.h"
 #include "my_dbug.h"
 #include "os0event.h"
@@ -1372,6 +1373,31 @@ loop:
     goto loop;
   }
 
+  if (recv_recovery_is_on() && (n_iterations == 3 || n_iterations == 21)) {
+    ulint io_read = 0, io_write = 0, io_other = 0, dirty = 0, fixed = 0,
+          clean_free = 0;
+    mutex_enter(&buf_pool->LRU_list_mutex);
+    for (buf_page_t *b = UT_LIST_GET_FIRST(buf_pool->LRU); b != nullptr;
+         b = UT_LIST_GET_NEXT(LRU, b)) {
+      if (b->was_io_fix_read()) {
+        ++io_read;
+      } else if (b->was_io_fixed()) {
+        ++io_write;
+      } else if (b->buf_fix_count > 0) {
+        ++fixed;
+      } else if (b->is_dirty()) {
+        ++dirty;
+      } else {
+        ++clean_free;
+      }
+    }
+    mutex_exit(&buf_pool->LRU_list_mutex);
+    ib::info() << "RECVDBG get_free iter=" << n_iterations << " LRU io_read="
+               << io_read << " io_write=" << io_write << " io_other="
+               << io_other << " buf_fixed=" << fixed << " dirty_unfixed="
+               << dirty << " clean_unfixed=" << clean_free;
+    recvdbg_report("get_free", true);
+  }
   if (n_iterations > 20 && srv_buf_pool_old_size == srv_buf_pool_size) {
     ib::warn(ER_IB_MSG_134)
         << "Difficult to find free blocks in the buffer pool"

@@ -52,6 +52,42 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0sys.h"
 #include "ut0new.h"
 
+/* RECVDBG: instrumentation for the recovery free-block hang. */
+#include <atomic>
+#include <chrono>
+std::atomic<uint64_t> recvdbg_reorg_total{0};
+std::atomic<int> recvdbg_reorg_waiting{0};
+std::atomic<uint64_t> recvdbg_reorg_slow{0};
+std::atomic<uint64_t> recvdbg_reads_issued{0};
+std::atomic<uint64_t> recvdbg_apply_ns{0};
+std::atomic<uint64_t> recvdbg_apply_cnt{0};
+static std::atomic<int64_t> recvdbg_last_ns{0};
+static std::atomic<uint64_t> recvdbg_max_pend{0};
+
+void recvdbg_report(const char *where, bool force) {
+  const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  if (!force && now - recvdbg_last_ns.load() < 200000000) return;
+  recvdbg_last_ns = now;
+  buf_pool_t *bp = buf_pool_from_array(0);
+  ib::info() << "RECVDBG " << where << " pend_reads=" << bp->n_pend_reads
+             << " max_pend=" << recvdbg_max_pend.load()
+             << " free=" << UT_LIST_GET_LEN(bp->free)
+             << " LRU=" << UT_LIST_GET_LEN(bp->LRU)
+             << " flush_list=" << UT_LIST_GET_LEN(bp->flush_list)
+             << " curr_size=" << bp->curr_size
+             << " frames_for_pages=" << recv_n_frames_for_pages_per_pool_instance
+             << " reads_issued=" << recvdbg_reads_issued.load()
+             << " reorg_total=" << recvdbg_reorg_total.load()
+             << " reorg_waiting=" << recvdbg_reorg_waiting.load()
+             << " reorg_slow=" << recvdbg_reorg_slow.load()
+             << " applied=" << recvdbg_apply_cnt.load() << " avg_apply_us="
+             << (recvdbg_apply_cnt.load()
+                     ? recvdbg_apply_ns.load() / 1000 / recvdbg_apply_cnt.load()
+                     : 0);
+}
+
 /** There must be at least this many pages in buf_pool in the area to start
 a random read-ahead */
 inline page_no_t BUF_READ_AHEAD_RANDOM_THRESHOLD(const buf_pool_t *b) {
@@ -696,6 +732,10 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
     dberr_t err;
     buf_read_page_low(&err, false, IORequest::DO_NOT_WAKE, BUF_READ_ANY_PAGE,
                       {space_id, page_nos[i]}, page_size, true);
+    ++recvdbg_reads_issued;
+    const uint64_t pend = buf_pool_from_array(0)->n_pend_reads;
+    if (pend > recvdbg_max_pend.load()) recvdbg_max_pend = pend;
+    recvdbg_report("issue", false);
   }
 
   os_aio_simulated_wake_handler_threads();

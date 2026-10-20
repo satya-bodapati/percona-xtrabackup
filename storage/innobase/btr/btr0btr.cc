@@ -54,6 +54,12 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0mon.h"
 #include "trx0trx.h"
 #include "ut0new.h"
+#include "log0recv.h"
+#include <atomic>
+#include <chrono>
+extern std::atomic<uint64_t> recvdbg_reorg_total;
+extern std::atomic<int> recvdbg_reorg_waiting;
+extern std::atomic<uint64_t> recvdbg_reorg_slow;
 #endif /* !UNIV_HOTBACKUP */
 
 #ifdef UNIV_DEBUG
@@ -1196,7 +1202,18 @@ bool btr_page_reorganize_low(bool recovery, ulint z_level, page_cur_t *cursor,
   mtr_log_t log_mode = mtr_set_log_mode(mtr, MTR_LOG_NONE);
 
 #ifndef UNIV_HOTBACKUP
-  temp_block = buf_block_alloc(buf_pool);
+  if (recv_recovery_is_on()) {
+    ++recvdbg_reorg_total;
+    ++recvdbg_reorg_waiting;
+    const auto t0 = std::chrono::steady_clock::now();
+    temp_block = buf_block_alloc(buf_pool);
+    --recvdbg_reorg_waiting;
+    if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) {
+      ++recvdbg_reorg_slow;
+    }
+  } else {
+    temp_block = buf_block_alloc(buf_pool);
+  }
 #else  /* !UNIV_HOTBACKUP */
   temp_block = back_block2;
 #endif /* !UNIV_HOTBACKUP */
