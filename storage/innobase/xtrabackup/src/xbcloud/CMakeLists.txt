@@ -67,37 +67,9 @@ TARGET_LINK_LIBRARIES(xbcloud
   crc
   )
 
-IF (WITH_UNIT_TESTS AND CMAKE_VERSION VERSION_GREATER 3.22.1)
-  ENABLE_TESTING()
-
-  FIND_PACKAGE(GTest)
-
-  IF (GTEST_FOUND)
-
-    INCLUDE_DIRECTORIES(
-      ${GTEST_INCLUDE_DIRECTORIES}
-      )
-
-    ADD_EXECUTABLE(xbcloud-t xbcloud-t.cc
-      http.cc
-      s3.cc
-      azure.cc
-      swift.cc)
-
-    TARGET_LINK_LIBRARIES(xbcloud-t
-      ${GCRYPT_LIBS}
-      ${LIBEV_LIBRARIES}
-      ${GTEST_BOTH_LIBRARIES}
-      GTest::gtest
-      GTest::gmock
-      extra::rapidjson
-      ext::curl
-      mysys
-      crc
-      )
-
-    ADD_TEST(xbcloud xbcloud-t)
-
-  ENDIF()
-
+IF(WITH_UNIT_TESTS)
+  XB_ADD_UNIT_TEST(xbcloud-t
+    SOURCES xbcloud-t.cc http.cc s3.cc s3_ec2.cc azure.cc swift.cc
+    LIBRARIES ${GCRYPT_LIBS} ${LIBEV_LIBRARIES} extra::rapidjson ext::curl
+      mysys crc)
 ENDIF()
