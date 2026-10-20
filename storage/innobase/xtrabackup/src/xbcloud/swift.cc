@@ -596,7 +596,7 @@ bool Swift_client::delete_object(const std::string &container,
   req.add_header("X-Auth-Token", token);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, req, resp, nullptr)) {
     return false;
   }
 
@@ -636,20 +636,19 @@ bool Swift_client::async_delete_object(const std::string &container,
     return false;
   }
 
-  auto f = [callback, container, name, req, resp](
-               CURLcode rc, const Http_connection *conn) mutable -> void {
-    if (rc == CURLE_OK && !resp->ok()) {
-      msg_ts("%s: Failed to delete object. Http error code: %lu\n", my_progname,
-             resp->http_code());
-    }
+  /* Retried like uploads and downloads */
+  async_download_callback_t retried_callback = [callback](bool success,
+                                                          const Http_buffer &) {
     if (callback) {
-      callback(rc == CURLE_OK && resp->ok());
+      callback(success);
     }
-    delete req;
-    delete resp;
   };
-
-  http_client->make_async_request(*req, *resp, h, f);
+  http_client->make_async_request(
+      *req, *resp, h,
+      std::bind(&Http_client::callback<Swift_client, async_download_callback_t>,
+                http_client, this, container, name, req, resp, http_client, h,
+                retried_callback, std::placeholders::_1, std::placeholders::_2,
+                1));
 
   return true;
 }
@@ -662,7 +661,7 @@ Http_buffer Swift_client::download_object(const std::string &container,
   req.add_header("X-Auth-Token", token);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, req, resp, nullptr)) {
     success = false;
     return Http_buffer();
   }
@@ -690,7 +689,7 @@ bool Swift_client::create_container(const std::string &name) {
   req.add_header("X-Auth-Token", token);
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, req, resp, nullptr)) {
     return false;
   }
 
@@ -711,7 +710,7 @@ bool Swift_client::container_exists(const std::string &name, bool &exists) {
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, req, resp, nullptr)) {
     return false;
   }
 
@@ -743,7 +742,7 @@ bool Swift_client::upload_object(const std::string &container,
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(this, req, resp, nullptr)) {
     return false;
   }
 
@@ -852,7 +851,7 @@ bool Swift_client::list_objects_with_prefix(const std::string &container,
 
     Http_response resp;
 
-    if (!http_client->make_request(req, resp)) {
+    if (!http_client->make_request_with_retry(this, req, resp, nullptr)) {
       return false;
     }
 

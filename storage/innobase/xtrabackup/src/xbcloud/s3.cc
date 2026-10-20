@@ -299,7 +299,10 @@ bool S3_client::delete_object(const std::string &bucket,
   signer->sign_request(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(hostname(bucket), bucket, r, time(0));
+          })) {
     return false;
   }
 
@@ -350,29 +353,19 @@ bool S3_client::async_delete_object(const std::string &bucket,
     return false;
   }
 
-  auto f = [callback, bucket, name, req, resp](
-               CURLcode rc, const Http_connection *conn) mutable -> void {
-    if (rc == CURLE_OK && !resp->ok()) {
-      S3_response s3_resp;
-      if (!s3_resp.parse_http_response(*resp)) {
-        msg_ts(
-            "%s: Failed to delete object %s/%s. Failed to parse XML "
-            "response.\n",
-            my_progname, bucket.c_str(), name.c_str());
-      } else if (s3_resp.error()) {
-        msg_ts("%s: Failed to delete object %s/%s. Error message: %s\n",
-               my_progname, bucket.c_str(), name.c_str(),
-               s3_resp.error_message().c_str());
-      }
-    }
+  /* Retried like uploads and downloads */
+  async_download_callback_t retried_callback = [callback](bool success,
+                                                          const Http_buffer &) {
     if (callback) {
-      callback(rc == CURLE_OK && resp->ok());
+      callback(success);
     }
-    delete req;
-    delete resp;
   };
-
-  http_client->make_async_request(*req, *resp, h, f);
+  http_client->make_async_request(
+      *req, *resp, h,
+      std::bind(&Http_client::callback<S3_client, async_download_callback_t>,
+                http_client, this, bucket, name, req, resp, http_client, h,
+                retried_callback, std::placeholders::_1, std::placeholders::_2,
+                1));
 
   return true;
 }
@@ -384,7 +377,10 @@ Http_buffer S3_client::download_object(const std::string &bucket,
   signer->sign_request(hostname(bucket), bucket, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(hostname(bucket), bucket, r, time(0));
+          })) {
     success = false;
     return Http_buffer();
   }
@@ -413,7 +409,10 @@ bool S3_client::create_bucket(const std::string &name) {
   signer->sign_request(hostname(name), name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(hostname(name), name, r, time(0));
+          })) {
     return false;
   }
 
@@ -487,7 +486,10 @@ bool S3_client::bucket_exists(const std::string &name, bool &exists) {
   signer->sign_request(hostname(name), name, req, time(0));
 
   Http_response resp;
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(hostname(name), name, r, time(0));
+          })) {
     return false;
   }
 
@@ -515,7 +517,10 @@ bool S3_client::upload_object(const std::string &bucket,
 
   Http_response resp;
 
-  if (!http_client->make_request(req, resp)) {
+  if (!http_client->make_request_with_retry(
+          this, req, resp, [&](Http_request &r) {
+            signer->sign_request(hostname(bucket), bucket, r, time(0));
+          })) {
     return false;
   }
 
@@ -652,7 +657,10 @@ bool S3_client::list_objects_with_prefix(const std::string &bucket,
     signer->sign_request(hostname(bucket), bucket, req, time(0));
 
     Http_response resp;
-    if (!http_client->make_request(req, resp)) {
+    if (!http_client->make_request_with_retry(
+            this, req, resp, [&](Http_request &r) {
+              signer->sign_request(hostname(bucket), bucket, r, time(0));
+            })) {
       return false;
     }
 
