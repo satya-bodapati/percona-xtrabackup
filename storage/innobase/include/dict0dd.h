@@ -116,6 +116,9 @@ enum dd_table_keys {
   DD_TABLE_DISCARD,
   /** Columns before first instant ADD COLUMN, used only for V1 */
   DD_TABLE_INSTANT_COLS,
+  /** Next label of the hidden percona_vec_aux_id column of a Percona Server
+  table with a vector index, as of the last DDL */
+  DD_TABLE_VEC_NEXT_ID,
   /** Sentinel */
   DD_TABLE__LAST
 };
@@ -236,7 +239,8 @@ const char *const dd_space_state_values[DD_SPACE_STATE__LAST + 1] = {
 
 /** InnoDB private key strings for dd::Table. @see dd_table_keys */
 const char *const dd_table_key_strings[DD_TABLE__LAST] = {
-    "autoinc", "data_directory", "version", "discard", "instant_col"};
+    "autoinc", "data_directory", "version",
+    "discard", "instant_col",    "vec_next_id"};
 
 /** InnoDB private key strings for dd::Column, @see dd_column_keys */
 const char *const dd_column_key_strings[DD_COLUMN__LAST] = {
