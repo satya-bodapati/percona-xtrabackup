@@ -973,7 +973,7 @@ dberr_t Log_DDL::write_free_tree_log(trx_t *trx, const dict_index_t *index,
     return (DB_SUCCESS);
   }
 
-  if (index->type & DICT_FTS) {
+  if ((index->type & DICT_FTS) || index->is_vector()) {
     ut_ad(index->page == FIL_NULL);
     return (DB_SUCCESS);
   }
