@@ -5694,8 +5694,11 @@ ulint CorruptedIndexPersister::read(PersistentTableMetadata &metadata,
 void CorruptedIndexPersister::aggregate(
     PersistentTableMetadata &metadata,
     const PersistentTableMetadata &new_entry) const {
+  const corrupted_ids_t &known = metadata.get_corrupted_indexes();
   for (auto id : new_entry.get_corrupted_indexes()) {
-    metadata.add_corrupted_index(id);
+    if (std::find(known.begin(), known.end(), id) == known.end()) {
+      metadata.add_corrupted_index(id);
+    }
   }
 }
 
@@ -5915,6 +5918,13 @@ size_t Persisters::write(PersistentTableMetadata &metadata, byte *buffer) {
   }
 
   return (size);
+}
+
+void Persisters::aggregate(PersistentTableMetadata &metadata,
+                           const PersistentTableMetadata &new_entry) const {
+  for (const auto &entry : m_persisters) {
+    entry.second->aggregate(metadata, new_entry);
+  }
 }
 
 void dict_sdi_close_table(dict_table_t *table) {
