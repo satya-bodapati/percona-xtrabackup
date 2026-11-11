@@ -289,14 +289,23 @@ start_server
 verify_db_state test
 
 ############################################################################
-# Budget ceiling: two dense changed regions (~600 + ~560 pages) separated
+# Budget ceiling: two dense changed regions (~800 + ~700 pages) separated
 # by ~1400 untouched pages (~22MB >> the 1MB cost ceiling) must never be
-# merged into one read, for any measured cost.
+# merged into one read, for any measured cost. The id bounds come from the
+# table's real ids per page, as the sweep strides do; fixed ids missed the
+# geometry and the second region ran to the end of the table, so the
+# UPDATE rewrote most of it and pushed Debug runs past the time limit.
 ############################################################################
 vlog "=== two far-apart regions: a gap > 1MB is never combined"
+read far1_end far2_start far2_end < <(mysql -Ns test -e "SELECT \
+    ROUND(800 * ids), ROUND(2200 * ids), ROUND(2900 * ids) \
+    FROM (SELECT (AUTO_INCREMENT - 1) / (DATA_LENGTH / @@innodb_page_size) \
+          AS ids FROM information_schema.tables \
+          WHERE table_schema = 'test' AND table_name = 't1') AS geometry")
+vlog "far regions: ids <= $far1_end and ids $far2_start..$far2_end"
 xtrabackup --backup --page-tracking --target-dir=$topdir/full_far
-mysql test -e \
-  "UPDATE t1 SET pad = REPEAT('z', 250) WHERE id <= 30000 OR id > 100000"
+mysql test -e "UPDATE t1 SET pad = REPEAT('z', 250) \
+    WHERE id <= $far1_end OR id BETWEEN $far2_start AND $far2_end"
 shutdown_server
 start_server
 
