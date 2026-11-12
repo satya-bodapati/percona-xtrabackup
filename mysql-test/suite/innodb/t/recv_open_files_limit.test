@@ -1,0 +1,30 @@
+# Does crash recovery hang when the redo touches more tablespaces than
+# innodb_open_files allows? (PXB P5 check, not for commit)
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+
+--disable_query_log
+let $i = 300;
+while ($i) {
+  eval CREATE TABLE t$i (a INT PRIMARY KEY AUTO_INCREMENT, b CHAR(255));
+  dec $i;
+}
+let $r = 5;
+while ($r) {
+  let $i = 300;
+  while ($i) {
+    eval INSERT INTO t$i (b) VALUES ('x');
+    dec $i;
+  }
+  dec $r;
+}
+--enable_query_log
+
+--source include/kill_mysqld.inc
+let $restart_parameters = restart: --innodb-open-files=10 --innodb-read-io-threads=4;
+--source include/start_mysqld.inc
+
+SELECT COUNT(*) FROM t1;
